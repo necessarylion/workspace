@@ -12,8 +12,13 @@ struct ViewerView: View {
             if let item = store.current, !store.showsDashboard {
                 content(item)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                Divider()
-                StatusBar(item: item)
+                // Only an editor has a status bar. For everything else the row
+                // had nothing to say but the repository's name, which the
+                // sidebar and the breadcrumb both already show.
+                if let document = item.document, case .text = document.content {
+                    Divider()
+                    StatusBar(document: document)
+                }
             } else {
                 WelcomeView()
             }
@@ -43,8 +48,8 @@ struct ViewerView: View {
             } label: {
                 Image(systemName: "sidebar.leading")
             }
-            .pointerCursor()
             .help("Show or hide the repositories sidebar (⌘0)")
+            .pointerCursor()
 
             Button {
                 store.goBack()
@@ -52,8 +57,8 @@ struct ViewerView: View {
                 Image(systemName: "chevron.left")
             }
             .disabled(!store.canGoBack)
-            .pointerCursor(store.canGoBack)
             .help(store.backTitle.map { "Back to \($0)" } ?? "Back")
+            .pointerCursor(store.canGoBack)
 
             Button {
                 store.goForward()
@@ -61,8 +66,8 @@ struct ViewerView: View {
                 Image(systemName: "chevron.right")
             }
             .disabled(!store.canGoForward)
-            .pointerCursor(store.canGoForward)
             .help(store.forwardTitle.map { "Forward to \($0)" } ?? "Forward")
+            .pointerCursor(store.canGoForward)
 
             if let item = store.current, !store.showsDashboard {
                 openItem(item)
@@ -78,8 +83,8 @@ struct ViewerView: View {
                     Image(systemName: "eye")
                 }
                 .toggleStyle(.button)
-                .pointerCursor()
                 .help("Preview Markdown")
+                .pointerCursor()
             }
 
             if let item = store.current, !store.showsDashboard {
@@ -88,12 +93,12 @@ struct ViewerView: View {
                 } label: {
                     Image(systemName: "xmark")
                 }
-                .pointerCursor()
                 .help(
                     item.isTerminal
                         ? "Back to the dashboard — the shells keep running (⇧⌘W)"
                         : "Close and go back to the dashboard (⇧⌘W)"
                 )
+                .pointerCursor()
             }
 
             if store.selectedProject != nil, store.showsNavigator {
@@ -110,21 +115,29 @@ struct ViewerView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 165)
+                // Its natural width, not a fixed one: given more room than it
+                // needs a segmented control centres itself inside it, and the
+                // slack at the right end pushed these tabs out of line with the
+                // pull request's tabs below, which size themselves the same way.
+                .fixedSize()
                 .pointerCursor()
             }
 
-            // Last in the row, so it stays put as the tabs come and go.
+            // Last in the row, so it stays put as the tabs come and go. Its
+            // width is fixed, and the pull request bar below ends in a control
+            // of the same width and padding, so both segmented pickers line up
+            // down the right edge whatever glyph either button happens to use.
             Button {
                 withAnimation { store.showsNavigator.toggle() }
             } label: {
                 Image(systemName: "sidebar.trailing")
             }
-            .pointerCursor()
+            .frame(width: AppMetrics.barTrailingControlWidth)
             .help("Show or hide files, PRs and info (⌥⌘0)")
+            .pointerCursor()
         }
         .buttonStyle(.borderless)
-        .padding(.horizontal, 10)
+        .padding(.horizontal, AppMetrics.barHorizontalPadding)
         .frame(height: 38)
         .background(.bar)
     }
@@ -248,42 +261,32 @@ struct ViewerView: View {
 
 // MARK: - Status bar
 
+/// Where the caret is and what the language server makes of the file. Shown
+/// under the editor only.
 struct StatusBar: View {
-    let item: ViewerItem
+    let document: OpenDocument
 
     var body: some View {
         HStack(spacing: 12) {
-            if let document = item.document, case .text = document.content {
-                Text("Ln \(document.caretLine), Col \(document.caretColumn)")
-                Text(document.languageName)
-                if document.errorCount > 0 {
-                    Label("\(document.errorCount)", systemImage: "xmark.octagon.fill")
-                        .foregroundStyle(.red)
-                }
-                if document.warningCount > 0 {
-                    Label("\(document.warningCount)", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                }
-                Spacer()
-                if !document.languageServerStatus.isEmpty {
-                    Text(document.languageServerStatus)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Text("\(document.lineCount) lines")
-                if document.isDirty {
-                    Text("Unsaved").foregroundStyle(.orange)
-                }
-            } else if item.diff != nil {
-                // Counts live in the diff's own bar; don't repeat them here.
-                Text(item.subtitle ?? item.title)
+            Text("Ln \(document.caretLine), Col \(document.caretColumn)")
+            Text(document.languageName)
+            if document.errorCount > 0 {
+                Label("\(document.errorCount)", systemImage: "xmark.octagon.fill")
+                    .foregroundStyle(.red)
+            }
+            if document.warningCount > 0 {
+                Label("\(document.warningCount)", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+            }
+            Spacer()
+            if !document.languageServerStatus.isEmpty {
+                Text(document.languageServerStatus)
                     .lineLimit(1)
-                    .truncationMode(.head)
-                Spacer()
-            } else {
-                Text(item.subtitle ?? item.title)
-                    .lineLimit(1)
-                Spacer()
+                    .truncationMode(.middle)
+            }
+            Text("\(document.lineCount) lines")
+            if document.isDirty {
+                Text("Unsaved").foregroundStyle(.orange)
             }
         }
         .font(.caption.monospacedDigit())
@@ -459,9 +462,7 @@ struct PullRequestTile: View {
         Button(action: open) {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("#\(pr.number)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                    PullRequestNumber(pr: pr)
                     Spacer(minLength: 0)
                     if pr.isDraft {
                         Pill(text: "draft", color: .secondary)
@@ -502,9 +503,9 @@ struct PullRequestTile: View {
             )
         }
         .buttonStyle(.plain)
-        .pointerCursor()
         .onHover { isHovering = $0 }
         .help(pr.title)
+        .pointerCursor()
     }
 }
 

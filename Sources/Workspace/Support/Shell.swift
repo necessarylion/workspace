@@ -3,8 +3,11 @@ import Foundation
 /// Runs command line tools (`git`, `gh`, `bkt`, `claude`) off the main actor.
 ///
 /// Everything goes through a login shell on purpose: a GUI app inherits a bare
-/// `PATH`, so `gh` in /opt/homebrew/bin or `bkt` under ~/.gvm would not be found
-/// otherwise.
+/// `PATH`, so `gh` in /opt/homebrew/bin would not be found otherwise. A login
+/// shell alone is not enough either — version managers (gvm, nvm, pyenv) extend
+/// `PATH` from ~/.zshrc, which zsh only reads when it is *interactive*, so `bkt`
+/// under ~/.gvm stays invisible. `InteractivePath` resolves that fuller `PATH`
+/// once and every command inherits it.
 enum Shell {
     struct Output: Sendable {
         let status: Int32
@@ -43,10 +46,26 @@ enum Shell {
         timeout: TimeInterval = 60,
         environment: [String: String] = [:]
     ) async -> Output {
+        // The resolved PATH goes in first, so a caller that passes its own still
+        // wins.
+        var merged: [String: String] = [:]
+        if let path = await InteractivePath.shared.value() {
+            merged["PATH"] = path
+        }
+        merged.merge(environment) { _, new in new }
+        return await execute(["-lc", script], in: directory, timeout: timeout, environment: merged)
+    }
+
+    fileprivate static func execute(
+        _ arguments: [String],
+        in directory: URL? = nil,
+        timeout: TimeInterval = 60,
+        environment: [String: String] = [:]
+    ) async -> Output {
         await Task.detached(priority: .userInitiated) {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: loginShell)
-            process.arguments = ["-lc", script]
+            process.arguments = arguments
             if let directory {
                 process.currentDirectoryURL = directory
             }
@@ -107,8 +126,45 @@ enum Shell {
         "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    /// Whether a tool is on the login shell's PATH.
+    /// Whether a tool is on the resolved PATH.
     static func isAvailable(_ tool: String) async -> Bool {
         await runScript("command -v \(quote(tool))", timeout: 10).isSuccess
+    }
+}
+
+/// The `PATH` an interactive login shell would have, resolved once.
+///
+/// Starting an interactive shell runs the user's whole ~/.zshrc — version
+/// manager hooks and all — which is far too slow to pay for on every `git
+/// status`. So it happens once and the answer is reused.
+private actor InteractivePath {
+    static let shared = InteractivePath()
+
+    /// A `Task` rather than a plain cached string: concurrent first callers then
+    /// await one resolution instead of each starting their own shell.
+    private var resolution: Task<String?, Never>?
+
+    func value() async -> String? {
+        if let resolution { return await resolution.value }
+        let task = Task { await Self.resolve() }
+        resolution = task
+        return await task.value
+    }
+
+    private static func resolve() async -> String? {
+        // A marker line, because an interactive rc file is free to print
+        // whatever it likes to stdout before we get a word in.
+        let marker = "__workspace_path__"
+        let output = await Shell.execute(
+            ["-ilc", "printf '\\n\(marker)%s\\n' \"$PATH\""],
+            timeout: 20
+        )
+        guard let line = output.stdout
+            .split(separator: "\n")
+            .last(where: { $0.hasPrefix(marker) })
+        else { return nil }
+
+        let path = line.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
+        return path.isEmpty ? nil : path
     }
 }

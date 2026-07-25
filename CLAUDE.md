@@ -44,8 +44,11 @@ The app is one window with three panes, and the mental model that drives the cod
   PRs, listening ports, lazy file tree.
 - **`Support/Shell.swift`** — the only way external tools are run. Everything goes
   through the user's **login shell** (`$SHELL -lc`) on purpose, because a GUI app
-  inherits a bare PATH. It quotes arguments, uses temp files instead of pipes
-  (avoids deadlock), and enforces a timeout. Route any new git/gh/bkt/claude
+  inherits a bare PATH. A login shell alone still misses version managers (gvm,
+  nvm, pyenv), which extend PATH from `~/.zshrc` — zsh only reads that when
+  interactive — so `InteractivePath` resolves `$PATH` once via `$SHELL -ilc` and
+  injects it into every command. It quotes arguments, uses temp files instead of
+  pipes (avoids deadlock), and enforces a timeout. Route any new git/gh/bkt/claude
   invocation through it.
 - **Host abstraction** — `PullRequest.swift` / `PullRequestComment.swift` define a
   unified PR model with separate `gh` and `bkt` loaders. New PR features must be

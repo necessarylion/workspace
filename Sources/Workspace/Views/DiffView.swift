@@ -361,8 +361,8 @@ struct DiffLayoutBar: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .pointerCursor()
                 .help("Show one diff with every change in the working tree")
+                .pointerCursor()
             }
 
             Spacer()
@@ -404,8 +404,8 @@ struct DiffLayoutPicker: View {
         // a permanent hole in the bar.
         .fixedSize()
         .controlSize(.small)
-        .pointerCursor()
         .help("Show the diff unified or side by side")
+        .pointerCursor()
     }
 }
 
@@ -448,8 +448,8 @@ struct DiffFileHeader: View {
             .background(.quaternary.opacity(0.3))
         }
         .buttonStyle(.plain)
-        .pointerCursor()
         .help(isCollapsed ? "Show the changes in this file" : "Hide the changes in this file")
+        .pointerCursor()
     }
 
     private var changeSymbol: String {
@@ -643,7 +643,7 @@ struct AddCommentButton: View {
                 .background(.tint, in: RoundedRectangle(cornerRadius: 4))
         }
         .buttonStyle(.plain)
-        .pointerCursor()
         .help("Comment on this line")
+        .pointerCursor()
     }
 }

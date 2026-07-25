@@ -60,13 +60,13 @@ struct InfoPanelView: View {
                 Button {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(project.url.path, forType: .string)
-                    store.statusMessage = "Path copied"
+                    store.showStatus("Path copied")
                 } label: {
                     Image(systemName: "doc.on.doc")
                 }
                 .buttonStyle(.plain)
-                .pointerCursor()
                 .help("Copy path")
+                .pointerCursor()
             }
         }
     }
@@ -169,8 +169,8 @@ struct InfoPanelView: View {
                                 Image(systemName: "safari")
                             }
                             .buttonStyle(.plain)
-                            .pointerCursor()
                             .help("Open http://localhost:\(port.port)")
+                            .pointerCursor()
                         }
                     }
                     // The whole row answers a right-click, not just the text.

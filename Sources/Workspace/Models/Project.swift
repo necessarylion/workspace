@@ -127,6 +127,115 @@ final class Project: Identifiable {
         root.reloadChildren()
     }
 
+    // MARK: - Staging, committing, pushing
+
+    /// Whatever is in the commit box. It lives on the project rather than in the
+    /// view so switching navigator tabs does not throw a half-written message
+    /// away.
+    var commitMessage = ""
+
+    /// Set while a git command is running, so the buttons can go quiet and no
+    /// second command starts on top of the first.
+    var isRunningGitCommand = false
+
+    /// What the last staging, commit or push printed when it failed.
+    var gitError: String?
+
+    var stagedChanges: [GitStatus.Change] { gitStatus?.changes.filter(\.isStaged) ?? [] }
+    var unstagedChanges: [GitStatus.Change] { gitStatus?.changes.filter { !$0.isStaged } ?? [] }
+
+    func stage(_ paths: [String]) async {
+        await runGit(["add", "--"] + paths)
+    }
+
+    /// `git restore --staged` leaves the working tree alone, so unstaging never
+    /// costs the user their edits.
+    func unstage(_ paths: [String]) async {
+        await runGit(["restore", "--staged", "--"] + paths)
+    }
+
+    func stageAll() async {
+        await runGit(["add", "--all"])
+    }
+
+    /// True when the commit was made. `--only` with the staged paths would be
+    /// the same thing here: plain `git commit` already commits just the index.
+    @discardableResult
+    func commit() async -> Bool {
+        let message = commitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else {
+            gitError = "Write a commit message first."
+            return false
+        }
+        guard await runGit(["commit", "-m", message]) else { return false }
+        commitMessage = ""
+        return true
+    }
+
+    /// Pushes the current branch, setting an upstream the first time so the user
+    /// does not have to run the `--set-upstream` line git suggests by hand.
+    @discardableResult
+    func push() async -> Bool {
+        let upstream = await Shell.run(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            in: url,
+            timeout: 15
+        )
+        if upstream.isSuccess {
+            return await runGit(["push"])
+        }
+        guard let branch = gitStatus?.branch, branch != "detached" else {
+            gitError = "Not on a branch, so there is nothing to push."
+            return false
+        }
+        return await runGit(["push", "--set-upstream", "origin", branch])
+    }
+
+    /// Switches to an existing branch. A pull request's source branch is often
+    /// only on the remote, and git can only create a local branch from it once
+    /// that ref has been fetched — so fetch first when there is no local branch
+    /// yet. A failed fetch is not fatal: an earlier fetch may already have left
+    /// the remote-tracking ref behind, and the checkout below reports the real
+    /// problem if it has not.
+    @discardableResult
+    func checkout(_ branch: String) async -> Bool {
+        let isLocal = await Shell.run(
+            ["git", "rev-parse", "--verify", "--quiet", "refs/heads/\(branch)"],
+            in: url,
+            timeout: 15
+        ).isSuccess
+        if !isLocal {
+            await runGit(["fetch", "origin", branch])
+        }
+        return await runGit(["checkout", branch])
+    }
+
+    /// Runs one git command and reloads the status, so the list always shows
+    /// what git thinks rather than what the button hoped for.
+    @discardableResult
+    private func runGit(_ arguments: [String]) async -> Bool {
+        guard !isRunningGitCommand else { return false }
+        isRunningGitCommand = true
+        gitError = nil
+        defer { isRunningGitCommand = false }
+
+        let result = await Shell.run(
+            ["git"] + arguments,
+            in: url,
+            timeout: 180,
+            // Without this a push that needs a password waits for a terminal
+            // that is not there, and the command hangs until it times out.
+            environment: ["GIT_TERMINAL_PROMPT": "0"]
+        )
+        if !result.isSuccess {
+            gitError = result.failureMessage.isEmpty
+                ? "git \(arguments.first ?? "") failed."
+                : result.failureMessage
+        }
+        await refreshGitStatus()
+        return result.isSuccess
+    }
+
     private static func loadHeadCommit(in directory: URL) async -> Commit? {
         // Unit separators keep the fields apart even when a subject has commas.
         let result = await Shell.run(

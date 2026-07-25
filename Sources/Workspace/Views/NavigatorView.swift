@@ -83,6 +83,7 @@ struct FileListView: View {
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
+                .help("Clear the filter")
                 .pointerCursor()
             }
         }
@@ -92,11 +93,13 @@ struct FileListView: View {
         .frame(height: 38)
     }
 
-    /// One row per visible (expanded) node, depth first.
+    /// One row per visible (expanded) node, depth first. With the ignored files
+    /// toggled off, an ignored folder is dropped whole — nothing inside it is
+    /// tracked either.
     private var visibleRows: [FileTreeEntry] {
         var result: [FileTreeEntry] = []
         func walk(_ node: FileNode, depth: Int) {
-            for child in node.children ?? [] {
+            for child in children(of: node) {
                 result.append(FileTreeEntry(node: child, depth: depth))
                 if child.isDirectory && child.isExpanded {
                     walk(child, depth: depth + 1)
@@ -105,6 +108,12 @@ struct FileListView: View {
         }
         walk(project.root, depth: 0)
         return result
+    }
+
+    private func children(of node: FileNode) -> [FileNode] {
+        let children = node.children ?? []
+        guard !store.showsIgnoredFiles else { return children }
+        return children.filter { !project.isIgnored($0.url) }
     }
 
     // A hand-drawn tree instead of `List`: the sidebar list style forces tall,
@@ -143,19 +152,32 @@ struct FileListView: View {
             .padding(.horizontal, 6)
         }
         .safeAreaInset(edge: .bottom) {
-            HStack {
-                Text("\(project.root.children?.count ?? 0) items")
+            HStack(spacing: 12) {
+                Text("\(children(of: project.root).count) items")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
+                Button {
+                    store.showsIgnoredFiles.toggle()
+                } label: {
+                    Image(systemName: store.showsIgnoredFiles ? "eye" : "eye.slash")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(store.showsIgnoredFiles ? AnyShapeStyle(.primary) : AnyShapeStyle(.tint))
+                .help(
+                    store.showsIgnoredFiles
+                        ? "Hide the files .gitignore covers"
+                        : "Show the files .gitignore covers"
+                )
+                .pointerCursor()
                 Button {
                     project.reloadFileTree()
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.plain)
-                .pointerCursor()
                 .help("Reload the file tree")
+                .pointerCursor()
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
@@ -321,8 +343,8 @@ struct PullRequestListView: View {
                         Image(systemName: "arrow.clockwise")
                     }
                     .buttonStyle(.plain)
-                    .pointerCursor()
                     .help("Reload pull requests")
+                    .pointerCursor()
                 }
             }
             .padding(.horizontal, 12)
@@ -346,9 +368,7 @@ struct PullRequestCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("#\(pr.number)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                PullRequestNumber(pr: pr)
                 Text(pr.title)
                     .font(.callout.weight(.medium))
                     .lineLimit(2)
@@ -397,6 +417,14 @@ struct ChangeListView: View {
     @Environment(WorkspaceStore.self) private var store
     let project: Project
 
+    private var isBusy: Bool { project.isRunningGitCommand }
+
+    private var canCommit: Bool {
+        !isBusy
+            && !project.stagedChanges.isEmpty
+            && !project.commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
         Group {
             if let status = project.gitStatus {
@@ -407,54 +435,7 @@ struct ChangeListView: View {
                         description: Text("Nothing to commit on \(status.branch).")
                     )
                 } else {
-                    // "View All Changes" lives in the diff's own bar in the
-                    // centre pane, next to the file count.
-                    List(selection: Binding(
-                        get: { store.current.flatMap { item -> String? in
-                            guard case .workingDiff(_, let path, _) = item.kind else { return nil }
-                            return path
-                        } },
-                        set: { path in
-                            guard let path,
-                                  let change = status.changes.first(where: { $0.path == path }) else { return }
-                            store.openWorkingDiff(project: project, change: change)
-                        }
-                    )) {
-                        ForEach(status.changes) { change in
-                            HStack(spacing: 7) {
-                                Image(systemName: change.symbol)
-                                    .foregroundStyle(color(for: change))
-                                    .font(.caption)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text((change.path as NSString).lastPathComponent)
-                                        .lineLimit(1)
-                                    // A file at the root has no folder above
-                                    // it; an empty line here would still take
-                                    // its height and push the name off centre.
-                                    let directory = (change.path as NSString).deletingLastPathComponent
-                                    if !directory.isEmpty {
-                                        Text(directory)
-                                            .font(.caption)
-                                            .foregroundStyle(.tertiary)
-                                            .lineLimit(1)
-                                            .truncationMode(.head)
-                                    }
-                                }
-                                Spacer()
-                                Text(change.label)
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .contentShape(Rectangle())
-                            .pointerCursor()
-                            .tag(change.path)
-                            .help(change.path)
-                        }
-                    }
-                    .listStyle(.sidebar)
-                    // A sidebar list paints its own vibrant background, which
-                    // read as a different shade to every other tab here.
-                    .scrollContentBackground(.hidden)
+                    changeList(status)
                 }
             } else {
                 ContentUnavailableView(
@@ -466,29 +447,206 @@ struct ChangeListView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .safeAreaInset(edge: .bottom) {
-            HStack {
-                Text("\(project.changeCount) changed")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    Task { await project.refreshGitStatus() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.plain)
-                .pointerCursor()
-                .help("Reload git status")
+            // Shown even on a clean tree: that is exactly the state a branch is
+            // in between committing and pushing.
+            if project.gitStatus != nil {
+                commitBox
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(.bar)
         }
         // The working tree moves under us — reload whenever this tab is shown,
         // rather than showing whatever the last scan found.
         .task(id: project.id) {
             await project.refreshGitStatus()
         }
+    }
+
+    /// Staged first, then the rest, each group with its own bulk action — the
+    /// order the two piles are worked through.
+    private func changeList(_ status: GitStatus) -> some View {
+        // "View All Changes" lives in the diff's own bar in the centre pane,
+        // next to the file count.
+        List(selection: Binding(
+            get: { store.current.flatMap { item -> String? in
+                guard case .workingDiff(_, let path, _) = item.kind else { return nil }
+                return path
+            } },
+            set: { path in
+                guard let path,
+                      let change = status.changes.first(where: { $0.path == path }) else { return }
+                store.openWorkingDiff(project: project, change: change)
+            }
+        )) {
+            if !project.stagedChanges.isEmpty {
+                Section {
+                    ForEach(project.stagedChanges) { row($0) }
+                } header: {
+                    header("Staged", count: project.stagedChanges.count, action: "Unstage All") {
+                        let paths = project.stagedChanges.map(\.path)
+                        Task { await project.unstage(paths) }
+                    }
+                }
+            }
+            if !project.unstagedChanges.isEmpty {
+                Section {
+                    ForEach(project.unstagedChanges) { row($0) }
+                } header: {
+                    header("Changes", count: project.unstagedChanges.count, action: "Stage All") {
+                        Task { await project.stageAll() }
+                    }
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        // A sidebar list paints its own vibrant background, which read as a
+        // different shade to every other tab here.
+        .scrollContentBackground(.hidden)
+    }
+
+    private func row(_ change: GitStatus.Change) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: change.symbol)
+                .foregroundStyle(color(for: change))
+                .font(.caption)
+            VStack(alignment: .leading, spacing: 1) {
+                Text((change.path as NSString).lastPathComponent)
+                    .lineLimit(1)
+                // A file at the root has no folder above it; an empty line here
+                // would still take its height and push the name off centre.
+                let directory = (change.path as NSString).deletingLastPathComponent
+                if !directory.isEmpty {
+                    Text(directory)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+            }
+            Spacer()
+            // The label this replaces is in the row's tooltip, and the coloured
+            // symbol already says what kind of change it is.
+            Button {
+                let paths = [change.path]
+                Task {
+                    if change.isStaged {
+                        await project.unstage(paths)
+                    } else {
+                        await project.stage(paths)
+                    }
+                }
+            } label: {
+                Image(systemName: change.isStaged ? "minus.circle" : "plus.circle")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .disabled(isBusy)
+            .help(change.isStaged ? "Unstage this file" : "Stage this file")
+            .pointerCursor(!isBusy)
+        }
+        .contentShape(Rectangle())
+        .help("\(change.label) · \(change.path)")
+        .pointerCursor()
+        .tag(change.path)
+    }
+
+    private func header(
+        _ title: String,
+        count: Int,
+        action: String,
+        run: @escaping () -> Void
+    ) -> some View {
+        HStack {
+            Text("\(title) (\(count))")
+            Spacer()
+            Button(action, action: run)
+                .buttonStyle(.plain)
+                .foregroundStyle(isBusy ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.tint))
+                .disabled(isBusy)
+                .pointerCursor(!isBusy)
+                // A section header is not inset the way the rows below it are,
+                // so without this the text sits against the pane's edge.
+                .padding(.trailing, 8)
+        }
+    }
+
+    // MARK: - Commit box
+
+    private var commitBox: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let error = project.gitError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(4)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if project.changeCount > 0 {
+                TextField(
+                    "Commit message",
+                    text: Binding(
+                        get: { project.commitMessage },
+                        set: { project.commitMessage = $0 }
+                    ),
+                    axis: .vertical
+                )
+                .lineLimit(1...4)
+                .textFieldStyle(.roundedBorder)
+                .font(.callout)
+            }
+
+            HStack(spacing: 8) {
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                if isBusy {
+                    ProgressView().controlSize(.mini)
+                }
+                Button("Commit") {
+                    Task {
+                        if await project.commit() {
+                            store.showStatus("Committed")
+                        }
+                    }
+                }
+                .disabled(!canCommit)
+                .keyboardShortcut(.return, modifiers: .command)
+                .help("Commit the staged files (⌘⏎)")
+                .pointerCursor(canCommit)
+
+                Button {
+                    Task {
+                        if await project.push() {
+                            store.showStatus("Pushed")
+                        }
+                    }
+                } label: {
+                    Label(pushTitle, systemImage: "arrow.up")
+                }
+                .disabled(isBusy)
+                .help("Push this branch to its remote")
+                .pointerCursor(!isBusy)
+            }
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.bar)
+    }
+
+    /// What git has: staged, unstaged, and commits waiting to go out.
+    private var summary: String {
+        var parts: [String] = []
+        if !project.stagedChanges.isEmpty { parts.append("\(project.stagedChanges.count) staged") }
+        if !project.unstagedChanges.isEmpty { parts.append("\(project.unstagedChanges.count) changed") }
+        if parts.isEmpty { parts.append("clean") }
+        return parts.joined(separator: " · ")
+    }
+
+    private var pushTitle: String {
+        guard let ahead = project.gitStatus?.ahead, ahead > 0 else { return "Push" }
+        return "Push \(ahead)"
     }
 
     private func color(for change: GitStatus.Change) -> Color {
@@ -599,9 +757,9 @@ struct NewTerminalCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .pointerCursor()
         .onHover { isHovering = $0 }
         .help("Start another shell in \(repository) (⌘T)")
+        .pointerCursor()
     }
 }
 
@@ -640,8 +798,8 @@ struct TerminalCard: View {
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .opacity(isHovering ? 1 : 0)
-            .pointerCursor()
             .help("Close this terminal")
+            .pointerCursor()
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)

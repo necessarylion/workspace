@@ -1,4 +1,78 @@
+import AppKit
 import SwiftUI
+
+/// Marks an inline `code` span. A run's own `backgroundColor` only ever paints a
+/// square fill, so the rounded chip is drawn by `CodeChipRenderer`, which reads
+/// this attribute back off the laid-out text.
+///
+/// It has to be carried by `Text.customAttribute` rather than set on the
+/// `AttributedString`: a custom attribute put on the string does not survive
+/// into the text layout, so the renderer never sees it.
+@available(macOS 15.0, *)
+private struct CodeChip: TextAttribute {}
+
+/// Draws the rounded fills for a line of text and *nothing else* — this renders
+/// the backdrop layer, and the glyphs are drawn by the selectable copy on top.
+@available(macOS 15.0, *)
+private struct CodeChipRenderer: TextRenderer {
+    var color: Color
+    var cornerRadius: CGFloat = 4
+
+    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+        for line in layout {
+            for rect in chipRects(in: line) {
+                context.fill(
+                    Path(roundedRect: rect, cornerRadius: cornerRadius),
+                    with: .color(color)
+                )
+            }
+        }
+    }
+
+    /// One rect per code span on the line. Touching runs are merged, so a span
+    /// that the parser split in two still reads as a single chip; a span broken
+    /// across lines gets one rounded chip per line, which is what we want.
+    private func chipRects(in line: Text.Layout.Line) -> [CGRect] {
+        var rects: [CGRect] = []
+        for run in line where run[CodeChip.self] != nil {
+            let rect = run.typographicBounds.rect
+            if let last = rects.last, last.maxX >= rect.minX - 0.5 {
+                rects[rects.count - 1] = last.union(rect)
+            } else {
+                rects.append(rect)
+            }
+        }
+        return rects
+    }
+}
+
+/// Puts a second, identical copy of the text behind the real one to paint the
+/// chips.
+///
+/// SwiftUI ignores a `textRenderer` on text that is selectable, and the whole
+/// preview is selectable, so the renderer cannot be attached to the text the
+/// reader sees. The backdrop copy opts out of selection, so it keeps the
+/// renderer — and being the same string at the same font and width, it lays out
+/// line for line the same, which puts every chip exactly where its span is.
+private struct CodeChipBackdrop: ViewModifier {
+    let text: Text
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.background(alignment: .topLeading) {
+                text
+                    .textSelection(.disabled)
+                    .textRenderer(CodeChipRenderer(color: MarkdownText.chipColor))
+                    .accessibilityHidden(true)
+                    .allowsHitTesting(false)
+            }
+        } else {
+            // No `TextRenderer` before macOS 15; `inlineText` falls back to a
+            // square fill there, so there is nothing to lay underneath.
+            content
+        }
+    }
+}
 
 /// Full-page Markdown view for `.md` files: `MarkdownText` in a scroll view.
 struct MarkdownPreview: View {
@@ -49,15 +123,15 @@ struct MarkdownText: View {
     private func view(for block: Block) -> some View {
         switch block {
         case .heading(let level, let text):
-            Text(inline(text))
+            inline(text, baseSize: headingSize(level))
                 .font(headingFont(level))
                 .padding(.top, level <= 2 ? 8 : 4)
         case .paragraph(let text):
-            Text(inline(text))
+            inline(text)
         case .bullet(let indent, let text):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(indent > 0 ? "◦" : "•").foregroundStyle(.secondary)
-                Text(inline(text))
+                inline(text)
             }
             .padding(.leading, CGFloat(indent) * 16)
         case .numbered(let indent, let number, let text):
@@ -65,7 +139,7 @@ struct MarkdownText: View {
                 Text("\(number).")
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
-                Text(inline(text))
+                inline(text)
             }
             .padding(.leading, CGFloat(indent) * 16)
         case .task(let done, let text):
@@ -76,13 +150,13 @@ struct MarkdownText: View {
                 // No strikethrough on a ticked item: the box already says it is
                 // done, and struck-through text is the harder to read the more
                 // there is of it.
-                Text(inline(text))
+                inline(text)
                     .foregroundStyle(done ? .secondary : .primary)
             }
         case .quote(let text):
             HStack(alignment: .top, spacing: 10) {
                 Rectangle().fill(.quaternary).frame(width: 3)
-                Text(inline(text)).foregroundStyle(.secondary)
+                inline(text).foregroundStyle(.secondary)
             }
         case .code(let code):
             ScrollView(.horizontal) {
@@ -107,7 +181,7 @@ struct MarkdownText: View {
                 // `maxWidth: .infinity` makes a cell take the whole column.
                 GridRow {
                     ForEach(headers.indices, id: \.self) { column in
-                        Text(inline(headers[column]))
+                        inline(headers[column])
                             .font(.callout.weight(.semibold))
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(.horizontal, 10)
@@ -121,7 +195,7 @@ struct MarkdownText: View {
                     Divider()
                     GridRow {
                         ForEach(rows[index].indices, id: \.self) { column in
-                            Text(inline(rows[index][column]))
+                            inline(rows[index][column])
                                 // Take as many lines as the wrapped text needs
                                 // rather than being squeezed onto one.
                                 .fixedSize(horizontal: false, vertical: true)
@@ -165,22 +239,74 @@ struct MarkdownText: View {
         }
     }
 
-    private func inline(_ source: String) -> AttributedString {
-        var attributed = (try? AttributedString(
+    /// One line of styled text, with the chip backdrop layered behind it.
+    private func inline(_ source: String, baseSize: CGFloat = MarkdownText.bodySize) -> some View {
+        let text = inlineText(source, baseSize: baseSize)
+        // Both layers are the same `Text`, and `.font`/`.foregroundStyle` set by
+        // the caller reach the backdrop through the environment, so the two
+        // always agree on how the text is laid out.
+        return text.modifier(CodeChipBackdrop(text: text))
+    }
+
+    /// `baseSize` is the point size of the block the text sits in, so a code
+    /// span can be set one point below whatever surrounds it — including inside
+    /// a heading, where the run would otherwise be left at body size.
+    /// Returns a `Text` rather than an `AttributedString` because the chip
+    /// attribute can only be attached per `Text`. Concatenating with `+` still
+    /// leaves one `Text`, so the whole thing wraps as a single paragraph.
+    private func inlineText(_ source: String, baseSize: CGFloat) -> Text {
+        let parsed = (try? AttributedString(
             markdown: source,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )) ?? AttributedString(source)
 
         // SwiftUI renders `inline code` monospaced but paints nothing behind
-        // it, so in a wall of prose it barely reads as code. The font is left
-        // alone — only the chip is added, so code inside a heading still takes
-        // the heading's size.
-        for run in attributed.runs {
-            guard let intent = run.inlinePresentationIntent,
-                  intent.contains(.code) else { continue }
-            attributed[run.range].backgroundColor = .secondary.opacity(0.22)
+        // it, so in a wall of prose it barely reads as code.
+        var result = Text(verbatim: "")
+        for run in parsed.runs {
+            var piece = AttributedString(parsed[run.range])
+            guard run.inlinePresentationIntent?.contains(.code) == true else {
+                result = result + Text(piece)
+                continue
+            }
+            // The fill cannot be inset, so the breathing room at each end has
+            // to be real text: a narrow no-break space, styled like the code so
+            // the fill covers it and no line break can land between the padding
+            // and the code.
+            var pad = AttributedString("\u{202F}")
+            pad.mergeAttributes(run.attributes)
+            piece = pad + piece + pad
+            // A point down from its surroundings: monospaced letters and digits
+            // run wide, so at a matching size code looks larger than the prose
+            // it is quoted in.
+            piece.font = .system(size: baseSize - 1, design: .monospaced)
+            if #available(macOS 15.0, *) {
+                // Tagged only; `CodeChipBackdrop` paints the rounded fill.
+                result = result + Text(piece).customAttribute(CodeChip())
+            } else {
+                // No `TextRenderer` before macOS 15, so the chip stays square.
+                piece.backgroundColor = Self.chipColor
+                result = result + Text(piece)
+            }
         }
-        return attributed
+        return result
+    }
+
+    static let chipColor = Color.secondary.opacity(0.22)
+
+    /// The point size SwiftUI's default body font resolves to, which every
+    /// block but a heading is set in.
+    static let bodySize = NSFont.preferredFont(forTextStyle: .body).pointSize
+
+    /// The point size of `headingFont(level)`, for sizing code inside a heading.
+    private func headingSize(_ level: Int) -> CGFloat {
+        let style: NSFont.TextStyle = switch level {
+        case 1: .title1
+        case 2: .title2
+        case 3: .title3
+        default: .headline
+        }
+        return NSFont.preferredFont(forTextStyle: style).pointSize
     }
 
     private var blocks: [Block] {

@@ -157,8 +157,8 @@ struct CommentComposer: View {
                 .controlSize(.small)
                 .disabled(isPosting || isEmpty)
                 .keyboardShortcut(.return, modifiers: .command)
-                .pointerCursor(!isPosting && !isEmpty)
                 .help("Post (⌘↩)")
+                .pointerCursor(!isPosting && !isEmpty)
             }
         }
         .onAppear { isFocused = true }

@@ -44,19 +44,32 @@ struct ContentView: View {
         }
     }
 
+    /// A rectangle with softened corners rather than a capsule: a git error runs
+    /// to several lines, and a capsule's ends bow in around them.
+    private static let toastShape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+
     @ViewBuilder
     private var statusToast: some View {
-        if let message = store.statusMessage {
-            Text(message)
+        if let toast = store.statusMessage {
+            let isFailure = toast.kind == .failure
+            Text(toast.text)
                 .font(.callout)
+                .foregroundStyle(isFailure ? AnyShapeStyle(Color.red) : AnyShapeStyle(.primary))
+                .multilineTextAlignment(.leading)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
-                .background(.regularMaterial, in: Capsule())
+                .background(.regularMaterial, in: Self.toastShape)
+                .overlay {
+                    if isFailure {
+                        Self.toastShape.strokeBorder(Color.red.opacity(0.4))
+                    }
+                }
                 .shadow(radius: 6, y: 2)
                 .padding(.bottom, 40)
                 .transition(.opacity)
-                .task(id: message) {
-                    try? await Task.sleep(for: .seconds(2.5))
+                .task(id: toast) {
+                    // A failure is worth reading, so it lingers.
+                    try? await Task.sleep(for: .seconds(isFailure ? 6 : 2.5))
                     store.statusMessage = nil
                 }
         }

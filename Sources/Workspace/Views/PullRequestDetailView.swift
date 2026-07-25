@@ -3,37 +3,14 @@ import SwiftUI
 
 /// A pull request: metadata, description, conversation, and its diff.
 ///
-/// A slim summary bar names the pull request whatever you are looking at; below
-/// it one tab at a time owns the rest of the window, so the diff is no longer
-/// stuck in the lower half.
+/// A single slim bar says where the pull request comes from and goes to; the
+/// tabs that pick what fills the rest of the window live up in the window
+/// header, next to back and forward.
 struct PullRequestDetailView: View {
     @Environment(WorkspaceStore.self) private var store
     let item: ViewerItem
     let pr: PullRequest
     let project: Project
-
-    private enum Tab: String, CaseIterable, Identifiable {
-        case details, diff, builds
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .details: "Details"
-            case .diff: "Diff"
-            case .builds: "Builds"
-            }
-        }
-
-        var symbol: String {
-            switch self {
-            case .details: "bubble.left.and.bubble.right"
-            case .diff: "plusminus"
-            case .builds: "hammer"
-            }
-        }
-    }
-
-    @State private var tab: Tab = .details
 
     /// Thread roots that hang off a line of the diff, keyed by that line. A
     /// thread whose line is no longer in the diff simply does not appear here;
@@ -49,14 +26,11 @@ struct PullRequestDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            VStack(spacing: 0) {
-                summaryBar
-                tabBar
-            }
-            .background(.bar)
+            summaryBar
+                .background(.bar)
             Divider()
 
-            switch tab {
+            switch item.pullRequestTab {
             case .details: detailsTab
             case .diff: diffTab
             case .builds: buildsTab
@@ -66,46 +40,101 @@ struct PullRequestDetailView: View {
 
     // MARK: - Summary bar
 
-    /// Two lines that stay put: what this pull request is, and where it goes.
-    /// Anything longer — the description, the conversation — belongs to the
-    /// Details tab.
+    /// One line that stays put: where this pull request comes from and goes to,
+    /// and how it stands. Anything longer — the description, the conversation —
+    /// belongs to the Details tab.
     private var summaryBar: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                Text("#\(pr.number)")
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Text(pr.title)
-                    .font(.callout.weight(.semibold))
-                    .lineLimit(1)
-                    .textSelection(.enabled)
-                if pr.isDraft {
-                    badge("Draft", color: .secondary)
-                }
-                if let review = pr.reviewLabel {
-                    badge(review, color: review == "Approved" ? .green : .orange)
-                }
-                Spacer(minLength: 8)
-                actionsMenu
+        HStack(spacing: 6) {
+            sourceBranch
+            Image(systemName: "arrow.right").foregroundStyle(.secondary)
+            branchChip(pr.targetBranch)
+            if let additions = pr.additions, let deletions = pr.deletions {
+                Text("+\(additions)").foregroundStyle(.green)
+                Text("−\(deletions)").foregroundStyle(.red)
+            }
+            if pr.isDraft {
+                badge("Draft", color: .secondary)
+            }
+            if let review = pr.reviewLabel {
+                badge(review, color: review == "Approved" ? .green : .orange)
             }
 
-            HStack(spacing: 6) {
-                branchChip(pr.sourceBranch)
-                Image(systemName: "arrow.right").foregroundStyle(.secondary)
-                branchChip(pr.targetBranch)
-                if let additions = pr.additions, let deletions = pr.deletions {
-                    Text("+\(additions)").foregroundStyle(.green)
-                    Text("−\(deletions)").foregroundStyle(.red)
-                }
+            Spacer(minLength: 8)
+
+            if item.pullRequestTab == .details, !item.comments.isEmpty {
+                Text("\(item.comments.count) comments")
+                    .foregroundStyle(.secondary)
             }
-            .font(.caption.monospaced())
+            tabPicker
+            actionsMenu
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 7)
+        .font(.caption.monospaced())
+        // Same inset as the header above it, so the tab picker at this end of
+        // the row sits directly under the navigator's.
+        .padding(.horizontal, AppMetrics.barHorizontalPadding)
+        .padding(.vertical, 7)
     }
 
-    /// The four actions, folded into a menu so the bar stays two lines tall.
+    /// The branch the pull request comes from, followed by the two things one
+    /// actually does with it. The target branch stays a plain chip: there is
+    /// nothing to check out there.
+    private var sourceBranch: some View {
+        HStack(spacing: 4) {
+            branchChip(pr.sourceBranch)
+            barButton("doc.on.doc", help: "Copy “\(pr.sourceBranch)”") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(pr.sourceBranch, forType: .string)
+                store.showStatus("Branch copied")
+            }
+            barButton(
+                "arrow.down.circle",
+                help: "Check out “\(pr.sourceBranch)”"
+            ) {
+                checkout()
+            }
+            .disabled(project.isRunningGitCommand)
+        }
+    }
+
+    private func barButton(
+        _ symbol: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.callout)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        // Before `pointerCursor`, not after: the pointer style claims the
+        // hover region, and a `help` added on top of it never shows a tooltip.
+        .help(help)
+        .pointerCursor()
+    }
+
+    /// Details, diff and builds, at the right end of the bar — the title of the
+    /// pull request they belong to is up in the window header.
+    private var tabPicker: some View {
+        Picker("", selection: Binding(
+            get: { item.pullRequestTab },
+            set: { item.pullRequestTab = $0 }
+        )) {
+            ForEach(ViewerItem.PullRequestTab.allCases) { tab in
+                Label(tab.title, systemImage: tab.symbol).tag(tab)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        // A segmented control centres itself in whatever width it is given
+        // rather than filling it, so ask for its own width and let the
+        // branches at the other end give way instead.
+        .fixedSize()
+        .font(.callout)
+        .pointerCursor()
+    }
+
+    /// What is left once copy and check out have their own buttons, folded into a
+    /// menu so the bar stays one line tall.
     private var actionsMenu: some View {
         Menu {
             if let url = pr.url {
@@ -114,11 +143,6 @@ struct PullRequestDetailView: View {
                 } label: {
                     Label("Open in Browser", systemImage: "safari")
                 }
-            }
-            Button {
-                checkout()
-            } label: {
-                Label("Check Out Branch", systemImage: "arrow.down.circle")
             }
             Button {
                 reviewWithClaude()
@@ -133,40 +157,16 @@ struct PullRequestDetailView: View {
             }
         } label: {
             Image(systemName: "ellipsis.circle")
+                .font(.body)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .pointerCursor()
+        // Same width as the navigator toggle that ends the header, which is
+        // what puts this bar's tab picker under that one.
+        .frame(width: AppMetrics.barTrailingControlWidth)
         .help("Actions for this pull request")
-    }
-
-    private var tabBar: some View {
-        HStack {
-            Picker("", selection: $tab) {
-                ForEach(Tab.allCases) { option in
-                    Label(option.title, systemImage: option.symbol).tag(option)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            // A segmented control centres itself in whatever width it is
-            // given rather than filling it, so ask for its own width and let
-            // the stack put it against the left edge.
-            .fixedSize()
-            .pointerCursor()
-
-            Spacer()
-
-            if tab == .details, !item.comments.isEmpty {
-                Text("\(item.comments.count) comments")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-        }
-        // Lined up with the number and branches above it.
-        .padding(.horizontal, 12)
-        .padding(.bottom, 7)
+        .pointerCursor()
     }
 
     // MARK: - Tabs
@@ -176,6 +176,8 @@ struct PullRequestDetailView: View {
     private var detailsTab: some View {
         ConversationView(item: item, pr: pr, project: project) {
             VStack(alignment: .leading, spacing: 10) {
+                // No title here: the window header already names the pull
+                // request, and the description reads as its own thing.
                 HStack(spacing: 8) {
                     Label(pr.author, systemImage: "person.crop.circle")
                     Label {
@@ -278,18 +280,19 @@ struct PullRequestDetailView: View {
             .foregroundStyle(color)
     }
 
+    /// Plain git, the same for every host: `gh pr checkout` and `bkt pr checkout`
+    /// both go out to the host for a branch name git already knows. It runs
+    /// without a terminal — the toast says whether it worked, and git's own
+    /// message says why it did not.
     private func checkout() {
-        let command: String
-        switch pr.host {
-        case .github:
-            command = GitHubCLI.terminalCommand(
-                "gh pr checkout \(pr.number)",
-                account: project.gitHubAccount
-            )
-        case .bitbucket: command = "bkt pr checkout \(pr.number)"
-        case .unknown: command = "git fetch origin \(Shell.quote(pr.sourceBranch))"
+        Task {
+            if await project.checkout(pr.sourceBranch) {
+                store.showStatus("Checked out \(pr.sourceBranch)")
+            } else {
+                store.showError(project.gitError
+                    ?? "Could not check out \(pr.sourceBranch).")
+            }
         }
-        store.openTerminal(in: project, runningCommand: command, title: "Checkout #\(pr.number)")
     }
 
     private func reviewWithClaude() {

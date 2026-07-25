@@ -44,8 +44,9 @@ enum BrandArtwork {
     @MainActor
     private static func render(_ name: String) -> NSImage? {
         guard let path = BrandPath.all[name] else { return nil }
+        let grid = BrandPath.grid(for: name)
         let svg = """
-        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="\(path)"/></svg>
+        <svg viewBox="0 0 \(grid) \(grid)" xmlns="http://www.w3.org/2000/svg"><path d="\(path)"/></svg>
         """
         guard let image = NSImage(data: Data(svg.utf8)) else { return nil }
         image.isTemplate = true
@@ -70,6 +71,29 @@ struct GitHostIcon: View {
             BrandMark(name: name, size: size, color: isMuted ? .secondary : host.tint)
         } else {
             Image(systemName: host.symbol)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+// MARK: - Pull requests
+
+/// A pull request's number, led by the pull-request mark both hosts use on the
+/// web rather than a hash. Green while the request is live, grey once it is only
+/// a draft — the same reading as the pill beside it.
+struct PullRequestNumber: View {
+    let pr: PullRequest
+    var size: CGFloat = 11
+
+    var body: some View {
+        HStack(spacing: 3) {
+            BrandMark(
+                name: "pull-request",
+                size: size,
+                color: pr.isDraft ? .secondary : .green
+            )
+            Text("\(pr.number)")
+                .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
     }

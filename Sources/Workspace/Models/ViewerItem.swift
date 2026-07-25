@@ -23,6 +23,30 @@ final class ViewerItem: Identifiable {
         }
     }
 
+    /// Which part of a pull request the viewer is showing. It lives here rather
+    /// than in the view because the picker sits up in the window header, next to
+    /// back and forward, and each pull request remembers where you left it.
+    enum PullRequestTab: String, CaseIterable, Identifiable {
+        case details, diff, builds
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .details: "Details"
+            case .diff: "Diff"
+            case .builds: "Builds"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .details: "bubble.left.and.bubble.right"
+            case .diff: "plusminus"
+            case .builds: "hammer"
+            }
+        }
+    }
+
     enum DiffLayout: String, CaseIterable, Identifiable {
         case split, unified
         var id: String { rawValue }
@@ -56,6 +80,7 @@ final class ViewerItem: Identifiable {
     var isLoading = false
     var errorMessage: String?
     var diffLayout: DiffLayout = .split
+    var pullRequestTab: PullRequestTab = .details
 
     nonisolated var id: String { kind.key }
 
@@ -78,6 +103,10 @@ final class ViewerItem: Identifiable {
     }
 
     var isDirty: Bool { document?.isDirty ?? false }
+
+    nonisolated var isPullRequest: Bool {
+        if case .pullRequest = kind { true } else { false }
+    }
 
     /// Terminals are the one item the store never throws away on its own.
     nonisolated var isTerminal: Bool {

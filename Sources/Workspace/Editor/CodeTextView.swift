@@ -191,7 +191,7 @@ final class CodeTextView: NSTextView {
             for level in 0..<levels {
                 // Set into the character cell rather than on the column
                 // boundary, so the rule sits between the text and its edge.
-                let x = (fragment.minX + CGFloat(level) * step + columnWidth * 0.75).rounded()
+                let x = (fragment.minX + CGFloat(level) * step + columnWidth * 0.8).rounded()
                 NSRect(x: x, y: fragment.minY, width: thickness, height: fragment.height).fill()
             }
         }

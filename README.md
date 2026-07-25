@@ -38,15 +38,16 @@ Nothing appears in the app until you add a repository folder yourself.
 | --- | --- |
 | Repositories | Add any folder; the remote is detected from `origin` (GitHub, Bitbucket Cloud, Bitbucket Data Center, including SSH aliases like `bitbucket-ajzkk`). Remembered between launches. |
 | GitHub accounts | Logged in to `gh` with more than one account? Adding a GitHub repo asks which one it belongs to, and every later `gh` call for that repo uses it — the choice is remembered between launches and changed from the repo's context menu or the Info tab. Nothing global is switched: each call carries that account's token in `GH_TOKEN`, so your own shell and your other repos are untouched. |
-| Pull requests | Open PRs per repo via `gh pr list` / `bkt pr list`. A slim bar keeps the number, title, review state and branches in view, and the rest is **three tabs**: **Details** (description plus the conversation — existing comments and a box to post a new one, `gh pr comment` / `bkt pr comment`), **Diff** (the whole window, see below), and **Builds** (pipeline status — not wired up yet). |
+| Pull requests | Open PRs per repo via `gh pr list` / `bkt pr list`. The title sits in the window header next to back/forward; a slim bar under it keeps branches, line counts and review state on the left and, on the right, the **three tabs** that pick what fills the window: **Details** (description plus the conversation — existing comments and a box to post a new one, `gh pr comment` / `bkt pr comment`), **Diff** (the whole window, see below), and **Builds** (pipeline status — not wired up yet). The source branch carries a **copy** and a **check out** button; checkout runs git in the background (fetching the branch first when it is only on the remote) and reports success or git's own error in a toast. |
 | Comment threads | Replies are shown **nested under the comment they answer**, at any depth, and each one has its own **Reply** box. Every author's name gets a **colour of their own**, derived from the name so it is the same in every thread and every launch. Bitbucket threads every comment; on GitHub only inline review comments thread, so Reply appears on those (`.../comments/{id}/replies`). |
 | Inline comments | A comment anchored to a line appears **in the diff, under that line**, with its replies nested. Hover any line and the **+** in the gutter starts a new thread there — in split view the column you click picks the side (before / after the change), in unified view the line does. Works in both layouts and on both hosts. |
+| Changes tab | The working tree in two groups, **Staged** and **Changes**, each with a bulk **Stage All** / **Unstage All**; the **+** / **−** on a row moves that one file. Below them a **commit box**: write a message, **Commit** (⌘⏎) the staged files, then **Push** — which shows how many commits are waiting (`Push 2`) and sets the upstream itself the first time the branch goes out. Unstaging uses `git restore --staged`, so it never touches your edits. Whatever git prints on a failure is shown in the box. |
 | Diffs | `git diff` for working-tree changes (per file or **all changes at once**) and `gh/bkt pr diff` for PRs, rendered **side by side** (default) or unified, with **tree-sitter syntax colours**. |
-| File tree | Every file, **dotfiles included** (`.env`, `.mcp.json`, `.github`) — only `.git`, `.build`, `.swiftpm`, `node_modules` and `DerivedData` are hidden. Anything `.gitignore` covers is **faded** but still there to open. Each row carries the **real logo** of what it is (TypeScript, React, Docker, Postgres, …) in that ecosystem's colour, and repositories show the **GitHub or Bitbucket mark**. |
+| File tree | Every file, **dotfiles included** (`.env`, `.mcp.json`, `.github`) — only `.git`, `.build`, `.swiftpm`, `node_modules` and `DerivedData` are hidden. Anything `.gitignore` covers is **faded** but still there to open, and the **eye button** in the pane's bottom bar hides those rows entirely when they are only noise. Each row carries the **real logo** of what it is (TypeScript, React, Docker, Postgres, …) in that ecosystem's colour, and repositories show the **GitHub or Bitbucket mark**. |
 | Editor | Our own: `NSTextView` + **tree-sitter** highlighting + **LSP**. Gutter with line numbers and diagnostic markers, caret-line highlight, auto-indent, bracket matching, soft wrap toggle. |
 | Language servers | Started lazily per language and project root: diagnostics (squiggles + gutter dots + hover), completions (⌃Space), hover help, and ⌘-click go-to-definition. See the table below. |
 | Info tab | Folder path, remote, GitHub account, branch, head commit, **listening ports** for processes started inside the folder (right-click one to open it, copy its URL, or **stop the process** holding it), running language servers, and one-click **Open in** VS Code / Cursor / Sublime / Zed / Finder / Terminal. |
-| Terminal | Embedded **libghostty** (the [Ghostty](https://github.com/ghostty-org/ghostty) engine) rooted at the repo, **any number of shells** per repo, switched from the Terminals tab rather than a tab bar in the viewer. Your own Ghostty theme/font config applies. Used for PR checkout and Claude Code runs. |
+| Terminal | Embedded **libghostty** (the [Ghostty](https://github.com/ghostty-org/ghostty) engine) rooted at the repo, **any number of shells** per repo, switched from the Terminals tab rather than a tab bar in the viewer. Your own Ghostty theme/font config applies. Used for Claude Code runs. |
 | Terminals tab | Every shell that is still running, across all repos, newest first. A shell **keeps running until you close its tab** — leaving the terminal, opening a file or switching repo never kills it, and "Open Terminal" returns to the one you had. |
 
 ### Language servers
@@ -80,6 +81,7 @@ All tools run through your login shell, so a GUI app still sees your normal PATH
 ```sh
 Scripts/run.sh          # build, wrap in Workspace.app, launch
 Scripts/bundle.sh       # build + bundle only, prints the .app path
+Scripts/make-icon.sh    # rebuild Resources/AppIcon.icns from icon.png
 ```
 
 Or open `Package.swift` in Xcode and run.
@@ -111,7 +113,7 @@ resolve from GitHub instead.
 | ⌃⌘P | Create PR with Claude Code |
 | ⌃Space | Completions |
 | ⌘-click | Go to definition |
-| ⌘↩ | Post the PR comment you typed |
+| ⌘↩ | Post the PR comment you typed · commit the staged files |
 
 ## Layout of the source
 

@@ -44,6 +44,11 @@ final class WorkspaceStore {
     var navigatorTab: NavigatorTab = .files
     var fileSearchText = ""
 
+    /// Whether the file tree lists what `.gitignore` covers. On by default —
+    /// those files are still part of the folder — and the files pane has a
+    /// toggle for the times they are only noise.
+    var showsIgnoredFiles = true
+
     // Panel visibility, so the View menu can reach it too.
     var showsProjects = true
     var showsNavigator = true
@@ -89,7 +94,19 @@ final class WorkspaceStore {
     /// Render Markdown files instead of editing them.
     var markdownPreview = false
     var wrapsLines = false
-    var statusMessage: String?
+    /// The toast at the bottom of the window. Set it through `showStatus` or
+    /// `showError` so the kind is never left over from the message before.
+    var statusMessage: StatusToast?
+
+    func showStatus(_ text: String) {
+        statusMessage = StatusToast(text: text)
+    }
+
+    /// For anything that failed — the toast draws itself in red and stays up
+    /// longer, because a git error is several lines worth reading.
+    func showError(_ text: String) {
+        statusMessage = StatusToast(text: text, kind: .failure)
+    }
 
     // GitHub accounts
     /// Every account `gh` is logged in to, loaded once on demand.
@@ -527,11 +544,10 @@ final class WorkspaceStore {
 
     func openPullRequest(_ pr: PullRequest, project: Project) {
         let kind = ViewerItem.Kind.pullRequest(projectID: project.id, number: pr.number)
-        let item = items[kind.key] ?? ViewerItem(
-            kind: kind,
-            title: "#\(pr.number)",
-            subtitle: project.name
-        )
+        // The header names the pull request by its title alone — the number and
+        // the repository are already on screen in the pane below and in the
+        // repositories sidebar.
+        let item = items[kind.key] ?? ViewerItem(kind: kind, title: pr.title)
         item.pullRequest = pr
         present(item)
         // The viewer shows one pull request, so the navigator switches to the
@@ -585,9 +601,9 @@ final class WorkspaceStore {
                 replyingTo: parent,
                 in: project.url
             )
-            statusMessage = parent == nil
+            showStatus(parent == nil
                 ? "Comment posted on #\(pr.number)"
-                : "Reply posted on #\(pr.number)"
+                : "Reply posted on #\(pr.number)")
             await loadComments(item, project: project, pr: pr)
         } catch {
             item.commentError = error.localizedDescription
@@ -612,7 +628,7 @@ final class WorkspaceStore {
                 at: anchor,
                 in: project.url
             )
-            statusMessage = "Comment posted on \(anchor.path):\(anchor.line)"
+            showStatus("Comment posted on \(anchor.path):\(anchor.line)")
             await loadComments(item, project: project, pr: pr)
         } catch {
             item.commentError = error.localizedDescription
@@ -744,12 +760,12 @@ final class WorkspaceStore {
         guard let document = current?.document else { return }
         do {
             try document.save()
-            statusMessage = "Saved \(document.name)"
+            showStatus("Saved \(document.name)")
             if let project = project(containing: document.url) {
                 Task { await project.refreshGitStatus() }
             }
         } catch {
-            statusMessage = "Could not save \(document.name): \(error.localizedDescription)"
+            showError("Could not save \(document.name): \(error.localizedDescription)")
         }
     }
 
@@ -771,9 +787,11 @@ final class WorkspaceStore {
                 in: project.url,
                 timeout: 20
             )
-            statusMessage = result.isSuccess
-                ? "Opened \(project.name) in \(tool.title)"
-                : "\(tool.title) is not installed (\(tool.executable) not on PATH)."
+            if result.isSuccess {
+                showStatus("Opened \(project.name) in \(tool.title)")
+            } else {
+                showError("\(tool.title) is not installed (\(tool.executable) not on PATH).")
+            }
         }
     }
 
@@ -784,7 +802,20 @@ final class WorkspaceStore {
         guard !query.isEmpty else { return [] }
         return project.root.flattenedLoadedDescendants()
             .filter { !$0.isDirectory && $0.name.localizedCaseInsensitiveContains(query) }
+            .filter { showsIgnoredFiles || !project.isIgnored($0.url) }
     }
+}
+
+/// A short-lived message at the bottom of the window. The kind only decides how
+/// it is drawn and how long it stays: a failure is worth noticing, a
+/// confirmation is not.
+struct StatusToast: Equatable {
+    enum Kind {
+        case success, failure
+    }
+
+    var text: String
+    var kind: Kind = .success
 }
 
 /// Editors we offer to hand a project over to.
