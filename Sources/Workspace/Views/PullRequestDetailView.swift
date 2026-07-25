@@ -2,95 +2,112 @@ import AppKit
 import SwiftUI
 
 /// A pull request: metadata, description, conversation, and its diff.
+///
+/// A slim summary bar names the pull request whatever you are looking at; below
+/// it one tab at a time owns the rest of the window, so the diff is no longer
+/// stuck in the lower half.
 struct PullRequestDetailView: View {
     @Environment(WorkspaceStore.self) private var store
     let item: ViewerItem
     let pr: PullRequest
     let project: Project
 
-    private enum Pane: String, CaseIterable, Identifiable {
-        case diff, conversation
+    private enum Tab: String, CaseIterable, Identifiable {
+        case details, diff, builds
         var id: String { rawValue }
-        var title: String { self == .diff ? "Diff" : "Conversation" }
-        var symbol: String { self == .diff ? "plusminus" : "bubble.left.and.bubble.right" }
+
+        var title: String {
+            switch self {
+            case .details: "Details"
+            case .diff: "Diff"
+            case .builds: "Builds"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .details: "bubble.left.and.bubble.right"
+            case .diff: "plusminus"
+            case .builds: "hammer"
+            }
+        }
     }
 
-    @State private var pane: Pane = .diff
+    @State private var tab: Tab = .details
+
+    /// Thread roots that hang off a line of the diff, keyed by that line. A
+    /// thread whose line is no longer in the diff simply does not appear here;
+    /// it is still listed in the conversation, so nothing is lost.
+    private var inlineThreads: [DiffLineAnchor: [PullRequestCommentNode]] {
+        var grouped: [DiffLineAnchor: [PullRequestCommentNode]] = [:]
+        for node in PullRequestComment.tree(from: item.comments) {
+            guard let anchor = node.comment.anchor else { continue }
+            grouped[anchor, default: []].append(node)
+        }
+        return grouped
+    }
 
     var body: some View {
-        VSplitView {
-            header
-                .frame(minHeight: 150, idealHeight: 230)
+        VStack(spacing: 0) {
             VStack(spacing: 0) {
-                panePicker
-                Divider()
-                switch pane {
-                case .diff: diffSection
-                case .conversation: ConversationView(item: item, pr: pr, project: project)
-                }
+                summaryBar
+                tabBar
             }
-            .frame(minHeight: 220)
+            .background(.bar)
+            Divider()
+
+            switch tab {
+            case .details: detailsTab
+            case .diff: diffTab
+            case .builds: buildsTab
+            }
         }
     }
 
-    // MARK: - Header
+    // MARK: - Summary bar
 
-    private var header: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("#\(pr.number)")
-                        .font(.title3.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    Text(pr.title)
-                        .font(.title3.weight(.semibold))
-                        .textSelection(.enabled)
+    /// Two lines that stay put: what this pull request is, and where it goes.
+    /// Anything longer — the description, the conversation — belongs to the
+    /// Details tab.
+    private var summaryBar: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Text("#\(pr.number)")
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Text(pr.title)
+                    .font(.callout.weight(.semibold))
+                    .lineLimit(1)
+                    .textSelection(.enabled)
+                if pr.isDraft {
+                    badge("Draft", color: .secondary)
                 }
-
-                HStack(spacing: 8) {
-                    Label(pr.author, systemImage: "person.crop.circle")
-                    Label(pr.host.displayName, systemImage: pr.host.symbol)
-                    if pr.isDraft {
-                        badge("Draft", color: .secondary)
-                    }
-                    if let review = pr.reviewLabel {
-                        badge(review, color: review == "Approved" ? .green : .orange)
-                    }
-                    if let updated = pr.updatedAt {
-                        Text("updated \(updated.formatted(.relative(presentation: .named)))")
-                            .foregroundStyle(.secondary)
-                    }
+                if let review = pr.reviewLabel {
+                    badge(review, color: review == "Approved" ? .green : .orange)
                 }
-                .font(.callout)
+                Spacer(minLength: 8)
+                actionsMenu
+            }
 
-                HStack(spacing: 6) {
-                    branchChip(pr.sourceBranch)
-                    Image(systemName: "arrow.right").foregroundStyle(.secondary)
-                    branchChip(pr.targetBranch)
-                    if let additions = pr.additions, let deletions = pr.deletions {
-                        Text("+\(additions)").foregroundStyle(.green)
-                        Text("−\(deletions)").foregroundStyle(.red)
-                    }
-                }
-                .font(.caption.monospaced())
-
-                actions
-
-                if !pr.body.isEmpty {
-                    Divider()
-                    // The header already scrolls; render the blocks directly
-                    // instead of nesting a second scroll view.
-                    MarkdownText(text: pr.body)
-                        .font(.callout)
+            HStack(spacing: 6) {
+                branchChip(pr.sourceBranch)
+                Image(systemName: "arrow.right").foregroundStyle(.secondary)
+                branchChip(pr.targetBranch)
+                if let additions = pr.additions, let deletions = pr.deletions {
+                    Text("+\(additions)").foregroundStyle(.green)
+                    Text("−\(deletions)").foregroundStyle(.red)
                 }
             }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .font(.caption.monospaced())
         }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 7)
     }
 
-    private var actions: some View {
-        HStack(spacing: 8) {
+    /// The four actions, folded into a menu so the bar stays two lines tall.
+    private var actionsMenu: some View {
+        Menu {
             if let url = pr.url {
                 Button {
                     NSWorkspace.shared.open(url)
@@ -108,52 +125,104 @@ struct PullRequestDetailView: View {
             } label: {
                 Label("Review with Claude Code", systemImage: "sparkles")
             }
+            Divider()
             Button {
                 Task { await store.loadPullRequestDiff(item, project: project, pr: pr) }
             } label: {
                 Label("Reload Diff", systemImage: "arrow.clockwise")
             }
+        } label: {
+            Image(systemName: "ellipsis.circle")
         }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .pointerCursor()
+        .help("Actions for this pull request")
     }
 
-    private var panePicker: some View {
+    private var tabBar: some View {
         HStack {
-            Picker("", selection: $pane) {
-                ForEach(Pane.allCases) { option in
+            Picker("", selection: $tab) {
+                ForEach(Tab.allCases) { option in
                     Label(option.title, systemImage: option.symbol).tag(option)
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: 260)
+            // A segmented control centres itself in whatever width it is
+            // given rather than filling it, so ask for its own width and let
+            // the stack put it against the left edge.
+            .fixedSize()
+            .pointerCursor()
 
             Spacer()
 
-            switch pane {
-            case .diff:
-                if let diff = item.diff, !diff.isEmpty {
-                    Text("+\(diff.addedLines)").foregroundStyle(.green)
-                    Text("−\(diff.removedLines)").foregroundStyle(.red)
-                    DiffLayoutPicker(
-                        layout: Binding(get: { item.diffLayout }, set: { item.diffLayout = $0 })
-                    )
-                }
-            case .conversation:
+            if tab == .details, !item.comments.isEmpty {
                 Text("\(item.comments.count) comments")
-                    .font(.caption)
+                    .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
         }
-        .font(.caption.monospacedDigit())
+        // Lined up with the number and branches above it.
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.bar)
+        .padding(.bottom, 7)
+    }
+
+    // MARK: - Tabs
+
+    /// The description rides at the top of the conversation's own scroll rather
+    /// than above it, so only one thing here ever scrolls.
+    private var detailsTab: some View {
+        ConversationView(item: item, pr: pr, project: project) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Label(pr.author, systemImage: "person.crop.circle")
+                    Label {
+                        Text(pr.host.displayName)
+                    } icon: {
+                        GitHostIcon(host: pr.host, size: 13)
+                    }
+                    if let updated = pr.updatedAt {
+                        Text("updated \(updated.formatted(.relative(presentation: .named)))")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .font(.callout)
+
+                if !pr.body.isEmpty {
+                    MarkdownText(text: pr.body)
+                        .font(.callout)
+                }
+
+                Divider()
+            }
+        }
+    }
+
+    /// Placeholder until build status is read from the host.
+    private var buildsTab: some View {
+        ContentUnavailableView {
+            Label("Pipeline builds", systemImage: "hammer")
+        } description: {
+            Text("Build status for this pull request is not here yet. For now the pipeline lives on \(pr.host.displayName).")
+        } actions: {
+            if let url = pr.url {
+                Button {
+                    NSWorkspace.shared.open(url)
+                } label: {
+                    Label("Open in Browser", systemImage: "safari")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .pointerCursor()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
-    private var diffSection: some View {
+    private var diffTab: some View {
         if item.isLoading {
             ProgressView("Loading diff…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -161,7 +230,28 @@ struct PullRequestDetailView: View {
             DiffView(
                 diff: diff,
                 layout: Binding(get: { item.diffLayout }, set: { item.diffLayout = $0 }),
-                showsControls: false
+                comments: DiffComments(
+                    threads: inlineThreads,
+                    isPosting: item.isPostingComment,
+                    add: { anchor, body in
+                        await store.postInlineComment(
+                            body,
+                            at: anchor,
+                            on: item,
+                            project: project,
+                            pr: pr
+                        )
+                    },
+                    reply: { parent, body in
+                        await store.postComment(
+                            body,
+                            on: item,
+                            project: project,
+                            pr: pr,
+                            replyingTo: parent
+                        )
+                    }
+                )
             )
         } else {
             ContentUnavailableView(
@@ -191,7 +281,11 @@ struct PullRequestDetailView: View {
     private func checkout() {
         let command: String
         switch pr.host {
-        case .github: command = "gh pr checkout \(pr.number)"
+        case .github:
+            command = GitHubCLI.terminalCommand(
+                "gh pr checkout \(pr.number)",
+                account: project.gitHubAccount
+            )
         case .bitbucket: command = "bkt pr checkout \(pr.number)"
         case .unknown: command = "git fetch origin \(Shell.quote(pr.sourceBranch))"
         }
@@ -211,19 +305,43 @@ struct PullRequestDetailView: View {
 // MARK: - Conversation
 
 /// Existing comments, plus a box to add one.
-struct ConversationView: View {
+///
+/// `header` is rendered as the first thing inside the same scroll — the pull
+/// request's description goes there, so the page scrolls as one.
+struct ConversationView<Header: View>: View {
     @Environment(WorkspaceStore.self) private var store
     let item: ViewerItem
     let pr: PullRequest
     let project: Project
+    let header: () -> Header
+
+    init(
+        item: ViewerItem,
+        pr: PullRequest,
+        project: Project,
+        @ViewBuilder header: @escaping () -> Header
+    ) {
+        self.item = item
+        self.pr = pr
+        self.project = project
+        self.header = header
+    }
 
     @State private var draft = ""
     @FocusState private var isComposing: Bool
+    /// The comment whose inline reply box is open, if any.
+    @State private var replyingTo: PullRequestComment?
+
+    private var threads: [PullRequestCommentNode] {
+        PullRequestComment.tree(from: item.comments)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
+                    header()
+
                     if item.isLoadingComments {
                         HStack(spacing: 7) {
                             ProgressView().controlSize(.small)
@@ -241,8 +359,16 @@ struct ConversationView: View {
                             .padding(.top, 8)
                     }
 
-                    ForEach(item.comments) { comment in
-                        CommentBubble(comment: comment)
+                    ForEach(threads) { thread in
+                        CommentThread(
+                            node: thread,
+                            depth: 0,
+                            replyingTo: $replyingTo,
+                            isPosting: item.isPostingComment,
+                            onReply: { parent, body in
+                                await post(body, replyingTo: parent)
+                            }
+                        )
                     }
                 }
                 .padding(14)
@@ -301,6 +427,10 @@ struct ConversationView: View {
                     draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 )
                 .keyboardShortcut(.return, modifiers: .command)
+                .pointerCursor(
+                    !item.isPostingComment &&
+                    !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
                 .help("Post the comment (⌘↩)")
             }
         }
@@ -315,10 +445,90 @@ struct ConversationView: View {
             draft = ""
         }
     }
+
+    /// Posts a reply and closes the inline box once it lands.
+    private func post(_ body: String, replyingTo parent: PullRequestComment) async {
+        await store.postComment(body, on: item, project: project, pr: pr, replyingTo: parent)
+        if item.commentError == nil {
+            replyingTo = nil
+        }
+    }
+}
+
+// MARK: - Threads
+
+/// One comment and, indented beneath it, everything that replies to it.
+struct CommentThread: View {
+    let node: PullRequestCommentNode
+    let depth: Int
+    @Binding var replyingTo: PullRequestComment?
+    let isPosting: Bool
+    let onReply: (PullRequestComment, String) async -> Void
+
+    /// Stop indenting past this depth so deep threads stay readable.
+    private static let maxIndentedDepth = 4
+    private static let indent: CGFloat = 18
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            CommentBubble(
+                comment: node.comment,
+                replyCount: depth == 0 ? totalReplies : 0,
+                isReplying: replyingTo == node.comment,
+                onReplyTapped: {
+                    replyingTo = replyingTo == node.comment ? nil : node.comment
+                }
+            )
+
+            if replyingTo == node.comment {
+                CommentComposer(
+                    prompt: "Reply to \(node.comment.author)…",
+                    sendTitle: "Reply",
+                    isPosting: isPosting,
+                    onCancel: { replyingTo = nil },
+                    onSend: { body in await onReply(node.comment, body) }
+                )
+                .padding(.leading, Self.indent)
+            }
+
+            if !node.replies.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(node.replies) { reply in
+                        CommentThread(
+                            node: reply,
+                            depth: depth + 1,
+                            replyingTo: $replyingTo,
+                            isPosting: isPosting,
+                            onReply: onReply
+                        )
+                    }
+                }
+                .padding(.leading, depth < Self.maxIndentedDepth ? Self.indent : 0)
+                .overlay(alignment: .leading) {
+                    // The rule that ties a reply back to what it answers.
+                    Rectangle()
+                        .fill(.quaternary)
+                        .frame(width: 1)
+                        .padding(.vertical, 2)
+                }
+            }
+        }
+    }
+
+    /// Every descendant, not just the direct children.
+    private var totalReplies: Int {
+        node.replies.reduce(node.replies.count) { total, reply in
+            total + reply.replies.reduce(0) { $0 + 1 + $1.replies.count }
+        }
+    }
 }
 
 struct CommentBubble: View {
     let comment: PullRequestComment
+    /// Shown on a thread root so a collapsed-looking thread still reads as one.
+    var replyCount: Int = 0
+    var isReplying = false
+    var onReplyTapped: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -326,7 +536,8 @@ struct CommentBubble: View {
                 Image(systemName: comment.kind.symbol)
                     .foregroundStyle(tint)
                 Text(comment.author)
-                    .font(.callout.weight(.medium))
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(comment.authorColor)
                 if case .review(let state) = comment.kind {
                     Text(state.replacingOccurrences(of: "_", with: " ").lowercased())
                         .font(.caption2)
@@ -334,6 +545,11 @@ struct CommentBubble: View {
                         .padding(.vertical, 1)
                         .background(tint.opacity(0.16), in: Capsule())
                         .foregroundStyle(tint)
+                }
+                if replyCount > 0 {
+                    Label("\(replyCount)", systemImage: "arrowshape.turn.up.left")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
                 if let date = comment.createdAt {
@@ -358,6 +574,20 @@ struct CommentBubble: View {
             } else {
                 MarkdownText(text: comment.body)
                     .font(.callout)
+            }
+
+            if comment.canReply, let onReplyTapped {
+                Button(action: onReplyTapped) {
+                    Label(
+                        isReplying ? "Cancel reply" : "Reply",
+                        systemImage: "arrowshape.turn.up.left"
+                    )
+                    .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .pointerCursor()
+                .padding(.top, 1)
             }
         }
         .padding(11)

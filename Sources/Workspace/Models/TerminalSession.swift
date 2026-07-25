@@ -11,6 +11,8 @@ final class TerminalSession: Identifiable {
     nonisolated let directory: URL
     /// Live tab title — ghostty updates it from the shell (OSC 0/2).
     var title: String
+    /// When this shell was last brought on screen, for the "recent" ordering.
+    var lastUsedAt = Date()
     /// Called when the shell exits or ghostty asks to close the surface.
     @ObservationIgnored var onExit: (() -> Void)?
     @ObservationIgnored let view: GhosttySurfaceView
@@ -57,4 +59,13 @@ final class TerminalSession: Identifiable {
     func terminate() {
         view.close()
     }
+}
+
+/// One running shell together with the terminal item that holds it, so the
+/// terminals list can show it and put it back on screen.
+struct RecentTerminal: Identifiable {
+    let session: TerminalSession
+    let item: ViewerItem
+
+    nonisolated var id: UUID { session.id }
 }

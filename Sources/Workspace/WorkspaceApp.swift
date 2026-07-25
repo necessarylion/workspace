@@ -10,9 +10,10 @@ struct WorkspaceApp: App {
                 .environment(store)
         }
         .defaultSize(width: 1360, height: 860)
-        // Compact toolbar without the "Workspace" title — the open item is
-        // named by the viewer's own header row, so the title only wasted space.
-        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
+        // No title bar at all: the panes draw their own full-width header rows
+        // and the window's would only add an empty band above them. The traffic
+        // lights float over the leftmost pane, which leaves room for them.
+        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Add Repository…") {
@@ -75,16 +76,17 @@ struct WorkspaceApp: App {
                 .keyboardShortcut("t", modifiers: [.control, .command])
                 .disabled(store.selectedProject == nil)
 
+                // From inside a terminal this adds a tab next to it; from
+                // anywhere else it starts one for the selected repository.
                 Button("New Terminal Tab") {
-                    if let item = store.current, case .terminal = item.kind {
+                    if let item = store.current, item.isTerminal, !store.showsDashboard {
                         store.newTerminalTab(in: item)
+                    } else if let project = store.selectedProject {
+                        store.newTerminal(in: project)
                     }
                 }
                 .keyboardShortcut("t")
-                .disabled({
-                    guard let item = store.current, case .terminal = item.kind else { return true }
-                    return false
-                }())
+                .disabled(store.selectedProject == nil)
 
                 Button("Open in VS Code") {
                     if let project = store.selectedProject {

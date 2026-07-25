@@ -13,14 +13,27 @@ final class CodeTextView: NSTextView {
 
     /// ⌘-click on a character offset — used for go-to-definition.
     var onCommandClick: ((Int) -> Void)?
+    /// The mouse moved over a character offset with ⌘ held (nil when it left,
+    /// or when ⌘ came back up) — used to underline what ⌘-click would open.
+    var onCommandHover: ((Int?) -> Void)?
     /// The mouse rested over a character offset (nil once it leaves).
     var onHover: ((Int?) -> Void)?
+
+    /// The range currently drawn as a link, set by the controller once the
+    /// language server confirms there is somewhere to go.
+    var linkRange: NSRange? {
+        didSet {
+            guard linkRange != oldValue else { return }
+            window?.invalidateCursorRects(for: self)
+        }
+    }
     /// ⌃Space.
     var onRequestCompletion: (() -> Void)?
     /// The caret moved.
     var onSelectionChange: (() -> Void)?
 
     private var trackingArea: NSTrackingArea?
+    private var flagsMonitor: Any?
 
     // MARK: - Set-up
 
@@ -107,11 +120,15 @@ final class CodeTextView: NSTextView {
         }
     }
 
-    // MARK: - Caret line
+    // MARK: - Caret line and indent guides
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
+        drawCaretLine()
+        drawIndentGuides(in: rect)
+    }
 
+    private func drawCaretLine() {
         guard selectedRange().length == 0,
               let layoutManager,
               let container = textContainer else { return }
@@ -129,6 +146,107 @@ final class CodeTextView: NSTextView {
 
         theme.currentLine.setFill()
         fragment.fill()
+    }
+
+    /// One hairline per level of indentation, the way an editor shows which
+    /// block a line belongs to. Only the lines inside `rect` are walked.
+    private func drawIndentGuides(in rect: NSRect) {
+        guard let layoutManager, let container = textContainer else { return }
+        let text = string as NSString
+        guard text.length > 0, indentWidth > 0 else { return }
+
+        // Measured rather than taken from the font's maximum advance, which is
+        // wrong for any font that is not strictly monospaced.
+        let columnWidth = (" " as NSString).size(withAttributes: [.font: theme.font]).width
+        guard columnWidth > 0 else { return }
+        let step = columnWidth * CGFloat(indentWidth)
+        let origin = textContainerOrigin
+
+        // Which lines are actually on screen.
+        let visible = rect.offsetBy(dx: -origin.x, dy: -origin.y)
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: visible, in: container)
+        guard glyphRange.length > 0 else { return }
+        let charRange = text.lineRange(
+            for: layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+        )
+
+        theme.indentGuide.setFill()
+        let thickness: CGFloat = 1
+        let end = NSMaxRange(charRange)
+        var location = charRange.location
+
+        while location < end {
+            let lineRange = text.lineRange(for: NSRange(location: location, length: 0))
+            location = max(NSMaxRange(lineRange), location + 1)
+
+            let levels = guideColumns(ofLineAt: lineRange, in: text) / indentWidth
+            guard levels > 0 else { continue }
+
+            let glyphIndex = layoutManager.glyphIndexForCharacter(at: lineRange.location)
+            guard layoutManager.isValidGlyphIndex(glyphIndex) else { continue }
+            var fragment = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+            guard !fragment.isEmpty else { continue }
+            fragment = fragment.offsetBy(dx: origin.x, dy: origin.y)
+
+            for level in 0..<levels {
+                // Set into the character cell rather than on the column
+                // boundary, so the rule sits between the text and its edge.
+                let x = (fragment.minX + CGFloat(level) * step + columnWidth * 0.75).rounded()
+                NSRect(x: x, y: fragment.minY, width: thickness, height: fragment.height).fill()
+            }
+        }
+    }
+
+    /// The indentation of a line in columns. Blank lines borrow the smaller
+    /// indentation of their nearest non-blank neighbours, so a guide runs
+    /// through the empty lines inside a block instead of breaking up.
+    private func guideColumns(ofLineAt lineRange: NSRange, in text: NSString) -> Int {
+        if let own = indentColumns(ofLineAt: lineRange, in: text) { return own }
+
+        var above = 0
+        var location = lineRange.location
+        var steps = 0
+        while location > 0, steps < 200 {
+            let previous = text.lineRange(for: NSRange(location: location - 1, length: 0))
+            if let columns = indentColumns(ofLineAt: previous, in: text) {
+                above = columns
+                break
+            }
+            location = previous.location
+            steps += 1
+        }
+
+        var below = 0
+        location = NSMaxRange(lineRange)
+        steps = 0
+        while location < text.length, steps < 200 {
+            let next = text.lineRange(for: NSRange(location: location, length: 0))
+            if let columns = indentColumns(ofLineAt: next, in: text) {
+                below = columns
+                break
+            }
+            location = max(NSMaxRange(next), location + 1)
+            steps += 1
+        }
+
+        return min(above, below)
+    }
+
+    /// Nil for a line that holds nothing but whitespace.
+    private func indentColumns(ofLineAt lineRange: NSRange, in text: NSString) -> Int? {
+        var columns = 0
+        var index = lineRange.location
+        let end = NSMaxRange(lineRange)
+        while index < end {
+            switch text.character(at: index) {
+            case 0x20: columns += 1
+            case 0x09: columns += indentWidth - (columns % indentWidth)
+            case 0x0A, 0x0D: return nil
+            default: return columns
+            }
+            index += 1
+        }
+        return nil
     }
 
     override func setSelectedRanges(
@@ -262,7 +380,10 @@ final class CodeTextView: NSTextView {
         if let trackingArea { removeTrackingArea(trackingArea) }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            options: [
+                .mouseMoved, .mouseEnteredAndExited, .cursorUpdate,
+                .activeInKeyWindow, .inVisibleRect
+            ],
             owner: self,
             userInfo: nil
         )
@@ -275,22 +396,94 @@ final class CodeTextView: NSTextView {
         let point = convert(event.locationInWindow, from: nil)
         guard bounds.contains(point) else {
             onHover?(nil)
+            onCommandHover?(nil)
             return
         }
-        onHover?(characterIndexForInsertion(at: point))
+        let offset = characterIndexForInsertion(at: point)
+        if event.modifierFlags.contains(.command) {
+            onCommandHover?(offset)
+        } else {
+            onCommandHover?(nil)
+            onHover?(offset)
+        }
+        if let linkRange, NSLocationInRange(offset, linkRange) {
+            NSCursor.pointingHand.set()
+        }
+    }
+
+    /// Holding or releasing ⌘ without moving the mouse still has to arm or
+    /// clear the link under the pointer.
+    override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        commandStateChanged(event)
+    }
+
+    /// ⌘ is reported to whoever is first responder, which is often not this
+    /// view — a local monitor catches it wherever focus happens to be.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let flagsMonitor {
+            NSEvent.removeMonitor(flagsMonitor)
+            self.flagsMonitor = nil
+        }
+        guard window != nil else { return }
+        flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            self?.commandStateChanged(event)
+            return event
+        }
+    }
+
+    private func commandStateChanged(_ event: NSEvent) {
+        guard let window, window.isKeyWindow else { return }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        guard event.modifierFlags.contains(.command), visibleRect.contains(point) else {
+            onCommandHover?(nil)
+            return
+        }
+        onHover?(nil)
+        onCommandHover?(characterIndexForInsertion(at: point))
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if linkRange != nil {
+            NSCursor.pointingHand.set()
+        } else {
+            super.cursorUpdate(with: event)
+        }
+    }
+
+    /// The link keeps the pointer a hand for as long as it is shown, whatever
+    /// the text view would otherwise put there.
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard let range = linkRange, let rect = boundingRect(forRange: range) else { return }
+        addCursorRect(rect, cursor: .pointingHand)
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         onHover?(nil)
+        onCommandHover?(nil)
     }
 
     override func scrollWheel(with event: NSEvent) {
         onHover?(nil)
+        onCommandHover?(nil)
         super.scrollWheel(with: event)
     }
 
     // MARK: - Geometry helpers
+
+    /// Rect covering a character range, in this view's coordinates.
+    func boundingRect(forRange range: NSRange) -> NSRect? {
+        guard let layoutManager, let container = textContainer else { return nil }
+        let length = (string as NSString).length
+        guard NSMaxRange(range) <= length else { return nil }
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
+        guard !rect.isEmpty else { return nil }
+        return rect.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+    }
 
     /// Rect of a character offset in window coordinates, for popovers.
     func boundingRect(forOffset offset: Int) -> NSRect? {

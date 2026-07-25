@@ -44,6 +44,7 @@ struct InfoPanelView: View {
             }
             .controlSize(.small)
             .buttonStyle(.bordered)
+            .pointerCursor()
         }
     }
 
@@ -64,6 +65,7 @@ struct InfoPanelView: View {
                     Image(systemName: "doc.on.doc")
                 }
                 .buttonStyle(.plain)
+                .pointerCursor()
                 .help("Copy path")
             }
         }
@@ -72,10 +74,13 @@ struct InfoPanelView: View {
     // MARK: - Repository
 
     private var repositorySection: some View {
-        InfoSection(title: "Repository", symbol: project.host.symbol) {
+        InfoSection(title: "Repository", symbol: project.host.symbol, host: project.host) {
             if let remote = project.remote {
                 InfoRow(label: "Host", value: remote.kind.displayName)
                 InfoRow(label: "Repo", value: remote.fullName)
+                if remote.kind == .github {
+                    InfoRow(label: "Account", value: project.gitHubAccount ?? "gh default")
+                }
                 if let url = remote.webURL {
                     Button {
                         NSWorkspace.shared.open(url)
@@ -84,7 +89,15 @@ struct InfoPanelView: View {
                     }
                     .controlSize(.small)
                     .buttonStyle(.bordered)
+                    .pointerCursor()
                     .padding(.top, 2)
+                }
+                if remote.kind == .github {
+                    GitHubAccountMenu(project: project)
+                        .menuStyle(.borderlessButton)
+                        .controlSize(.small)
+                        .fixedSize()
+                        .pointerCursor()
                 }
             } else {
                 Text("No git remote configured.")
@@ -156,10 +169,21 @@ struct InfoPanelView: View {
                                 Image(systemName: "safari")
                             }
                             .buttonStyle(.plain)
+                            .pointerCursor()
                             .help("Open http://localhost:\(port.port)")
                         }
                     }
+                    // The whole row answers a right-click, not just the text.
+                    .contentShape(Rectangle())
+                    .contextMenu { portMenu(for: port) }
                 }
+            }
+
+            if let error = project.portError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
             }
 
             Button {
@@ -169,7 +193,39 @@ struct InfoPanelView: View {
             }
             .controlSize(.small)
             .buttonStyle(.bordered)
+            .pointerCursor()
             .padding(.top, 2)
+        }
+    }
+
+    /// Right-click on a port: open it, copy it, or stop what is holding it.
+    @ViewBuilder
+    private func portMenu(for port: ListeningPort) -> some View {
+        if let url = port.localURL {
+            Button {
+                NSWorkspace.shared.open(url)
+            } label: {
+                Label("Open http://localhost:\(port.port)", systemImage: "safari")
+            }
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(url.absoluteString, forType: .string)
+            } label: {
+                Label("Copy URL", systemImage: "doc.on.doc")
+            }
+        }
+        Divider()
+        Button {
+            Task { await project.stopPort(port) }
+        } label: {
+            Label("Stop \(port.processName) (\(port.pid))", systemImage: "stop.circle")
+        }
+        // Only for a process that ignored the first signal: SIGKILL gives it no
+        // chance to shut its own children down.
+        Button(role: .destructive) {
+            Task { await project.stopPort(port, force: true) }
+        } label: {
+            Label("Force Kill", systemImage: "xmark.octagon")
         }
     }
 
@@ -207,13 +263,24 @@ struct InfoPanelView: View {
 struct InfoSection<Content: View>: View {
     let title: String
     let symbol: String
+    /// Set on the repository section, which shows the host's own mark instead
+    /// of a symbol.
+    var host: GitHostKind?
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Label(title, systemImage: symbol)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+            Label {
+                Text(title)
+            } icon: {
+                if let host, host.brand != nil {
+                    GitHostIcon(host: host, size: 11, isMuted: true)
+                } else {
+                    Image(systemName: symbol)
+                }
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
             content
         }
         .padding(11)

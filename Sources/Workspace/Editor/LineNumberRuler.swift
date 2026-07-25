@@ -105,8 +105,6 @@ final class LineNumberRuler: NSRulerView {
 
         theme.gutterBackground.setFill()
         bounds.fill()
-        NSColor.separatorColor.withAlphaComponent(0.5).setFill()
-        NSRect(x: bounds.maxX - 1, y: bounds.minY, width: 1, height: bounds.height).fill()
 
         let visibleRect = scrollView?.contentView.bounds ?? textView.visibleRect
         let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: container)

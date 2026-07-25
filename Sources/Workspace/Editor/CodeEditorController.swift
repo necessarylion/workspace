@@ -36,6 +36,7 @@ final class CodeEditorController: NSViewController {
 
     private var syncTask: Task<Void, Never>?
     private var hoverTask: Task<Void, Never>?
+    private var linkTask: Task<Void, Never>?
     private var symbolTask: Task<Void, Never>?
     private var completionTask: Task<Void, Never>?
     private var cachedCompletions: [String] = []
@@ -65,6 +66,15 @@ final class CodeEditorController: NSViewController {
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = true
         scrollView.backgroundColor = theme.background
+        // The window uses a full-size content view, so AppKit would otherwise
+        // inset this scroll view for a titlebar it does not actually sit under,
+        // and tile the gutter above its own frame — the gutter then painted a
+        // stray strip up through the header and toolbar.
+        // NSView does not clip by default, so pin the insets and clip as well.
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = .init()
+        scrollView.scrollerInsets = .init()
+        scrollView.clipsToBounds = true
 
         let ruler = LineNumberRuler(textView: textView, scrollView: scrollView)
         ruler.theme = theme
@@ -76,6 +86,7 @@ final class CodeEditorController: NSViewController {
         textView.delegate = self
         textView.textStorage?.delegate = self
         textView.onCommandClick = { [weak self] offset in self?.jumpToDefinition(at: offset) }
+        textView.onCommandHover = { [weak self] offset in self?.commandHoverChanged(to: offset) }
         textView.onHover = { [weak self] offset in self?.hoverChanged(to: offset) }
         textView.onRequestCompletion = { [weak self] in self?.requestCompletion() }
         textView.onSelectionChange = { [weak self] in self?.reportCaret() }
@@ -121,6 +132,10 @@ final class CodeEditorController: NSViewController {
         textView.string = text
         isApplyingExternalText = false
 
+        // Follow the file's own indentation, so Tab, backtab and the indent
+        // guides all line up with what is already there.
+        textView.indentWidth = Self.detectIndentWidth(in: text)
+
         if let highlighter {
             highlighter.setLanguage(language)
             highlighter.setText(text)
@@ -136,6 +151,33 @@ final class CodeEditorController: NSViewController {
         reportCaret()
 
         attachService(text: text)
+    }
+
+    /// The file's own indent step, from the gaps between the indentation of
+    /// consecutive lines. Falls back to four spaces when nothing is indented.
+    private static func detectIndentWidth(in text: String) -> Int {
+        var counts: [Int: Int] = [:]
+        var previous = 0
+        var scanned = 0
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            guard scanned < 500 else { break }
+            // Tabs are their own unit; a tab-indented file needs no guessing.
+            if line.hasPrefix("\t") { return 4 }
+            let indent = line.prefix { $0 == " " }.count
+            guard line.count > indent else { continue }
+            scanned += 1
+            let step = indent - previous
+            if step > 0, step <= 8 { counts[step, default: 0] += 1 }
+            previous = indent
+        }
+
+        // Ties go to the larger step: two levels of two look like one of four
+        // only when four is genuinely as common.
+        let best = counts.max { lhs, rhs in
+            lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value < rhs.value
+        }
+        return best?.key ?? 4
     }
 
     /// Replaces the buffer when the file changed on disk.
@@ -457,20 +499,114 @@ final class CodeEditorController: NSViewController {
     // MARK: - Go to definition
 
     private func jumpToDefinition(at offset: Int) {
-        guard let service, let fileURL, service.status.isHealthy else { return }
+        clearLink()
+        guard let fileURL else { return }
+        guard let service else {
+            onStatusChange?("No language server for \(language.id.rawValue)")
+            return
+        }
+        guard service.status.isHealthy else {
+            onStatusChange?("\(service.definition.displayName): \(service.status.label)")
+            return
+        }
+
         let target = position(for: offset)
+        onStatusChange?("Looking for the definition…")
         Task { [weak self] in
             let locations = await service.definitions(
                 uri: fileURL.absoluteString,
                 position: target
             )
-            guard let self, let target = locations.first, let url = target.fileURL else { return }
+            guard let self else { return }
+            guard let locations else {
+                onStatusChange?("\(service.definition.displayName) did not answer — it may still be indexing")
+                return
+            }
+            guard let target = locations.first, let url = target.fileURL else {
+                // Silence here is what made this look broken; say so instead.
+                onStatusChange?("No definition found")
+                return
+            }
+            onStatusChange?("\(service.definition.displayName) \(service.status.label)")
             if url == fileURL {
                 reveal(line: target.range.start.line)
             } else {
                 onOpenLocation?(url, target.range.start.line)
             }
         }
+    }
+
+    /// ⌘ held over a symbol: ask the server whether there is anywhere to go and,
+    /// if so, underline it and switch the pointer to a hand.
+    private func commandHoverChanged(to offset: Int?) {
+        linkTask?.cancel()
+        guard let offset,
+              let service,
+              let fileURL,
+              service.status.isHealthy,
+              let word = wordRange(at: offset) else {
+            clearLink()
+            return
+        }
+        if textView.linkRange == word { return }
+
+        // Underline straight away: waiting for the server first made ⌘-hover
+        // feel dead. If it turns out there is nowhere to go, take it back.
+        showLink(over: word)
+
+        let target = position(for: offset)
+        linkTask = Task { [weak self] in
+            let locations = await service.definitions(uri: fileURL.absoluteString, position: target)
+            guard !Task.isCancelled, let self, textView.linkRange == word else { return }
+            if locations?.isEmpty ?? true { clearLink() }
+        }
+    }
+
+    private func showLink(over range: NSRange) {
+        guard let layoutManager = textView.layoutManager else { return }
+        clearLink()
+        // Temporary attributes: the document itself is untouched, so this never
+        // shows up as an edit or fights the syntax colouring.
+        layoutManager.addTemporaryAttributes(
+            [
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+                .underlineColor: theme.text
+            ],
+            forCharacterRange: range
+        )
+        textView.linkRange = range
+        textView.window?.invalidateCursorRects(for: textView)
+        NSCursor.pointingHand.set()
+    }
+
+    private func clearLink() {
+        guard let range = textView.linkRange else { return }
+        if let layoutManager = textView.layoutManager,
+           NSMaxRange(range) <= (textView.string as NSString).length {
+            layoutManager.removeTemporaryAttribute(.underlineStyle, forCharacterRange: range)
+            layoutManager.removeTemporaryAttribute(.underlineColor, forCharacterRange: range)
+        }
+        textView.linkRange = nil
+        NSCursor.iBeam.set()
+    }
+
+    /// The identifier around an offset — what the underline should cover.
+    private func wordRange(at offset: Int) -> NSRange? {
+        let text = textView.string as NSString
+        guard offset >= 0, offset <= text.length else { return nil }
+
+        func isWord(_ character: unichar) -> Bool {
+            let scalar = UnicodeScalar(character)
+            guard let scalar else { return false }
+            return CharacterSet.alphanumerics.contains(scalar) || scalar == "_" || scalar == "$"
+        }
+
+        var start = offset
+        while start > 0, isWord(text.character(at: start - 1)) { start -= 1 }
+        var end = offset
+        while end < text.length, isWord(text.character(at: end)) { end += 1 }
+        guard end > start else { return nil }
+        return NSRange(location: start, length: end - start)
     }
 
     // MARK: - Completion

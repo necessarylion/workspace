@@ -11,7 +11,7 @@ import Foundation
 final class WorkspaceStore {
     /// Which list the left sidebar is showing.
     enum NavigatorTab: String, CaseIterable, Identifiable {
-        case files, pullRequests, changes, info
+        case files, pullRequests, changes, terminals, info
 
         var id: String { rawValue }
 
@@ -20,6 +20,7 @@ final class WorkspaceStore {
             case .files: "Files"
             case .pullRequests: "PRs"
             case .changes: "Changes"
+            case .terminals: "Terminals"
             case .info: "Info"
             }
         }
@@ -29,6 +30,7 @@ final class WorkspaceStore {
             case .files: "folder"
             case .pullRequests: "arrow.triangle.pull"
             case .changes: "plusminus"
+            case .terminals: "terminal"
             case .info: "info.circle"
             }
         }
@@ -46,21 +48,59 @@ final class WorkspaceStore {
     var showsProjects = true
     var showsNavigator = true
 
-    /// Show the dashboard instead of whatever is open. History is kept, so Back
-    /// still returns to it.
-    var showsDashboard = true
-
     // Viewer (centre)
     private var items: [String: ViewerItem] = [:]
-    private var history: [String] = []
-    private var historyIndex = -1
+
+    /// Where one repository's viewer was left: its back/forward stack and
+    /// whether the dashboard was on top. Each repository keeps its own, so
+    /// switching repositories lands back on the page that repository was on.
+    private struct ViewerState {
+        var history: [String] = []
+        var index = -1
+        var showsDashboard = true
+    }
+
+    private var viewerStates: [URL: ViewerState] = [:]
+    /// Used while no repository is selected (none added yet).
+    private var detachedState = ViewerState()
+
+    private var viewer: ViewerState {
+        get {
+            guard let id = selectedProjectID else { return detachedState }
+            // A repository not visited yet starts on its dashboard.
+            return viewerStates[id] ?? ViewerState()
+        }
+        set {
+            if let id = selectedProjectID {
+                viewerStates[id] = newValue
+            } else {
+                detachedState = newValue
+            }
+        }
+    }
+
+    /// Show the dashboard instead of whatever is open. History is kept, so Back
+    /// still returns to it.
+    var showsDashboard: Bool {
+        get { viewer.showsDashboard }
+        set { viewer.showsDashboard = newValue }
+    }
 
     /// Render Markdown files instead of editing them.
     var markdownPreview = false
     var wrapsLines = false
     var statusMessage: String?
 
+    // GitHub accounts
+    /// Every account `gh` is logged in to, loaded once on demand.
+    var gitHubAccounts: [GitHubAccount] = []
+    /// Set when a newly added repository still needs an account picked.
+    var gitHubAccountPrompt: GitHubAccountPrompt?
+    /// Repositories added in the same batch, waiting their turn to be asked.
+    private var gitHubAccountQueue: [URL] = []
+
     private let projectsDefaultsKey = "workspace.projects"
+    private let gitHubAccountsDefaultsKey = "workspace.githubAccounts"
     private let historyLimit = 40
 
     init() {
@@ -84,7 +124,14 @@ final class WorkspaceStore {
             selectedProjectID = project.id
         }
         persistProjects()
-        Task { await project.refresh() }
+        Task {
+            // The remote has to be known before we can tell whether this is a
+            // GitHub repository worth asking about, and the pull requests are
+            // only worth loading once the account is settled.
+            await project.refresh(loadPullRequests: false)
+            let asked = await askForGitHubAccountIfNeeded(project)
+            if !asked { await project.refreshPullRequests() }
+        }
     }
 
     func removeProject(_ project: Project) {
@@ -101,8 +148,14 @@ final class WorkspaceStore {
                   url.path.hasPrefix(project.url.path + "/") else { continue }
             items[key] = nil
         }
-        history.removeAll { items[$0] == nil }
-        historyIndex = min(historyIndex, history.count - 1)
+        viewerStates[project.id] = nil
+        for (projectID, var state) in viewerStates {
+            state.history.removeAll { items[$0] == nil }
+            state.index = min(state.index, state.history.count - 1)
+            viewerStates[projectID] = state
+        }
+        detachedState.history.removeAll { items[$0] == nil }
+        detachedState.index = min(detachedState.index, detachedState.history.count - 1)
 
         if selectedProjectID == project.id {
             selectedProjectID = projects.first?.id
@@ -146,59 +199,153 @@ final class WorkspaceStore {
     }
 
     private func restoreProjects() {
+        let accounts = UserDefaults.standard.dictionary(forKey: gitHubAccountsDefaultsKey) as? [String: String] ?? [:]
         let paths = UserDefaults.standard.stringArray(forKey: projectsDefaultsKey) ?? []
         for path in paths where FileManager.default.fileExists(atPath: path) {
             let project = Project(url: URL(fileURLWithPath: path))
+            project.gitHubAccount = accounts[path]
             projects.append(project)
-            Task { await project.refresh() }
         }
         selectedProjectID = projects.first?.id
+
+        // The accounts have to reach `GitHubAccounts` before the first `gh`
+        // call, so the refreshes wait behind that one await.
+        let restored = projects
+        Task {
+            await GitHubAccounts.shared.replaceSelections(accounts)
+            for project in restored {
+                Task { await project.refresh() }
+            }
+        }
+    }
+
+    // MARK: - GitHub accounts
+
+    /// Remembers which account this repository uses and reloads its pull
+    /// requests as that account.
+    func setGitHubAccount(_ login: String?, for project: Project) {
+        guard project.gitHubAccount != login else { return }
+        project.gitHubAccount = login
+
+        var stored = UserDefaults.standard.dictionary(forKey: gitHubAccountsDefaultsKey) as? [String: String] ?? [:]
+        stored[project.url.path] = login
+        UserDefaults.standard.set(stored, forKey: gitHubAccountsDefaultsKey)
+
+        Task {
+            await GitHubAccounts.shared.select(login, forRepositoryAt: project.url.path)
+            await project.refreshPullRequests()
+        }
+    }
+
+    /// Loads the account list, so the pickers have something to show.
+    @discardableResult
+    func loadGitHubAccounts(reloading: Bool = false) async -> [GitHubAccount] {
+        gitHubAccounts = await GitHubAccounts.shared.available(reloading: reloading)
+        return gitHubAccounts
+    }
+
+    /// Asks which account a freshly added GitHub repository belongs to.
+    /// Returns whether it will be asked about — with only one account logged in
+    /// there is nothing to choose, so it never is.
+    @discardableResult
+    func askForGitHubAccountIfNeeded(_ project: Project) async -> Bool {
+        guard project.host == .github, project.gitHubAccount == nil else { return false }
+        let accounts = await loadGitHubAccounts()
+        guard accounts.count > 1, projects.contains(where: { $0.id == project.id }) else { return false }
+
+        // Adding several folders at once queues them up: one sheet, answered in
+        // turn, rather than each replacing the last.
+        guard gitHubAccountPrompt == nil else {
+            if !gitHubAccountQueue.contains(project.id) { gitHubAccountQueue.append(project.id) }
+            return true
+        }
+        gitHubAccountPrompt = prompt(for: project, accounts: accounts)
+        return true
+    }
+
+    private func prompt(for project: Project, accounts: [GitHubAccount]) -> GitHubAccountPrompt {
+        GitHubAccountPrompt(
+            projectID: project.id,
+            suggested: accounts.first(where: \.isActive)?.login ?? accounts[0].login
+        )
+    }
+
+    /// The user answered the sheet, or dismissed it — dismissing leaves the
+    /// repository on `gh`'s active account and asks again next time it is added.
+    func resolveGitHubAccountPrompt(_ login: String?) {
+        guard let answered = gitHubAccountPrompt else { return }
+        gitHubAccountPrompt = nil
+
+        if let project = project(withID: answered.projectID) {
+            if let login {
+                setGitHubAccount(login, for: project)
+            } else {
+                Task { await project.refreshPullRequests() }
+            }
+        }
+
+        // Whatever else was added in the same batch comes next.
+        while let next = gitHubAccountQueue.first {
+            gitHubAccountQueue.removeFirst()
+            guard let project = project(withID: next), project.gitHubAccount == nil,
+                  !gitHubAccounts.isEmpty else { continue }
+            gitHubAccountPrompt = prompt(for: project, accounts: gitHubAccounts)
+            return
+        }
     }
 
     // MARK: - Viewer history
 
     var current: ViewerItem? {
-        guard history.indices.contains(historyIndex) else { return nil }
-        return items[history[historyIndex]]
+        let viewer = viewer
+        guard viewer.history.indices.contains(viewer.index) else { return nil }
+        return items[viewer.history[viewer.index]]
     }
 
+    // The dashboard is the root of the history: Back from the oldest open item
+    // lands there, the way a browser's home page would, and Forward returns.
     var canGoBack: Bool {
-        if showsDashboard { return current != nil }
-        return historyIndex > 0
+        !showsDashboard && current != nil
     }
 
     var canGoForward: Bool {
-        !showsDashboard && historyIndex >= 0 && historyIndex < history.count - 1
+        if showsDashboard { return current != nil }
+        return viewer.index >= 0 && viewer.index < viewer.history.count - 1
     }
 
     /// Titles of what back and forward would show, for the button tooltips.
     var backTitle: String? {
-        // From the dashboard, Back simply returns to what is already open.
-        if showsDashboard { return current?.title }
-        guard history.indices.contains(historyIndex - 1) else { return nil }
-        return items[history[historyIndex - 1]]?.title
+        guard canGoBack else { return nil }
+        let viewer = viewer
+        guard viewer.history.indices.contains(viewer.index - 1) else { return "the dashboard" }
+        return items[viewer.history[viewer.index - 1]]?.title
     }
 
     var forwardTitle: String? {
-        guard !showsDashboard, history.indices.contains(historyIndex + 1) else { return nil }
-        return items[history[historyIndex + 1]]?.title
+        if showsDashboard { return current?.title }
+        let viewer = viewer
+        guard viewer.history.indices.contains(viewer.index + 1) else { return nil }
+        return items[viewer.history[viewer.index + 1]]?.title
     }
 
     func goBack() {
-        // Coming back from the dashboard just shows what was open again.
-        if showsDashboard, current != nil {
-            showsDashboard = false
+        guard canGoBack else { return }
+        // At the oldest item, Back leaves it open and shows the dashboard.
+        if viewer.index <= 0 {
+            showsDashboard = true
             return
         }
-        guard canGoBack else { return }
-        showsDashboard = false
-        historyIndex -= 1
+        viewer.index -= 1
     }
 
     func goForward() {
         guard canGoForward else { return }
-        showsDashboard = false
-        historyIndex += 1
+        // From the dashboard, Forward returns to whatever was open.
+        if showsDashboard {
+            showsDashboard = false
+            return
+        }
+        viewer.index += 1
     }
 
     /// Closes what is open and returns to the dashboard.
@@ -207,11 +354,27 @@ final class WorkspaceStore {
             showsDashboard = true
             return
         }
-        current.terminals.forEach { $0.terminate() }
+        // A terminal is only ever closed tab by tab, by the user. This puts the
+        // dashboard back and leaves its shells running, ready in the Terminals
+        // tab.
+        if current.isTerminal {
+            showsDashboard = true
+            return
+        }
         items[current.id] = nil
-        history.removeAll { $0 == current.id }
-        historyIndex = min(historyIndex, history.count - 1)
+        forgetItem(current.id)
         showsDashboard = true
+    }
+
+    /// Drops a closed item from every repository's history.
+    private func forgetItem(_ id: String) {
+        for (projectID, var state) in viewerStates {
+            state.history.removeAll { $0 == id }
+            state.index = min(state.index, state.history.count - 1)
+            viewerStates[projectID] = state
+        }
+        detachedState.history.removeAll { $0 == id }
+        detachedState.index = min(detachedState.index, detachedState.history.count - 1)
     }
 
     func showDashboard() {
@@ -221,39 +384,61 @@ final class WorkspaceStore {
     /// Shows an item, remembering where we came from.
     private func present(_ item: ViewerItem) {
         items[item.id] = item
+
+        // An item belongs to one repository, so showing it selects that
+        // repository and the item joins that repository's own history.
+        if let owner = owningProjectID(of: item), owner != selectedProjectID {
+            selectedProjectID = owner
+        }
         showsDashboard = false
 
         if current?.id == item.id { return }
 
         // Opening something new discards the forward history, like a browser.
-        if historyIndex >= 0, historyIndex < history.count - 1 {
-            history.removeSubrange((historyIndex + 1)...)
+        if viewer.index >= 0, viewer.index < viewer.history.count - 1 {
+            viewer.history.removeSubrange((viewer.index + 1)...)
         }
-        history.append(item.id)
-        historyIndex = history.count - 1
+        viewer.history.append(item.id)
+        viewer.index = viewer.history.count - 1
         trimHistory()
     }
 
-    /// Keeps memory bounded: drop the oldest entries, but never a file with
-    /// unsaved edits.
+    /// Which repository's history an item belongs in.
+    private func owningProjectID(of item: ViewerItem) -> URL? {
+        switch item.kind {
+        case .file(let url): project(containing: url)?.id
+        case .workingDiff(let projectID, _, _): projectID
+        case .pullRequest(let projectID, _): projectID
+        case .terminal(let projectID): projectID
+        }
+    }
+
+    /// Keeps memory bounded: drop the oldest entries of the current
+    /// repository's history, but never a file with unsaved edits.
     private func trimHistory() {
-        while history.count > historyLimit {
-            guard let oldest = history.first else { break }
+        while viewer.history.count > historyLimit {
+            guard let oldest = viewer.history.first else { break }
             if items[oldest]?.isDirty == true {
                 // Keep it, and stop trimming rather than skipping arbitrarily.
                 break
             }
-            history.removeFirst()
-            historyIndex -= 1
-            if !history.contains(oldest) {
-                items[oldest]?.terminals.forEach { $0.terminate() }
+            viewer.history.removeFirst()
+            viewer.index -= 1
+            // A terminal outlives its history entry: its shells keep running
+            // until the user closes their tabs.
+            if !isOpenAnywhere(oldest), items[oldest]?.isTerminal != true {
                 items[oldest] = nil
             }
         }
     }
 
+    private func isOpenAnywhere(_ id: String) -> Bool {
+        viewerStates.values.contains { $0.history.contains(id) }
+            || detachedState.history.contains(id)
+    }
+
     var openDocuments: [OpenDocument] {
-        history.compactMap { items[$0]?.document }
+        items.values.compactMap(\.document)
     }
 
     var dirtyDocuments: [OpenDocument] {
@@ -279,11 +464,6 @@ final class WorkspaceStore {
         document.revealLine = revealLine
         item.document = document
         present(item)
-
-        // Selecting a file in another project should follow the file.
-        if let owner = project(containing: url), owner.id != selectedProjectID {
-            selectedProjectID = owner.id
-        }
     }
 
     func openWorkingDiff(project: Project, change: GitStatus.Change) {
@@ -354,6 +534,9 @@ final class WorkspaceStore {
         )
         item.pullRequest = pr
         present(item)
+        // The viewer shows one pull request, so the navigator switches to the
+        // list of the rest — the same move opening a terminal makes.
+        navigatorTab = .pullRequests
 
         if item.diff == nil {
             Task { await loadPullRequestDiff(item, project: project, pr: pr) }
@@ -386,12 +569,50 @@ final class WorkspaceStore {
         item.isLoadingComments = false
     }
 
-    func postComment(_ body: String, on item: ViewerItem, project: Project, pr: PullRequest) async {
+    func postComment(
+        _ body: String,
+        on item: ViewerItem,
+        project: Project,
+        pr: PullRequest,
+        replyingTo parent: PullRequestComment? = nil
+    ) async {
         item.isPostingComment = true
         item.commentError = nil
         do {
-            try await PullRequestService.postComment(body, on: pr, in: project.url)
-            statusMessage = "Comment posted on #\(pr.number)"
+            try await PullRequestService.postComment(
+                body,
+                on: pr,
+                replyingTo: parent,
+                in: project.url
+            )
+            statusMessage = parent == nil
+                ? "Comment posted on #\(pr.number)"
+                : "Reply posted on #\(pr.number)"
+            await loadComments(item, project: project, pr: pr)
+        } catch {
+            item.commentError = error.localizedDescription
+        }
+        item.isPostingComment = false
+    }
+
+    /// Comments on one line of the diff, starting a new thread there.
+    func postInlineComment(
+        _ body: String,
+        at anchor: DiffLineAnchor,
+        on item: ViewerItem,
+        project: Project,
+        pr: PullRequest
+    ) async {
+        item.isPostingComment = true
+        item.commentError = nil
+        do {
+            try await PullRequestService.postInlineComment(
+                body,
+                on: pr,
+                at: anchor,
+                in: project.url
+            )
+            statusMessage = "Comment posted on \(anchor.path):\(anchor.line)"
             await loadComments(item, project: project, pr: pr)
         } catch {
             item.commentError = error.localizedDescription
@@ -416,16 +637,68 @@ final class WorkspaceStore {
         )
         if item.terminals.isEmpty || command != nil || title != nil {
             addTerminalTab(to: item, project: project, runningCommand: command, title: title)
+        } else if let session = item.selectedTerminal {
+            selectTerminal(session, in: item)
         }
         present(item)
+        // The viewer shows one shell and has no tab bar, so the navigator
+        // switches to the list of the rest.
+        navigatorTab = .terminals
         return item
     }
 
-    /// The + button in the terminal tab bar.
+    /// Every shell still running, most recently used first. Terminal items are
+    /// never dropped on their own, so this outlives closing the viewer and
+    /// switching repositories.
+    var recentTerminals: [RecentTerminal] {
+        items.values
+            .filter(\.isTerminal)
+            .flatMap { item in item.terminals.map { RecentTerminal(session: $0, item: item) } }
+            .sorted { $0.session.lastUsedAt > $1.session.lastUsedAt }
+    }
+
+    /// Puts one shell from the terminals list back on screen.
+    func showTerminal(_ recent: RecentTerminal) {
+        selectTerminal(recent.session, in: recent.item)
+        present(recent.item)
+    }
+
+    /// Makes a tab the visible one and marks it as the newest in the list.
+    func selectTerminal(_ session: TerminalSession, in item: ViewerItem) {
+        item.selectedTerminalID = session.id
+        session.lastUsedAt = Date()
+    }
+
+    /// Whether this exact shell is what the viewer is showing.
+    func isShowing(_ recent: RecentTerminal) -> Bool {
+        !showsDashboard
+            && current?.id == recent.item.id
+            && recent.item.selectedTerminal?.id == recent.session.id
+    }
+
+    func closeTerminal(_ recent: RecentTerminal) {
+        closeTerminalTab(recent.session, in: recent.item)
+    }
+
+    /// Always starts a fresh shell for a repository, next to any it already has.
+    func newTerminal(in project: Project) {
+        let kind = ViewerItem.Kind.terminal(projectID: project.id)
+        let item = items[kind.key] ?? ViewerItem(
+            kind: kind,
+            title: "Terminal",
+            subtitle: project.name
+        )
+        addTerminalTab(to: item, project: project)
+        present(item)
+        navigatorTab = .terminals
+    }
+
+    /// ⌘T while a terminal is on screen: another shell for the same repository.
     func newTerminalTab(in item: ViewerItem) {
         guard case .terminal(let projectID) = item.kind,
               let project = project(withID: projectID) else { return }
         addTerminalTab(to: item, project: project)
+        navigatorTab = .terminals
     }
 
     private func addTerminalTab(
@@ -461,8 +734,7 @@ final class WorkspaceStore {
 
         guard item.terminals.isEmpty else { return }
         items[item.id] = nil
-        history.removeAll { $0 == item.id }
-        historyIndex = min(historyIndex, history.count - 1)
+        forgetItem(item.id)
         if current == nil { showsDashboard = true }
     }
 
@@ -482,6 +754,14 @@ final class WorkspaceStore {
     }
 
     // MARK: - External tools
+
+    /// The Claude desktop app, only used to borrow its icon.
+    static let claudeBundleIdentifier = "com.anthropic.claudefordesktop"
+
+    /// Starts Claude Code on this repository, in its own terminal tab.
+    func openClaude(in project: Project) {
+        openTerminal(in: project, runningCommand: "claude", title: "Claude")
+    }
 
     /// Opens the project in another editor, if it is installed.
     func openExternally(_ project: Project, using tool: ExternalTool) {

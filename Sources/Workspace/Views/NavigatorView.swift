@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Left sidebar. One project at a time, seen through four tabs.
+/// Left sidebar. One project at a time, seen through five tabs.
 struct NavigatorView: View {
     @Environment(WorkspaceStore.self) private var store
 
@@ -21,6 +21,7 @@ struct NavigatorView: View {
                     Text("Add a repository folder to get started.")
                 } actions: {
                     Button("Add Repository…") { store.promptForProjectFolder() }
+                        .pointerCursor()
                 }
             }
         }
@@ -37,6 +38,8 @@ struct NavigatorView: View {
             PullRequestListView(project: project)
         case .changes:
             ChangeListView(project: project)
+        case .terminals:
+            TerminalListView(project: project)
         case .info:
             InfoPanelView(project: project)
         }
@@ -80,10 +83,13 @@ struct FileListView: View {
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
+                .pointerCursor()
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        // Same height as the header rows in the other two panes, so the tops
+        // of all three line up.
+        .frame(height: 38)
     }
 
     /// One row per visible (expanded) node, depth first.
@@ -109,7 +115,11 @@ struct FileListView: View {
                 let query = store.fileSearchText.trimmingCharacters(in: .whitespaces)
                 if query.isEmpty {
                     ForEach(visibleRows) { entry in
-                        CompactFileRow(node: entry.node, depth: entry.depth)
+                        CompactFileRow(
+                            node: entry.node,
+                            depth: entry.depth,
+                            isIgnored: project.isIgnored(entry.node.url)
+                        )
                     }
                 } else {
                     let results = store.fileSearchResults(in: project)
@@ -120,7 +130,11 @@ struct FileListView: View {
                             .padding(.top, 12)
                     } else {
                         ForEach(results) { node in
-                            CompactFileRow(node: node, depth: 0)
+                            CompactFileRow(
+                                node: node,
+                                depth: 0,
+                                isIgnored: project.isIgnored(node.url)
+                            )
                         }
                     }
                 }
@@ -140,6 +154,7 @@ struct FileListView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.plain)
+                .pointerCursor()
                 .help("Reload the file tree")
             }
             .padding(.horizontal, 12)
@@ -156,11 +171,14 @@ struct FileTreeEntry: Identifiable {
     var id: URL { node.url }
 }
 
-/// One 19pt row: disclosure chevron, icon or language badge, name.
+/// One 19pt row: disclosure chevron, icon, name.
 struct CompactFileRow: View {
     @Environment(WorkspaceStore.self) private var store
     let node: FileNode
     let depth: Int
+    /// Covered by `.gitignore`: still there, still openable, just faded so the
+    /// tracked files stand out.
+    var isIgnored = false
     @State private var isHovering = false
 
     private var isSelected: Bool {
@@ -182,17 +200,18 @@ struct CompactFileRow: View {
                 Color.clear.frame(width: 11, height: 1)
             }
 
-            if !node.isDirectory, let badge = FileIcon.badge(for: node.url) {
-                Text(badge.text)
-                    .font(.system(size: 7, weight: .heavy, design: .rounded))
-                    .foregroundStyle(badge.color)
-                    .frame(width: 14, height: 11)
-                    .background(badge.color.opacity(0.18), in: RoundedRectangle(cornerRadius: 2.5))
+            if !node.isDirectory, let brand = FileIcon.brand(for: node.url) {
+                BrandMark(
+                    name: brand.name,
+                    size: 11,
+                    color: isSelected ? .white : brand.color
+                )
+                .frame(width: 17)
             } else {
                 Image(systemName: FileIcon.symbol(for: node.url, isDirectory: node.isDirectory))
                     .foregroundStyle(FileIcon.tint(for: node.url, isDirectory: node.isDirectory))
                     .font(.system(size: 10))
-                    .frame(width: 14)
+                    .frame(width: 17)
             }
 
             Text(node.name)
@@ -205,6 +224,9 @@ struct CompactFileRow: View {
         }
         .padding(.horizontal, 4)
         .frame(height: 19)
+        // Fades the row's own content only — the selection fill behind it is
+        // added afterwards and stays solid.
+        .opacity(isIgnored && !isSelected ? 0.45 : 1)
         .background(
             isSelected
                 ? AnyShapeStyle(.tint)
@@ -212,6 +234,7 @@ struct CompactFileRow: View {
             in: RoundedRectangle(cornerRadius: 4)
         )
         .contentShape(Rectangle())
+        .pointerCursor()
         .onHover { isHovering = $0 }
         .onTapGesture {
             if node.isDirectory {
@@ -254,6 +277,7 @@ struct PullRequestListView: View {
                     Text(error).font(.callout)
                 } actions: {
                     Button("Try Again") { Task { await project.refreshPullRequests() } }
+                        .pointerCursor()
                 }
             } else if project.pullRequests.isEmpty {
                 ContentUnavailableView(
@@ -267,6 +291,7 @@ struct PullRequestListView: View {
                     LazyVStack(spacing: 7) {
                         ForEach(project.pullRequests) { pr in
                             PullRequestCard(pr: pr, isSelected: isSelected(pr))
+                                .pointerCursor()
                                 .onTapGesture { store.openPullRequest(pr, project: project) }
                                 .contextMenu {
                                     Button("Open") { store.openPullRequest(pr, project: project) }
@@ -296,6 +321,7 @@ struct PullRequestListView: View {
                         Image(systemName: "arrow.clockwise")
                     }
                     .buttonStyle(.plain)
+                    .pointerCursor()
                     .help("Reload pull requests")
                 }
             }
@@ -381,21 +407,8 @@ struct ChangeListView: View {
                         description: Text("Nothing to commit on \(status.branch).")
                     )
                 } else {
-                    VStack(spacing: 0) {
-                    Button {
-                        store.openAllChanges(project: project)
-                    } label: {
-                        Label("View All Changes", systemImage: "plusminus.circle")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .controlSize(.small)
-                    .buttonStyle(.bordered)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .help("Show one diff with every change in the working tree")
-
-                    Divider()
-
+                    // "View All Changes" lives in the diff's own bar in the
+                    // centre pane, next to the file count.
                     List(selection: Binding(
                         get: { store.current.flatMap { item -> String? in
                             guard case .workingDiff(_, let path, _) = item.kind else { return nil }
@@ -415,23 +428,33 @@ struct ChangeListView: View {
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text((change.path as NSString).lastPathComponent)
                                         .lineLimit(1)
-                                    Text((change.path as NSString).deletingLastPathComponent)
-                                        .font(.caption)
-                                        .foregroundStyle(.tertiary)
-                                        .lineLimit(1)
-                                        .truncationMode(.head)
+                                    // A file at the root has no folder above
+                                    // it; an empty line here would still take
+                                    // its height and push the name off centre.
+                                    let directory = (change.path as NSString).deletingLastPathComponent
+                                    if !directory.isEmpty {
+                                        Text(directory)
+                                            .font(.caption)
+                                            .foregroundStyle(.tertiary)
+                                            .lineLimit(1)
+                                            .truncationMode(.head)
+                                    }
                                 }
                                 Spacer()
                                 Text(change.label)
                                     .font(.caption2)
                                     .foregroundStyle(.tertiary)
                             }
+                            .contentShape(Rectangle())
+                            .pointerCursor()
                             .tag(change.path)
                             .help(change.path)
                         }
                     }
                     .listStyle(.sidebar)
-                    }
+                    // A sidebar list paints its own vibrant background, which
+                    // read as a different shade to every other tab here.
+                    .scrollContentBackground(.hidden)
                 }
             } else {
                 ContentUnavailableView(
@@ -454,11 +477,17 @@ struct ChangeListView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.plain)
+                .pointerCursor()
                 .help("Reload git status")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(.bar)
+        }
+        // The working tree moves under us — reload whenever this tab is shown,
+        // rather than showing whatever the last scan found.
+        .task(id: project.id) {
+            await project.refreshGitStatus()
         }
     }
 
@@ -471,5 +500,161 @@ struct ChangeListView: View {
         case "Conflict": .orange
         default: .orange
         }
+    }
+}
+
+// MARK: - Terminals
+
+/// Every shell still running, newest first. Terminals outlive the viewer, so
+/// this list is how the user gets back to one they left — including shells
+/// belonging to the other repositories.
+struct TerminalListView: View {
+    @Environment(WorkspaceStore.self) private var store
+    let project: Project
+
+    private var terminals: [RecentTerminal] { store.recentTerminals }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 7) {
+                // The first card starts a shell; the rest are the running ones.
+                NewTerminalCard(repository: project.name) {
+                    store.newTerminal(in: project)
+                }
+
+                ForEach(terminals) { terminal in
+                    TerminalCard(
+                        title: terminal.session.title,
+                        repository: store.project(withID: terminal.item.projectID)?.name
+                            ?? terminal.session.directory.lastPathComponent,
+                        isSelected: store.isShowing(terminal),
+                        close: { store.closeTerminal(terminal) }
+                    )
+                    .pointerCursor()
+                    .onTapGesture { store.showTerminal(terminal) }
+                    .contextMenu {
+                        Button("Show") { store.showTerminal(terminal) }
+                        Button("Close") { store.closeTerminal(terminal) }
+                    }
+                }
+
+                if terminals.isEmpty {
+                    Text("Shells you open keep running here until you close them.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 10)
+                }
+            }
+            .padding(10)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .safeAreaInset(edge: .bottom) {
+            HStack {
+                Text("\(terminals.count) running")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(.bar)
+        }
+    }
+}
+
+/// The card that starts another shell, at the top of the terminals list.
+struct NewTerminalCard: View {
+    let repository: String
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "plus")
+                    .font(.callout.weight(.medium))
+                Text("New Terminal")
+                    .font(.callout.weight(.medium))
+                Spacer(minLength: 0)
+                Text(repository)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .foregroundStyle(.tint)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(.tint.opacity(isHovering ? 0.16 : 0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .strokeBorder(.tint.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .onHover { isHovering = $0 }
+        .help("Start another shell in \(repository) (⌘T)")
+    }
+}
+
+/// One running shell, in the same card style as `PullRequestCard`.
+struct TerminalCard: View {
+    let title: String
+    let repository: String
+    let isSelected: Bool
+    let close: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "terminal")
+                .font(.callout)
+                .foregroundStyle(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(repository)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            Button(action: close) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .opacity(isHovering ? 1 : 0)
+            .pointerCursor()
+            .help("Close this terminal")
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 9)
+                .fill(isSelected ? AnyShapeStyle(.tint.opacity(0.14)) : AnyShapeStyle(.quaternary.opacity(0.22)))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 1.2)
+        )
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+        .help(title)
     }
 }

@@ -79,6 +79,11 @@ final class ViewerItem: Identifiable {
 
     var isDirty: Bool { document?.isDirty ?? false }
 
+    /// Terminals are the one item the store never throws away on its own.
+    nonisolated var isTerminal: Bool {
+        if case .terminal = kind { true } else { false }
+    }
+
     init(kind: Kind, title: String, subtitle: String? = nil) {
         self.kind = kind
         self.title = title

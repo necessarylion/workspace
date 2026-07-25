@@ -25,6 +25,13 @@ final class Project: Identifiable {
 
     var ports: [ListeningPort] = []
     var isScanningPorts = false
+    /// Why the last attempt to stop a port failed, if it did.
+    var portError: String?
+
+    /// Which GitHub account `gh` talks to for this repository. `nil` means the
+    /// user has not chosen, so `gh` uses its own active account. Set through
+    /// `WorkspaceStore`, which persists it and tells `GitHubAccounts`.
+    var gitHubAccount: String?
 
     nonisolated var id: URL { url }
     nonisolated var name: String { url.lastPathComponent }
@@ -32,6 +39,24 @@ final class Project: Identifiable {
     var isGitRepository: Bool { gitStatus != nil }
 
     var changeCount: Int { gitStatus?.changes.count ?? 0 }
+
+    /// Whether `.gitignore` covers this path — the file tree draws those faded.
+    /// A file inside an ignored folder counts, since git only lists the folder.
+    func isIgnored(_ fileURL: URL) -> Bool {
+        guard let ignored = gitStatus?.ignored, !ignored.isEmpty else { return false }
+        let root = url.standardizedFileURL.path
+        let full = fileURL.standardizedFileURL.path
+        guard full.hasPrefix(root) else { return false }
+
+        var components = full.dropFirst(root.count)
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        while !components.isEmpty {
+            if ignored.contains(components.joined(separator: "/")) { return true }
+            components.removeLast()
+        }
+        return false
+    }
 
     init(url: URL) {
         self.url = url
@@ -88,6 +113,14 @@ final class Project: Identifiable {
         isScanningPorts = true
         defer { isScanningPorts = false }
         ports = await ProjectPorts.scan(root: url)
+    }
+
+    /// Signals whatever is holding a port, then rescans so the row disappears
+    /// on its own. A process needs a moment to actually let the socket go.
+    func stopPort(_ port: ListeningPort, force: Bool = false) async {
+        portError = await ProjectPorts.stop(port, force: force)
+        try? await Task.sleep(for: .milliseconds(600))
+        await refreshPorts()
     }
 
     func reloadFileTree() {

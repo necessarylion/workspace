@@ -33,6 +33,11 @@ final class GhosttyRuntime {
         guard let config = ghostty_config_new() else { return }
         // The user's own Ghostty config applies: theme, font, everything.
         ghostty_config_load_default_files(config)
+        // …except the background, which has to match the app's chrome.
+        // libghostty only reads settings from files, so write a one-line one.
+        if let overrides = Self.writeOverrideConfig() {
+            ghostty_config_load_file(config, overrides)
+        }
         ghostty_config_finalize(config)
         self.config = config
 
@@ -104,6 +109,21 @@ final class GhosttyRuntime {
 
         app = ghostty_app_new(&runtime, config)
         tick()
+    }
+
+    /// Writes the settings we impose on top of the user's config and returns
+    /// its path, or nil if it could not be written.
+    private static func writeOverrideConfig() -> String? {
+        let path = NSTemporaryDirectory() + "workspace-ghostty-overrides.conf"
+        let contents = """
+        background = \(AppColors.terminalBackgroundHex)
+        """
+        do {
+            try contents.write(toFile: path, atomically: true, encoding: .utf8)
+            return path
+        } catch {
+            return nil
+        }
     }
 
     func tick() {

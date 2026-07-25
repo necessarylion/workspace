@@ -18,6 +18,9 @@ struct PullRequest: Identifiable, Sendable, Hashable {
     /// Owner / workspace / project key, kept for CLI calls that need it.
     var repositoryOwner: String = ""
     var repositorySlug: String = ""
+    /// Commit at the head of the source branch. GitHub needs it to anchor a new
+    /// inline comment to a line.
+    var headSHA: String = ""
 
     var id: Int { number }
 
@@ -35,6 +38,7 @@ enum PullRequestError: LocalizedError {
     case cliMissing(String)
     case commandFailed(String)
     case unsupportedHost
+    case replyUnsupported
 
     var errorDescription: String? {
         switch self {
@@ -44,6 +48,8 @@ enum PullRequestError: LocalizedError {
             message
         case .unsupportedHost:
             "This repository's remote is neither GitHub nor Bitbucket."
+        case .replyUnsupported:
+            "This host cannot thread a reply onto that comment."
         }
     }
 }
@@ -68,7 +74,7 @@ enum PullRequestService {
     static func diff(for pr: PullRequest, in directory: URL) async -> String? {
         switch pr.host {
         case .github:
-            let result = await Shell.run(["gh", "pr", "diff", "\(pr.number)"], in: directory, timeout: 90)
+            let result = await GitHubCLI.run(["pr", "diff", "\(pr.number)"], in: directory, timeout: 90)
             return result.isSuccess ? result.stdout : nil
 
         case .bitbucket:
@@ -93,9 +99,9 @@ enum PullRequestService {
     private static func loadGitHub(in directory: URL) async throws -> [PullRequest] {
         guard await Shell.isAvailable("gh") else { throw PullRequestError.cliMissing("gh") }
 
-        let fields = "number,title,author,headRefName,baseRefName,url,isDraft,updatedAt,additions,deletions,body,reviewDecision"
-        let result = await Shell.run(
-            ["gh", "pr", "list", "--state", "open", "--limit", "50", "--json", fields],
+        let fields = "number,title,author,headRefName,headRefOid,baseRefName,url,isDraft,updatedAt,additions,deletions,body,reviewDecision"
+        let result = await GitHubCLI.run(
+            ["pr", "list", "--state", "open", "--limit", "50", "--json", fields],
             in: directory,
             timeout: 60
         )
@@ -109,6 +115,7 @@ enum PullRequestService {
             let title: String
             let author: Author?
             let headRefName: String
+            let headRefOid: String?
             let baseRefName: String
             let url: String?
             let isDraft: Bool
@@ -136,7 +143,8 @@ enum PullRequestService {
                 additions: item.additions,
                 deletions: item.deletions,
                 reviewDecision: item.reviewDecision,
-                host: .github
+                host: .github,
+                headSHA: item.headRefOid ?? ""
             )
         }
     }

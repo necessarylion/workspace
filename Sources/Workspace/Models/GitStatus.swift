@@ -41,17 +41,25 @@ struct GitStatus: Sendable, Hashable {
     var ahead: Int
     var behind: Int
     var changes: [Change]
+    /// Paths `.gitignore` covers, relative to the root and without a trailing
+    /// slash. Git collapses a wholly ignored folder to the folder itself, so
+    /// this stays short even next to a `node_modules`.
+    var ignored: Set<String> = []
 
     var isClean: Bool { changes.isEmpty }
 
     /// Runs `git status`; nil when the folder is not a repository.
     static func load(for directory: URL) async -> GitStatus? {
+        async let ignoredTask = loadIgnored(in: directory)
         let result = await Shell.run(
             ["git", "status", "--porcelain=v1", "--branch"],
             in: directory,
             timeout: 30
         )
-        guard result.isSuccess else { return nil }
+        guard result.isSuccess else {
+            _ = await ignoredTask
+            return nil
+        }
 
         var branch = "detached"
         var ahead = 0
@@ -80,7 +88,32 @@ struct GitStatus: Sendable, Hashable {
             }
         }
 
-        return GitStatus(branch: branch, ahead: ahead, behind: behind, changes: changes)
+        return GitStatus(
+            branch: branch,
+            ahead: ahead,
+            behind: behind,
+            changes: changes,
+            ignored: await ignoredTask
+        )
+    }
+
+    /// What `.gitignore` covers. `--directory` stops this from listing every
+    /// file under `node_modules`; the tree only needs the folder itself.
+    private static func loadIgnored(in directory: URL) async -> Set<String> {
+        let result = await Shell.run(
+            [
+                "git", "ls-files", "--others", "--ignored", "--exclude-standard",
+                "--directory", "--no-empty-directory",
+            ],
+            in: directory,
+            timeout: 30
+        )
+        guard result.isSuccess else { return [] }
+        return Set(
+            result.stdout
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { $0.hasSuffix("/") ? String($0.dropLast()) : String($0) }
+        )
     }
 
     /// Unified diff for one path (working tree, including staged changes).

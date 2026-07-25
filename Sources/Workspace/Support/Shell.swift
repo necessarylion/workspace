@@ -27,16 +27,21 @@ enum Shell {
     static func run(
         _ arguments: [String],
         in directory: URL? = nil,
-        timeout: TimeInterval = 60
+        timeout: TimeInterval = 60,
+        environment: [String: String] = [:]
     ) async -> Output {
         let command = arguments.map(quote).joined(separator: " ")
-        return await runScript(command, in: directory, timeout: timeout)
+        return await runScript(command, in: directory, timeout: timeout, environment: environment)
     }
 
+    /// `environment` is merged on top of the app's own; it is passed to the
+    /// process rather than written into the script so a secret like `GH_TOKEN`
+    /// never shows up in the command line other processes can read.
     static func runScript(
         _ script: String,
         in directory: URL? = nil,
-        timeout: TimeInterval = 60
+        timeout: TimeInterval = 60,
+        environment: [String: String] = [:]
     ) async -> Output {
         await Task.detached(priority: .userInitiated) {
             let process = Process()
@@ -44,6 +49,9 @@ enum Shell {
             process.arguments = ["-lc", script]
             if let directory {
                 process.currentDirectoryURL = directory
+            }
+            if !environment.isEmpty {
+                process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
             }
 
             // Output goes to temp files rather than pipes: a pipe whose buffer

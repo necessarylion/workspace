@@ -177,14 +177,21 @@ final class LanguageService {
         return LSP.decodeHoverText(Self.json(result))
     }
 
-    func definitions(uri: String, position: LSP.Position) async -> [LSP.Location] {
-        guard status.isHealthy else { return [] }
-        let result = try? await connection.request(
-            "textDocument/definition",
-            params: PositionParams(textDocument: .init(uri: uri), position: position),
-            timeout: 8
-        )
-        return LSP.decodeLocations(Self.json(result))
+    /// Nil when the server never answered — sourcekit-lsp in particular can
+    /// spend the best part of a minute preparing a package before it replies to
+    /// the first request, and "no answer" must not read as "no definition".
+    func definitions(uri: String, position: LSP.Position) async -> [LSP.Location]? {
+        guard status.isHealthy else { return nil }
+        do {
+            let result = try await connection.request(
+                "textDocument/definition",
+                params: PositionParams(textDocument: .init(uri: uri), position: position),
+                timeout: 45
+            )
+            return LSP.decodeLocations(Self.json(result))
+        } catch {
+            return nil
+        }
     }
 
     func symbols(uri: String) async -> [LSP.Symbol] {

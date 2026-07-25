@@ -162,10 +162,47 @@ final class TreeSitterHighlighter {
         for match in cursor {
             for capture in match.captures {
                 guard let name = capture.name, capture.range.length > 0 else { continue }
-                result.append((capture.range, name))
+                let isPath = name.hasPrefix("string") && isModulePath(capture.node)
+                result.append((capture.range, isPath ? "string.import" : name))
             }
         }
         return result
+    }
+
+    /// Whether a string node is the module an import names, rather than an
+    /// ordinary string. Grammars capture both as `string`, so the distinction
+    /// comes from the node's ancestors: the statement itself, or the argument
+    /// list of a `require()` / `import()` call.
+    private func isModulePath(_ node: Node) -> Bool {
+        let statements: Set<String> = [
+            "import_statement",       // JS/TS: import x from '…'
+            "export_statement",       // JS/TS: export … from '…'
+            "import_require_clause",  // TS: import x = require('…')
+            "import_declaration",     // Go, and TS type-only imports
+            "import_spec"             // Go: one entry of an import block
+        ]
+
+        var ancestor = node.parent
+        // The string sits a couple of levels under the statement at most:
+        // string → arguments/spec → statement.
+        for _ in 0..<3 {
+            guard let current = ancestor, let type = current.nodeType else { return false }
+            if statements.contains(type) { return true }
+            if type == "call_expression", isModuleCall(current) { return true }
+            ancestor = current.parent
+        }
+        return false
+    }
+
+    /// `require('…')` and dynamic `import('…')`, told apart from any other call
+    /// by the callee's own text.
+    private func isModuleCall(_ call: Node) -> Bool {
+        guard let callee = call.child(at: 0) else { return false }
+        let storage = text as NSString
+        let range = callee.range
+        guard NSMaxRange(range) <= storage.length else { return false }
+        let name = storage.substring(with: range)
+        return name == "require" || name == "import"
     }
 
     /// The innermost named node at an offset — used for ⌘-hover feedback.

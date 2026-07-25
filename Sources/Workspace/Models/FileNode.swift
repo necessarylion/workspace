@@ -43,11 +43,12 @@ final class FileNode: Identifiable {
 
     func reloadChildren() {
         guard isDirectory else { return }
-        let keys: [URLResourceKey] = [.isDirectoryKey, .isHiddenKey]
+        // Dotfiles are shown: `.env`, `.mcp.json`, `.github` and friends are
+        // part of a repository, not clutter. The few that are never worth
+        // opening are named in `ignoredNames` instead.
         let contents = (try? FileManager.default.contentsOfDirectory(
             at: url,
-            includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles]
+            includingPropertiesForKeys: [.isDirectoryKey]
         )) ?? []
 
         children = contents

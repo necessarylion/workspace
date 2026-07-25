@@ -3,10 +3,25 @@ import Foundation
 /// A parsed unified diff, arranged for side-by-side display.
 struct Diff: Sendable, Hashable {
     var files: [DiffFile]
+    /// Totals, counted once while parsing. They used to walk every row of
+    /// every file, and the diff bar asks for them on every redraw.
+    var addedLines = 0
+    var removedLines = 0
+
+    /// Identity of one parse.
+    ///
+    /// A `Diff` is a deep tree of strings, and SwiftUI compares a view's stored
+    /// properties to decide whether to re-run its body — for a large pull
+    /// request that meant comparing every line of every file. Every diff the
+    /// app shows comes straight out of `DiffParser`, so comparing the token is
+    /// both cheaper and just as accurate. (`DiffHighlighter` deliberately keeps
+    /// the token: its input is never shown on its own.)
+    let revision = UUID()
 
     var isEmpty: Bool { files.allSatisfy { $0.hunks.isEmpty } }
-    var addedLines: Int { files.reduce(0) { $0 + $1.addedLines } }
-    var removedLines: Int { files.reduce(0) { $0 + $1.removedLines } }
+
+    static func == (lhs: Diff, rhs: Diff) -> Bool { lhs.revision == rhs.revision }
+    func hash(into hasher: inout Hasher) { hasher.combine(revision) }
 }
 
 struct DiffFile: Sendable, Hashable, Identifiable {
@@ -19,16 +34,12 @@ struct DiffFile: Sendable, Hashable, Identifiable {
     var change: Change
     var hunks: [DiffHunk]
     var isBinary: Bool
+    /// Counted while parsing, for the same reason as `Diff`'s totals.
+    var addedLines = 0
+    var removedLines = 0
 
     var id: String { "\(oldPath)→\(newPath)" }
     var displayPath: String { change == .renamed ? "\(oldPath) → \(newPath)" : newPath }
-
-    var addedLines: Int {
-        hunks.reduce(0) { $0 + $1.rows.filter { $0.kind == .added }.count }
-    }
-    var removedLines: Int {
-        hunks.reduce(0) { $0 + $1.rows.filter { $0.kind == .removed }.count }
-    }
 }
 
 struct DiffHunk: Sendable, Hashable, Identifiable {
@@ -43,6 +54,10 @@ struct DiffRow: Sendable, Hashable, Identifiable {
         case context, added, removed, changed
     }
 
+    /// Position in the diff, handed out while parsing. It used to be built from
+    /// the row's own text, which meant allocating a string as long as the line
+    /// every time a list of rows was diffed.
+    var id: Int
     var kind: Kind
     var oldNumber: Int?
     var oldText: String?
@@ -52,8 +67,6 @@ struct DiffRow: Sendable, Hashable, Identifiable {
     // Syntax-coloured versions, filled in by DiffHighlighter after parsing.
     var oldHighlighted: AttributedString?
     var newHighlighted: AttributedString?
-
-    var id: String { "\(kind.rawValue)-\(oldNumber ?? -1)-\(newNumber ?? -1)-\(oldText ?? "")\(newText ?? "")" }
 }
 
 enum DiffParser {
@@ -68,6 +81,12 @@ enum DiffParser {
         var addedBuffer: [(Int, String)] = []
         var oldLine = 0
         var newLine = 0
+        var nextRowID = 0
+
+        func rowID() -> Int {
+            defer { nextRowID += 1 }
+            return nextRowID
+        }
 
         func flushPairs() {
             guard !removedBuffer.isEmpty || !addedBuffer.isEmpty else { return }
@@ -81,6 +100,7 @@ enum DiffParser {
                 }()
                 currentHunk?.rows.append(
                     DiffRow(
+                        id: rowID(),
                         kind: kind,
                         oldNumber: removed?.0,
                         oldText: removed?.1,
@@ -103,7 +123,16 @@ enum DiffParser {
 
         func flushFile() {
             flushHunk()
-            if let file = currentFile {
+            if var file = currentFile {
+                for hunk in file.hunks {
+                    for row in hunk.rows {
+                        switch row.kind {
+                        case .added: file.addedLines += 1
+                        case .removed: file.removedLines += 1
+                        case .context, .changed: break
+                        }
+                    }
+                }
                 files.append(file)
             }
             currentFile = nil
@@ -176,6 +205,7 @@ enum DiffParser {
                     let content = line.hasPrefix(" ") ? String(line.dropFirst()) : line
                     currentHunk?.rows.append(
                         DiffRow(
+                            id: rowID(),
                             kind: .context,
                             oldNumber: oldLine,
                             oldText: content,
@@ -190,7 +220,11 @@ enum DiffParser {
         }
 
         flushFile()
-        return Diff(files: files)
+        return Diff(
+            files: files,
+            addedLines: files.reduce(0) { $0 + $1.addedLines },
+            removedLines: files.reduce(0) { $0 + $1.removedLines }
+        )
     }
 
     private static func strippingPrefix(_ path: String) -> String {

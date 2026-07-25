@@ -16,12 +16,14 @@ struct ProjectsSidebar: View {
                     Text("Repositories only appear here once you add their folder.")
                 } actions: {
                     Button("Add Repository…") { store.promptForProjectFolder() }
+                        .pointerCursor()
                 }
             } else {
                 ScrollView {
                     LazyVStack(spacing: 7) {
                         ForEach(store.projects) { project in
                             ProjectCard(project: project, isSelected: project.id == store.selectedProjectID)
+                                .pointerCursor()
                                 .onTapGesture { store.selectedProjectID = project.id }
                                 .contextMenu { menu(project) }
                         }
@@ -36,6 +38,8 @@ struct ProjectsSidebar: View {
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
+    /// Lines up with the viewer's header row, and leaves the left end free:
+    /// with the window's title bar hidden the traffic lights sit there.
     private var header: some View {
         HStack {
             Text("Repositories")
@@ -46,9 +50,10 @@ struct ProjectsSidebar: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 6)
+        .padding(.leading, 78)
+        .padding(.trailing, 12)
+        .frame(height: 38)
+        .background(.bar)
     }
 
     private var footer: some View {
@@ -59,6 +64,7 @@ struct ProjectsSidebar: View {
                 Label("Add Repository", systemImage: "plus")
             }
             .buttonStyle(.plain)
+            .pointerCursor()
             Spacer()
             Button {
                 store.refreshAll()
@@ -68,6 +74,7 @@ struct ProjectsSidebar: View {
             .buttonStyle(.plain)
             .help("Refresh every repository")
             .disabled(store.projects.isEmpty)
+            .pointerCursor(!store.projects.isEmpty)
         }
         .font(.callout)
         .padding(.horizontal, 12)
@@ -80,6 +87,10 @@ struct ProjectsSidebar: View {
         Button("Refresh") { Task { await project.refresh() } }
         Button("Open Terminal") { store.openTerminal(in: project) }
         Divider()
+        if project.host == .github {
+            GitHubAccountMenu(project: project)
+            Divider()
+        }
         if let url = project.remote?.webURL {
             Button("Open Repository in Browser") { NSWorkspace.shared.open(url) }
         }
@@ -99,8 +110,7 @@ struct ProjectCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 7) {
-                Image(systemName: project.host.symbol)
-                    .foregroundStyle(project.host == .unknown ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint))
+                GitHostIcon(host: project.host)
                 Text(project.name)
                     .font(.callout.weight(.medium))
                     .lineLimit(1)

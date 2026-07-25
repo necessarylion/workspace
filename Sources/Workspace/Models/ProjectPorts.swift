@@ -80,6 +80,19 @@ enum ProjectPorts {
         return result.sorted { $0.port < $1.port }
     }
 
+    /// Stops whatever holds a port. `TERM` first, so a dev server gets to shut
+    /// its own children down; `KILL` only when explicitly asked for.
+    ///
+    /// Returns the error to show, or nil when the signal was delivered.
+    static func stop(_ port: ListeningPort, force: Bool) async -> String? {
+        let result = await Shell.run(["kill", force ? "-KILL" : "-TERM", "\(port.pid)"], timeout: 10)
+        guard result.isSuccess else {
+            let message = result.failureMessage
+            return message.isEmpty ? "Could not stop \(port.processName)." : message
+        }
+        return nil
+    }
+
     /// `*:5173`, `127.0.0.1:3000`, `[::1]:8080` → the port number.
     private static func port(fromAddress address: String) -> Int? {
         guard let colon = address.lastIndex(of: ":") else { return nil }

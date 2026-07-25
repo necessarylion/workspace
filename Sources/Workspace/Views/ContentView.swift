@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Window shell: repositories on the left, viewer in the middle, the
@@ -5,96 +6,41 @@ import SwiftUI
 struct ContentView: View {
     @Environment(WorkspaceStore.self) private var store
 
+    /// The panes are laid out by hand. `HSplitView` and `.inspector` are both
+    /// AppKit-backed, and both pin their columns below the window's title bar
+    /// safe area whatever `ignoresSafeArea` says, which left an empty band
+    /// above the header rows.
+    @State private var sidebarWidth: CGFloat = 253
+    @State private var navigatorWidth: CGFloat = 300
+
     var body: some View {
-        // A plain split, not NavigationSplitView: the repositories panel should
-        // be a flat panel like the navigator on the right, not a translucent
-        // Finder-style source list.
-        HSplitView {
+        @Bindable var store = store
+        return HStack(spacing: 0) {
             if store.showsProjects {
                 ProjectsSidebar()
-                    .frame(minWidth: 155, idealWidth: 175, maxWidth: 380, maxHeight: .infinity)
+                    .frame(width: sidebarWidth)
+                    .frame(maxHeight: .infinity)
+                PaneResizer(width: $sidebarWidth, range: 140...380)
             }
             ViewerView()
-                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
-                .layoutPriority(1)
-                .inspector(isPresented: Binding(
-                    get: { store.showsNavigator },
-                    set: { store.showsNavigator = $0 }
-                )) {
-                    NavigatorView()
-                        .inspectorColumnWidth(min: 230, ideal: 300, max: 460)
-                }
-                .toolbar { toolbarContent }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if store.showsNavigator {
+                PaneResizer(width: $navigatorWidth, range: 230...460, growsLeftwards: true)
+                NavigatorView()
+                    .frame(width: navigatorWidth)
+                    .frame(maxHeight: .infinity)
+            }
         }
-        // The open item is named by the viewer's own header row, not the
-        // window title — a two-line toolbar title renders badly here.
+        // The panes draw their own header rows and make their own room for the
+        // traffic lights, so none of them wants the title bar's safe area.
+        .ignoresSafeArea()
+        // Each pane draws its own header row, so the window needs no title of
+        // its own; this only names the window in the Window menu.
         .navigationTitle("Workspace")
         .overlay(alignment: .bottom) { statusToast }
-    }
-
-    @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        ToolbarItemGroup(placement: .navigation) {
-            Button {
-                withAnimation { store.showsProjects.toggle() }
-            } label: {
-                Label("Repositories", systemImage: "sidebar.leading")
-            }
-            .help("Show or hide the repositories sidebar (⌘0)")
-
-            Button {
-                store.goBack()
-            } label: {
-                Label("Back", systemImage: "chevron.left")
-            }
-            .disabled(!store.canGoBack)
-            .help(store.backTitle.map { "Back to \($0)" } ?? "Back")
-
-            Button {
-                store.goForward()
-            } label: {
-                Label("Forward", systemImage: "chevron.right")
-            }
-            .disabled(!store.canGoForward)
-            .help(store.forwardTitle.map { "Forward to \($0)" } ?? "Forward")
-        }
-
-        ToolbarItemGroup {
-            if store.current?.document?.isMarkdown == true {
-                Toggle(isOn: Binding(
-                    get: { store.markdownPreview },
-                    set: { store.markdownPreview = $0 }
-                )) {
-                    Label("Preview", systemImage: "eye")
-                }
-                .help("Preview Markdown")
-            }
-
-            // Collapse button and tab picker share the toolbar row, toggle on
-            // the left of the tabs.
-            Button {
-                withAnimation { store.showsNavigator.toggle() }
-            } label: {
-                Label("Navigator", systemImage: "sidebar.trailing")
-            }
-            .help("Show or hide files, PRs and info (⌥⌘0)")
-
-            if store.selectedProject != nil, store.showsNavigator {
-                Picker("", selection: Binding(
-                    get: { store.navigatorTab },
-                    set: { store.navigatorTab = $0 }
-                )) {
-                    ForEach(WorkspaceStore.NavigatorTab.allCases) { tab in
-                        Label(tab.title, systemImage: tab.symbol)
-                            .labelStyle(.iconOnly)
-                            .help(tab.title)
-                            .tag(tab)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 150)
-            }
+        // Asked once per repository, right after it is added.
+        .sheet(item: $store.gitHubAccountPrompt) { prompt in
+            GitHubAccountSheet(prompt: prompt)
         }
     }
 
@@ -114,5 +60,44 @@ struct ContentView: View {
                     store.statusMessage = nil
                 }
         }
+    }
+}
+
+/// Draggable seam between two panes: a hairline to look at, wider to grab.
+struct PaneResizer: View {
+    @Binding var width: CGFloat
+    let range: ClosedRange<CGFloat>
+    /// True when the pane being sized sits to the right of the seam, so
+    /// dragging left makes it wider rather than narrower.
+    var growsLeftwards = false
+
+    @State private var widthBeforeDrag: CGFloat?
+
+    var body: some View {
+        Divider()
+            .overlay {
+                Color.clear
+                    .frame(width: 9)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 1)
+                            .onChanged { value in
+                                let start = widthBeforeDrag ?? width
+                                widthBeforeDrag = start
+                                let delta = growsLeftwards
+                                    ? -value.translation.width
+                                    : value.translation.width
+                                width = min(range.upperBound, max(range.lowerBound, start + delta))
+                            }
+                            .onEnded { _ in widthBeforeDrag = nil }
+                    )
+                    .onHover { inside in
+                        if inside {
+                            NSCursor.resizeLeftRight.push()
+                        } else {
+                            NSCursor.pop()
+                        }
+                    }
+            }
     }
 }

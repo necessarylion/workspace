@@ -2,8 +2,9 @@ import AppKit
 
 /// Colours for the editor, derived from tree-sitter capture names.
 ///
-/// Everything is built from system colours so the editor follows the system
-/// light/dark appearance without shipping two palettes.
+/// The text colours are system colours, so the editor follows the system
+/// light/dark appearance without shipping two palettes. Only the background
+/// is fixed: it has to match the rest of the centre pane.
 struct SyntaxTheme {
     let font: NSFont
     let boldFont: NSFont
@@ -11,10 +12,19 @@ struct SyntaxTheme {
     let boldItalicFont: NSFont
 
     var text: NSColor { .textColor }
-    var background: NSColor { .textBackgroundColor }
+    var background: NSColor { AppColors.viewerBackground }
     var currentLine: NSColor { .controlAccentColor.withAlphaComponent(0.09) }
+    /// The vertical rules that mark each level of indentation: present, but a
+    /// good deal fainter than any text on the line.
+    var indentGuide: NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? NSColor(white: 1, alpha: 0.15)
+                : NSColor(white: 0, alpha: 0.13)
+        }
+    }
     var gutterText: NSColor { .tertiaryLabelColor }
-    var gutterBackground: NSColor { .textBackgroundColor }
+    var gutterBackground: NSColor { AppColors.viewerBackground }
 
     /// Line height as a multiple of the font's natural height.
     var lineHeightMultiple: CGFloat = 1.35
@@ -98,6 +108,10 @@ struct SyntaxTheme {
             Style(color: .systemRed)
         case "string.escape", "string.special":
             Style(color: .systemOrange)
+        // The module a file imports reads as a path, not as data: green sets it
+        // apart from every other string in the file.
+        case "string.import":
+            Style(color: .systemGreen)
         case "number", "float", "boolean", "constant":
             Style(color: .systemOrange)
         case "type", "constructor", "namespace", "module":

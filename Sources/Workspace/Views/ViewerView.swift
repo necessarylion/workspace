@@ -7,9 +7,9 @@ struct ViewerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            headerBar
+            Divider()
             if let item = store.current, !store.showsDashboard {
-                header(item)
-                Divider()
                 content(item)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
@@ -20,19 +20,129 @@ struct ViewerView: View {
         }
         .frame(minWidth: 480, minHeight: 360)
         // A shade of its own, so the centre pane reads apart from the two
-        // sidebars. Editor and terminal still draw their standard background.
-        .background(Color(nsColor: .underPageBackgroundColor))
+        // sidebars. Editor and diff draw the same colour; the terminal is
+        // darker still.
+        .background(Color(nsColor: AppColors.viewerBackground))
     }
 
     // MARK: - Header
 
-    /// Breadcrumb for the open item, with ✕ on the right.
-    private func header(_ item: ViewerItem) -> some View {
-        HStack(spacing: 7) {
+    /// The window has no title bar, so this row carries what used to be in the
+    /// toolbar: navigation on the left, the open item next to it, and the
+    /// navigator's own controls on the right.
+    private var headerBar: some View {
+        HStack(spacing: 6) {
+            // The traffic lights float over whichever pane is leftmost. When
+            // the repositories panel is hidden, that is this one.
+            if !store.showsProjects {
+                Color.clear.frame(width: 68, height: 1)
+            }
+
+            Button {
+                withAnimation { store.showsProjects.toggle() }
+            } label: {
+                Image(systemName: "sidebar.leading")
+            }
+            .pointerCursor()
+            .help("Show or hide the repositories sidebar (⌘0)")
+
+            Button {
+                store.goBack()
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .disabled(!store.canGoBack)
+            .pointerCursor(store.canGoBack)
+            .help(store.backTitle.map { "Back to \($0)" } ?? "Back")
+
+            Button {
+                store.goForward()
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .disabled(!store.canGoForward)
+            .pointerCursor(store.canGoForward)
+            .help(store.forwardTitle.map { "Forward to \($0)" } ?? "Forward")
+
+            if let item = store.current, !store.showsDashboard {
+                openItem(item)
+            }
+
+            Spacer(minLength: 12)
+
+            if store.current?.document?.isMarkdown == true {
+                Toggle(isOn: Binding(
+                    get: { store.markdownPreview },
+                    set: { store.markdownPreview = $0 }
+                )) {
+                    Image(systemName: "eye")
+                }
+                .toggleStyle(.button)
+                .pointerCursor()
+                .help("Preview Markdown")
+            }
+
+            if let item = store.current, !store.showsDashboard {
+                Button {
+                    store.closeCurrent()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .pointerCursor()
+                .help(
+                    item.isTerminal
+                        ? "Back to the dashboard — the shells keep running (⇧⌘W)"
+                        : "Close and go back to the dashboard (⇧⌘W)"
+                )
+            }
+
+            if store.selectedProject != nil, store.showsNavigator {
+                Picker("", selection: Binding(
+                    get: { store.navigatorTab },
+                    set: { store.navigatorTab = $0 }
+                )) {
+                    ForEach(WorkspaceStore.NavigatorTab.allCases) { tab in
+                        Label(tab.title, systemImage: tab.symbol)
+                            .labelStyle(.iconOnly)
+                            .help(tab.title)
+                            .tag(tab)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 165)
+                .pointerCursor()
+            }
+
+            // Last in the row, so it stays put as the tabs come and go.
+            Button {
+                withAnimation { store.showsNavigator.toggle() }
+            } label: {
+                Image(systemName: "sidebar.trailing")
+            }
+            .pointerCursor()
+            .help("Show or hide files, PRs and info (⌥⌘0)")
+        }
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 10)
+        .frame(height: 38)
+        .background(.bar)
+    }
+
+    /// Breadcrumb for the open item. Closing it lives over on the right, next
+    /// to the navigator's controls.
+    private func openItem(_ item: ViewerItem) -> some View {
+        // The terminal has no tab bar of its own, so the breadcrumb is what
+        // names the shell on screen.
+        let title = item.isTerminal
+            ? (item.selectedTerminal?.title ?? item.title)
+            : item.title
+
+        return HStack(spacing: 7) {
             Image(systemName: item.symbol)
                 .foregroundStyle(.secondary)
                 .font(.caption)
-            Text(item.title)
+            Text(title)
                 .font(.callout.weight(.medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -45,20 +155,8 @@ struct ViewerView: View {
             if item.isDirty {
                 Circle().fill(.orange).frame(width: 6, height: 6)
             }
-            Spacer()
-            Button {
-                store.closeCurrent()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .semibold))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Close and go back to the dashboard (⇧⌘W)")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.bar)
+        .padding(.leading, 6)
     }
 
     // MARK: - Content
@@ -211,6 +309,11 @@ struct WelcomeView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Ports come and go while the app is open, so rescan every time the
+        // dashboard is shown rather than trusting the last scan.
+        .task(id: store.selectedProject?.id) {
+            await store.selectedProject?.refreshPorts()
+        }
     }
 
     private var emptyWorkspace: some View {
@@ -231,6 +334,7 @@ struct WelcomeView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+            .pointerCursor()
             .padding(.top, 4)
         }
         .padding(60)
@@ -243,7 +347,7 @@ struct WelcomeView: View {
                 Text(project.name)
                     .font(.largeTitle.weight(.semibold))
                 HStack(spacing: 6) {
-                    Image(systemName: project.host.symbol)
+                    GitHostIcon(host: project.host, size: 14)
                     Text(project.remote?.fullName ?? project.url.path)
                     if let status = project.gitStatus {
                         Text("·")
@@ -296,38 +400,44 @@ struct WelcomeView: View {
                     Label("Open Terminal", systemImage: "terminal")
                 }
                 Button {
+                    store.openClaude(in: project)
+                } label: {
+                    AppIconLabel(
+                        title: "Open in Claude",
+                        bundleIdentifier: WorkspaceStore.claudeBundleIdentifier,
+                        fallbackSymbol: "sparkles"
+                    )
+                }
+                .help("Start Claude Code in a terminal tab for this repository")
+                Button {
                     store.openExternally(project, using: .vscode)
                 } label: {
                     Label("Open in VS Code", systemImage: "chevron.left.forwardslash.chevron.right")
                 }
             }
             .buttonStyle(.bordered)
+            .pointerCursor()
 
             if !project.pullRequests.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Open pull requests")
-                        .font(.headline)
-                    ForEach(project.pullRequests.prefix(6)) { pr in
-                        Button {
-                            store.openPullRequest(pr, project: project)
-                        } label: {
-                            HStack(spacing: 8) {
-                                Text("#\(pr.number)")
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                                Text(pr.title)
-                                    .lineLimit(1)
-                                Spacer()
-                                Text(pr.author)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("Open pull requests")
+                            .font(.headline)
+                        Text("\(project.pullRequests.count)")
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
+                    // Same tile grid as the stats above it, so the dashboard
+                    // reads as one board rather than a board and a list.
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 240), spacing: 12)],
+                        spacing: 12
+                    ) {
+                        ForEach(project.pullRequests) { pr in
+                            PullRequestTile(pr: pr) {
+                                store.openPullRequest(pr, project: project)
                             }
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
                         }
-                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -335,6 +445,66 @@ struct WelcomeView: View {
         .padding(28)
         .frame(maxWidth: 820, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+}
+
+/// One open pull request on the dashboard, as a tile.
+struct PullRequestTile: View {
+    let pr: PullRequest
+    let open: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: open) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("#\(pr.number)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    if pr.isDraft {
+                        Pill(text: "draft", color: .secondary)
+                    }
+                    if let review = pr.reviewLabel {
+                        Pill(text: review, color: review == "Approved" ? .green : .orange)
+                    }
+                }
+
+                Text(pr.title)
+                    .font(.callout.weight(.medium))
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: 5) {
+                    Image(systemName: "person.crop.circle")
+                    Text(pr.author)
+                        .lineLimit(1)
+                    Image(systemName: "arrow.right").imageScale(.small)
+                    Text(pr.targetBranch)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    if let additions = pr.additions, let deletions = pr.deletions {
+                        Text("+\(additions)").foregroundStyle(.green)
+                        Text("−\(deletions)").foregroundStyle(.red)
+                    }
+                }
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            }
+            .padding(13)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                .quaternary.opacity(isHovering ? 0.4 : 0.25),
+                in: RoundedRectangle(cornerRadius: 11)
+            )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .onHover { isHovering = $0 }
+        .help(pr.title)
     }
 }
 
@@ -360,5 +530,6 @@ struct StatTile: View {
             .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 11))
         }
         .buttonStyle(.plain)
+        .pointerCursor()
     }
 }

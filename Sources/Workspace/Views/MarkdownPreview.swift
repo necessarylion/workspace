@@ -73,8 +73,10 @@ struct MarkdownText: View {
                 Image(systemName: done ? "checkmark.square.fill" : "square")
                     .foregroundStyle(done ? Color.green : Color.secondary)
                     .imageScale(.small)
+                // No strikethrough on a ticked item: the box already says it is
+                // done, and struck-through text is the harder to read the more
+                // there is of it.
                 Text(inline(text))
-                    .strikethrough(done, color: .secondary)
                     .foregroundStyle(done ? .secondary : .primary)
             }
         case .quote(let text):
@@ -90,35 +92,61 @@ struct MarkdownText: View {
                     .padding(10)
             }
             .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
+            // The fill alone is faint against a dark viewer; the outline is
+            // what actually marks where the block starts and stops.
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))
         case .table(let headers, let rows):
-            ScrollView(.horizontal) {
-                Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
-                    GridRow {
-                        ForEach(headers.indices, id: \.self) { column in
-                            Text(inline(headers[column]))
-                                .font(.callout.weight(.semibold))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                        }
+            // No horizontal scroll view around this: one would offer the grid
+            // unbounded width, so a cell would never wrap and a wide table would
+            // scroll instead of fitting. Bounded by the pane, the columns share
+            // what there is and long cells wrap.
+            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+                // The fill goes on each cell, not on the `GridRow`: a row
+                // background only covers the cells' own widths, which leaves
+                // unpainted gaps wherever a column is wider than its text.
+                // `maxWidth: .infinity` makes a cell take the whole column.
+                GridRow {
+                    ForEach(headers.indices, id: \.self) { column in
+                        Text(inline(headers[column]))
+                            .font(.callout.weight(.semibold))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(maxHeight: .infinity, alignment: .topLeading)
+                            .background(.quaternary.opacity(0.4))
                     }
-                    .background(.quaternary.opacity(0.4))
-                    ForEach(rows.indices, id: \.self) { index in
-                        Divider()
-                        GridRow {
-                            ForEach(rows[index].indices, id: \.self) { column in
-                                Text(inline(rows[index][column]))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                            }
+                }
+                ForEach(rows.indices, id: \.self) { index in
+                    Divider()
+                    GridRow {
+                        ForEach(rows[index].indices, id: \.self) { column in
+                            Text(inline(rows[index][column]))
+                                // Take as many lines as the wrapped text needs
+                                // rather than being squeezed onto one.
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                // Once cells wrap they no longer agree on a
+                                // height, and a fill that stops at the text
+                                // leaves the stripe ragged. Stretch every cell
+                                // to the tallest one in its row.
+                                .frame(maxHeight: .infinity, alignment: .topLeading)
+                                .background(
+                                    index.isMultiple(of: 2)
+                                        ? AnyShapeStyle(.clear)
+                                        : AnyShapeStyle(.quaternary.opacity(0.15))
+                                )
                         }
-                        .background(
-                            index.isMultiple(of: 2)
-                                ? AnyShapeStyle(.clear)
-                                : AnyShapeStyle(.quaternary.opacity(0.15))
-                        )
                     }
                 }
             }
+            .frame(maxWidth: .infinity)
+            // The cells stretch to their row, so the grid itself has to be
+            // pinned to its natural height or that `.infinity` would make the
+            // whole table greedy.
+            .fixedSize(horizontal: false, vertical: true)
             .background(.quaternary.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))
         case .rule:
@@ -138,10 +166,21 @@ struct MarkdownText: View {
     }
 
     private func inline(_ source: String) -> AttributedString {
-        (try? AttributedString(
+        var attributed = (try? AttributedString(
             markdown: source,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )) ?? AttributedString(source)
+
+        // SwiftUI renders `inline code` monospaced but paints nothing behind
+        // it, so in a wall of prose it barely reads as code. The font is left
+        // alone — only the chip is added, so code inside a heading still takes
+        // the heading's size.
+        for run in attributed.runs {
+            guard let intent = run.inlinePresentationIntent,
+                  intent.contains(.code) else { continue }
+            attributed[run.range].backgroundColor = .secondary.opacity(0.22)
+        }
+        return attributed
     }
 
     private var blocks: [Block] {
