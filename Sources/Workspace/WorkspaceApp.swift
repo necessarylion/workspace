@@ -3,11 +3,15 @@ import SwiftUI
 @main
 struct WorkspaceApp: App {
     @State private var store = WorkspaceStore()
+    /// Which external CLIs are installed and logged in. One instance for the
+    /// whole app, so a sign-in done in Settings is what every window sees.
+    @State private var tools = ToolInventory()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environment(store)
+                .environment(tools)
         }
         .defaultSize(width: 1360, height: 860)
         // No title bar at all: the panes draw their own full-width header rows
@@ -106,6 +110,12 @@ struct WorkspaceApp: App {
                     set: { store.markdownPreview = $0 }
                 ))
             }
+        }
+
+        // ⌘, — the app menu's Settings item comes with this scene.
+        Settings {
+            SettingsView()
+                .environment(tools)
         }
     }
 }

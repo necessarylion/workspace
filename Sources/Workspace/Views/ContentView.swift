@@ -5,6 +5,7 @@ import SwiftUI
 /// per-project navigator on the right. Both side panels collapse.
 struct ContentView: View {
     @Environment(WorkspaceStore.self) private var store
+    @Environment(ToolInventory.self) private var tools
 
     /// The panes are laid out by hand. `HSplitView` and `.inspector` are both
     /// AppKit-backed, and both pin their columns below the window's title bar
@@ -38,6 +39,9 @@ struct ContentView: View {
         // its own; this only names the window in the Window menu.
         .navigationTitle("Workspace")
         .overlay(alignment: .bottom) { statusToast }
+        // Checked once at launch, so the sidebar's Settings button can point out
+        // a missing `gh`/`bkt` before a pull request list comes back empty.
+        .task { await tools.refresh() }
         // Asked once per repository, right after it is added.
         .sheet(item: $store.gitHubAccountPrompt) { prompt in
             GitHubAccountSheet(prompt: prompt)

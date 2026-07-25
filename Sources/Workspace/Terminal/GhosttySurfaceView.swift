@@ -46,6 +46,9 @@ final class GhosttySurfaceView: NSView {
         createSurfaceIfReady()
     }
 
+    /// Whether the shell is up: before this, `send` has nowhere to go.
+    var isLive: Bool { surface != nil }
+
     func close() {
         guard let surface else { return }
         ghostty_surface_free(surface)

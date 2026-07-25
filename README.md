@@ -49,6 +49,7 @@ Nothing appears in the app until you add a repository folder yourself.
 | Info tab | Folder path, remote, GitHub account, branch, head commit, **listening ports** for processes started inside the folder (right-click one to open it, copy its URL, or **stop the process** holding it), running language servers, and one-click **Open in** VS Code / Cursor / Sublime / Zed / Finder / Terminal. |
 | Terminal | Embedded **libghostty** (the [Ghostty](https://github.com/ghostty-org/ghostty) engine) rooted at the repo, **any number of shells** per repo, switched from the Terminals tab rather than a tab bar in the viewer. Your own Ghostty theme/font config applies. Used for Claude Code runs. |
 | Terminals tab | Every shell that is still running, across all repos, newest first. A shell **keeps running until you close its tab** — leaving the terminal, opening a file or switching repo never kills it, and "Open Terminal" returns to the one you had. |
+| Settings (⌘,) | The **command line tools** the app drives — `git`, `gh`, `bkt`, `claude` — each with its own `--version` line and who it is signed in as, all asked of the tool itself through your login shell. Missing one? **Install** runs the right command (`brew install gh`, …); logged out? **Sign In** runs `gh auth login` / `bkt auth login`. Both are interactive, so they run in a real terminal inside the sheet rather than silently in the background. The gear in the repositories footer carries a **dot** when a tool your repos actually need is missing or logged out. |
 
 ### Language servers
 
@@ -71,8 +72,11 @@ The Info tab shows which ones are running.
 
 - macOS 14+, Xcode 16+ toolchain
 - [`gh`](https://cli.github.com) authenticated, for GitHub pull requests
-- [`bkt`](https://github.com/necessarylion/bkt) configured, for Bitbucket
+- [`bkt`](https://github.com/avivsinai/bitbucket-cli) configured, for Bitbucket
 - `claude` on your PATH, for the Claude Code actions
+
+**Settings (⌘,) checks all of these for you** and installs or signs in to the
+missing ones — you never have to work out which command it wanted.
 
 All tools run through your login shell, so a GUI app still sees your normal PATH.
 
@@ -102,6 +106,7 @@ resolve from GitHub instead.
 
 | Shortcut | Action |
 | --- | --- |
+| ⌘, | Settings — the tools the app needs, install and sign-in |
 | ⇧⌘O | Add repository |
 | ⌘S | Save file |
 | ⇧⌘W | Close what is open (a terminal only goes back to the dashboard) |
@@ -136,6 +141,7 @@ Sources/Workspace/
     OpenDocument.swift        a file being viewed/edited
     ViewerItem.swift          what the viewer shows: file | diff | PR | terminal
     TerminalSession.swift     a live shell (libghostty)
+    ToolRequirements.swift    git/gh/bkt/claude: installed? signed in as whom?
     WorkspaceStore.swift      window state + back/forward history
   Editor/
     CodeEditorController.swift  wires text view, gutter, tree-sitter and LSP
@@ -151,6 +157,8 @@ Sources/Workspace/
     LanguageService.swift       one server: handshake, sync, requests
     LanguageServerRegistry.swift  language → server, one per project root
   Views/                      projects sidebar, navigator, viewer, diff, PR, info
+    SettingsView.swift        ⌘, — the tool list with Install / Sign In
+    ToolConsoleSheet.swift    runs one install or sign-in in a real terminal
 ```
 
 ## Not done yet

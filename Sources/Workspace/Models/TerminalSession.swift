@@ -32,16 +32,25 @@ final class TerminalSession: Identifiable {
 
     /// Starts the shell (ghostty runs the user's configured shell itself),
     /// optionally typing a first command.
-    func startIfNeeded(runningCommand command: String? = nil) {
+    ///
+    /// `autoRun` false types the command and stops there, for the ones the user
+    /// has to complete first — `bkt auth login` needs their own host.
+    func startIfNeeded(runningCommand command: String? = nil, autoRun: Bool = true) {
         guard !hasStarted else { return }
         hasStarted = true
         view.start(directory: directory, initialInput: nil)
 
         guard let command else { return }
-        // Give the shell a moment to draw its prompt before typing into it.
         Task {
+            // The shell only exists once the view has a window — in a sheet that
+            // takes noticeably longer than in a pane — and anything typed before
+            // then is dropped.
+            for _ in 0..<40 where !self.view.isLive {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            // Then give it a moment to draw its prompt.
             try? await Task.sleep(for: .milliseconds(700))
-            self.send(command + "\n")
+            self.send(autoRun ? command + "\n" : command)
         }
     }
 

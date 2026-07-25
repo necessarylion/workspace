@@ -4,6 +4,7 @@ import SwiftUI
 /// Right sidebar: every repository the user added, as a card.
 struct ProjectsSidebar: View {
     @Environment(WorkspaceStore.self) private var store
+    @Environment(ToolInventory.self) private var tools
 
     var body: some View {
         VStack(spacing: 0) {
@@ -66,6 +67,7 @@ struct ProjectsSidebar: View {
             .buttonStyle(.plain)
             .pointerCursor()
             Spacer()
+            settingsButton
             Button {
                 store.refreshAll()
             } label: {
@@ -80,6 +82,38 @@ struct ProjectsSidebar: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    /// Opens Settings, with a dot when a tool the repositories here depend on is
+    /// missing or logged out — the reason a PR list would come back empty.
+    private var settingsButton: some View {
+        SettingsLink {
+            Image(systemName: "gearshape")
+                .overlay(alignment: .topTrailing) {
+                    if needsAttention {
+                        Circle()
+                            .fill(.orange)
+                            .frame(width: 5, height: 5)
+                            .offset(x: 3, y: -2)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .help(needsAttention ? "Settings — a required tool needs attention" : "Settings")
+        .pointerCursor()
+    }
+
+    /// `claude` is left out: its actions are optional, and a missing `bkt` only
+    /// matters once a Bitbucket repository is here.
+    private var needsAttention: Bool {
+        tools.unresolved.contains { tool in
+            switch tool {
+            case .git: true
+            case .gh: store.projects.contains { $0.host == .github }
+            case .bkt: store.projects.contains { $0.host == .bitbucket }
+            case .claude: false
+            }
+        }
     }
 
     @ViewBuilder
