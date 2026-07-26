@@ -11,35 +11,47 @@ import Foundation
 @MainActor
 enum DiffHighlighter {
     static func highlight(_ diff: Diff) -> Diff {
+        // A diff of many files is left plain here and coloured a file at a time
+        // as the reader opens it — see `Diff.fileByFileThreshold` and
+        // `highlight(_ file:)`. Doing all of them up front freezes the window
+        // for as long as the parse takes.
+        guard !diff.isFileByFile else { return diff }
+
         var result = diff
         // One parser per language, reused across the diff's files.
         var highlighters: [String: TreeSitterHighlighter] = [:]
-
         for fileIndex in result.files.indices {
-            let file = result.files[fileIndex]
-            guard !file.isBinary else { continue }
-
-            let language = CodeLanguage.forFile(url: URL(fileURLWithPath: file.newPath))
-            guard language.id != CodeLanguage.default.id else { continue }
-
-            let key = language.id.rawValue
-            let highlighter = highlighters[key] ?? TreeSitterHighlighter(language: language)
-            highlighters[key] = highlighter
-
-            for hunkIndex in result.files[fileIndex].hunks.indices {
-                colour(
-                    rows: &result.files[fileIndex].hunks[hunkIndex].rows,
-                    side: .old,
-                    using: highlighter
-                )
-                colour(
-                    rows: &result.files[fileIndex].hunks[hunkIndex].rows,
-                    side: .new,
-                    using: highlighter
-                )
-            }
+            colour(file: &result.files[fileIndex], using: &highlighters)
         }
         return result
+    }
+
+    /// One file of a diff coloured on its own, for the diffs `highlight(_:)`
+    /// deliberately leaves plain.
+    static func highlight(_ file: DiffFile) -> DiffFile {
+        var result = file
+        var highlighters: [String: TreeSitterHighlighter] = [:]
+        colour(file: &result, using: &highlighters)
+        return result
+    }
+
+    private static func colour(
+        file: inout DiffFile,
+        using highlighters: inout [String: TreeSitterHighlighter]
+    ) {
+        guard !file.isBinary else { return }
+
+        let language = CodeLanguage.forFile(url: URL(fileURLWithPath: file.newPath))
+        guard language.id != CodeLanguage.default.id else { return }
+
+        let key = language.id.rawValue
+        let highlighter = highlighters[key] ?? TreeSitterHighlighter(language: language)
+        highlighters[key] = highlighter
+
+        for hunkIndex in file.hunks.indices {
+            colour(rows: &file.hunks[hunkIndex].rows, side: .old, using: highlighter)
+            colour(rows: &file.hunks[hunkIndex].rows, side: .new, using: highlighter)
+        }
     }
 
     private enum Side { case old, new }

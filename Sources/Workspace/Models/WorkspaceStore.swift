@@ -460,6 +460,14 @@ final class WorkspaceStore {
         return items[viewer.history[viewer.index]]
     }
 
+    /// The conversation open for the selected repository, if one has been
+    /// started. The viewer keeps this one item mounted under whatever else is
+    /// showing rather than swapping it out — see `ViewerView.body`.
+    var openClaudeItem: ViewerItem? {
+        guard let projectID = selectedProjectID else { return nil }
+        return items[ViewerItem.Kind.claude(projectID: projectID).key]
+    }
+
     /// The document the viewer is actually showing. The open item survives a
     /// trip to the dashboard — that is what Forward goes back to — so anything
     /// that acts on what is *on screen* (the preview toggle, Save as PDF) has
@@ -514,7 +522,8 @@ final class WorkspaceStore {
         viewer.index += 1
     }
 
-    /// Closes what is open and returns to the dashboard.
+    /// Closes what is open and steps back to whatever was showing before it —
+    /// the dashboard only when there is nothing behind it.
     func closeCurrent() {
         guard let current else {
             showsDashboard = true
@@ -527,9 +536,22 @@ final class WorkspaceStore {
             showsDashboard = true
             return
         }
+        // Remembered by id, not by index: closing drops the item from the
+        // history, which shifts everything after it along.
+        let behind = viewer.history.indices.contains(viewer.index - 1)
+            ? viewer.history[viewer.index - 1]
+            : nil
         items[current.id] = nil
         forgetItem(current.id)
-        showsDashboard = true
+        // Back, not home. A file opened from a conversation, a diff or a search
+        // result should hand the pane back to what sent us there, the way Back
+        // would have; the dashboard is only where the oldest item lands.
+        guard let behind, let index = viewer.history.firstIndex(of: behind) else {
+            showsDashboard = true
+            return
+        }
+        viewer.index = index
+        showsDashboard = false
     }
 
     /// Drops a closed item from every repository's history.

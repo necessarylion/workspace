@@ -23,6 +23,54 @@ struct ClaudeChatView: View {
                 store.closeCurrent()
             }
         }
+        // A reply writes its file references as Markdown links, and their
+        // addresses are repository paths, not web ones. Left to the default
+        // action they go to Finder, which answers a path it cannot resolve with
+        // a bare "-50" alert; anything naming a file in the project opens in
+        // the editor instead, at the line the link asks for.
+        .environment(\.openURL, OpenURLAction { url in
+            if let (file, line) = Self.fileLink(url, root: project?.url) {
+                store.openFile(file, revealLine: line)
+                return .handled
+            }
+            // A real web address still goes to the browser. A path matching
+            // nothing is dropped rather than handed on to be complained about.
+            let scheme = url.scheme
+            return scheme == nil || scheme == "file" ? .discarded : .systemAction
+        })
+    }
+
+    /// A link that points at a file in the project, as that file's URL and the
+    /// line its `#L42` fragment asks for. `nil` for a web address, or for a
+    /// path this checkout does not have.
+    private static func fileLink(_ url: URL, root: URL?) -> (URL, Int?)? {
+        guard url.scheme == nil || url.scheme == "file" else { return nil }
+        let path = url.path
+        guard !path.isEmpty else { return nil }
+
+        let file: URL
+        if path.hasPrefix("/") {
+            file = URL(fileURLWithPath: path)
+        } else if path.hasPrefix("~") {
+            file = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        } else if let root {
+            file = root.appending(path: path)
+        } else {
+            return nil
+        }
+
+        // A folder is a navigator matter, not something the editor can show.
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: file.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue
+        else { return nil }
+
+        // `#L42`, and also the `#L42-L51` a range gets written as — the first
+        // number in the fragment is the line to scroll to either way.
+        let line = url.fragment.flatMap {
+            Int($0.drop { !$0.isNumber }.prefix { $0.isNumber })
+        }
+        return (file, line)
     }
 
     private var transcript: some View {

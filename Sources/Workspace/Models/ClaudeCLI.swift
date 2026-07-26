@@ -16,6 +16,8 @@ struct ClaudeCLIInfo: Sendable {
     var supportsEffort = false
     /// Whether a one-shot run can be told to leave no transcript behind.
     var supportsNoSessionPersistence = false
+    /// Whether the session can be told what kind of window it is answering in.
+    var supportsAppendSystemPrompt = false
 
     var isInstalled: Bool { executable != nil }
 
@@ -65,7 +67,8 @@ actor ClaudeCLI {
             executable: executable,
             permissionModes: permissionModes(in: help.stdout),
             supportsEffort: help.stdout.contains("--effort"),
-            supportsNoSessionPersistence: help.stdout.contains("--no-session-persistence")
+            supportsNoSessionPersistence: help.stdout.contains("--no-session-persistence"),
+            supportsAppendSystemPrompt: help.stdout.contains("--append-system-prompt")
         )
     }
 

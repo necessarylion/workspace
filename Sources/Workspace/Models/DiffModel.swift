@@ -20,6 +20,16 @@ struct Diff: Sendable, Hashable {
 
     var isEmpty: Bool { files.allSatisfy { $0.hunks.isEmpty } }
 
+    /// Past this many files a diff is never built whole: it is read one file at
+    /// a time, and each file is syntax-coloured as it is opened. Colouring a
+    /// hundred files up front runs tree-sitter over every hunk of every one of
+    /// them on the main actor, and laying them all out is a scroll nobody can
+    /// find anything in anyway.
+    static let fileByFileThreshold = 20
+
+    /// Whether this diff is too big to show whole — see ``fileByFileThreshold``.
+    var isFileByFile: Bool { files.count > Self.fileByFileThreshold }
+
     static func == (lhs: Diff, rhs: Diff) -> Bool { lhs.revision == rhs.revision }
     func hash(into hasher: inout Hasher) { hasher.combine(revision) }
 }

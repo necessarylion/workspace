@@ -9,18 +9,18 @@ struct ViewerView: View {
         VStack(spacing: 0) {
             headerBar
             Divider()
-            if let item = store.current, !store.showsDashboard {
-                content(item)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // Only an editor has a status bar. For everything else the row
-                // had nothing to say but the repository's name, which the
-                // sidebar and the breadcrumb both already show.
-                if let document = item.document, case .text = document.content {
-                    Divider()
-                    StatusBar(document: document)
+            ZStack {
+                // The one item that is covered rather than swapped out. A file
+                // opened from the chat would otherwise take the whole transcript
+                // off screen, and it is expensive twice over: SwiftUI rebuilds
+                // it, re-parsing every message's Markdown, and AppKit throws
+                // away the scroll position of a view that leaves the window. Left
+                // in place under the editor, it costs nothing to come back to and
+                // is exactly where it was.
+                claudeLayer
+                if !showsClaude {
+                    otherContent
                 }
-            } else {
-                WelcomeView()
             }
         }
         .frame(minWidth: 480, minHeight: 360)
@@ -36,6 +36,53 @@ struct ViewerView: View {
         ) {
             store.closeCurrent()
         }
+    }
+
+    /// Whether the chat is the thing on screen, as opposed to merely mounted.
+    /// A `.claude` item with no session behind it is not: that falls through to
+    /// `content(_:)`, which says so.
+    private var showsClaude: Bool {
+        guard !store.showsDashboard, let item = store.current else { return false }
+        return item.isClaude && item.claude != nil
+    }
+
+    /// The chat, kept in the view tree for as long as the conversation exists.
+    /// Hidden rather than removed when something else is showing — and taken
+    /// out of hit testing with it, so a covered composer cannot catch a click.
+    @ViewBuilder
+    private var claudeLayer: some View {
+        if let item = store.openClaudeItem,
+           let session = item.claude,
+           case .claude(let projectID) = item.kind {
+            ClaudeChatView(session: session, project: store.project(withID: projectID))
+                .id(session.id)
+                .opacity(showsClaude ? 1 : 0)
+                .allowsHitTesting(showsClaude)
+                .accessibilityHidden(!showsClaude)
+        }
+    }
+
+    /// Everything that is not the chat: the open item, or the dashboard. Drawn
+    /// over the chat, so it carries the pane's colour itself — the window's own
+    /// background sits below both layers and would let the transcript show
+    /// through.
+    private var otherContent: some View {
+        VStack(spacing: 0) {
+            if let item = store.current, !store.showsDashboard {
+                content(item)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Only an editor has a status bar. For everything else the row
+                // had nothing to say but the repository's name, which the
+                // sidebar and the breadcrumb both already show.
+                if let document = item.document, case .text = document.content {
+                    Divider()
+                    StatusBar(document: document)
+                }
+            } else {
+                WelcomeView()
+            }
+        }
+        .background(Color(nsColor: AppColors.viewerBackground))
     }
 
     // MARK: - Header
@@ -119,7 +166,8 @@ struct ViewerView: View {
                 .help(
                     item.isTerminal
                         ? "Back to the dashboard — the shells keep running (⎋ or ⇧⌘W)"
-                        : "Close and go back to the dashboard (⎋ or ⇧⌘W)"
+                        : store.backTitle.map { "Close and go back to \($0) (⎋ or ⇧⌘W)" }
+                            ?? "Close and go back to the dashboard (⎋ or ⇧⌘W)"
                 )
                 .pointerCursor()
             }
@@ -277,12 +325,10 @@ struct ViewerView: View {
             } else {
                 TerminalContainerView(item: item)
             }
-        case .claude(let projectID):
-            if let session = item.claude {
-                ClaudeChatView(session: session, project: store.project(withID: projectID))
-            } else {
-                ContentUnavailableView("No conversation", systemImage: "sparkles")
-            }
+        case .claude:
+            // The chat itself is drawn by `claudeLayer`, which keeps it mounted
+            // under everything else. Only the empty case is left here.
+            ContentUnavailableView("No conversation", systemImage: "sparkles")
         }
     }
 
@@ -545,6 +591,8 @@ struct WelcomeView: View {
             }
 
             if !project.pullRequests.isEmpty {
+                sectionDivider
+
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text("Open pull requests")
@@ -570,11 +618,25 @@ struct WelcomeView: View {
                 }
             }
 
+            // The history draws nothing at all for a folder with no commits yet,
+            // so its rule is asked for on the same condition — a divider with
+            // nothing under it would read as the board being cut short.
+            if project.isLoadingCommits || !project.recentCommits.isEmpty {
+                sectionDivider
+            }
             commitHistory(project)
         }
         .padding(28)
         .frame(maxWidth: 820, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    /// The rule between two sections of the board. Faint on purpose: it is there
+    /// to group what is already spaced apart, not to draw a line across the page.
+    private var sectionDivider: some View {
+        Divider()
+            .opacity(0.6)
+            .padding(.vertical, 2)
     }
 
     // MARK: - History

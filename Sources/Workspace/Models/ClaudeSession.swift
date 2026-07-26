@@ -28,6 +28,7 @@ final class ClaudeSession: Identifiable {
     var draft = ""
     private(set) var attachments: [URL] = []
 
+
     private(set) var settings: ClaudeSettings
 
     /// Between sending a prompt and the reply ending.
@@ -337,11 +338,36 @@ final class ClaudeSession: Identifiable {
         if info.supportsEffort, let effort = settings.effort.flagValue {
             arguments += ["--effort", effort]
         }
+        if info.supportsAppendSystemPrompt {
+            arguments += ["--append-system-prompt", Self.chatContext]
+        }
         if let session = claudeSessionID {
             arguments += ["--resume", session]
         }
         return arguments
     }
+
+    /// What Claude is told about where it has landed.
+    ///
+    /// A `-p` session has no interactive question tool — the CLI strips it,
+    /// and `--tools` will not put it back — so when Claude wants the user to
+    /// decide something it says so out loud first: *"There is no interactive
+    /// question tool available in this session, so here it is as plain text."*
+    /// The tool is not coming back, but the apology is unnecessary: a chat
+    /// window is a perfectly good place to be asked a question, and typing the
+    /// answer is how you answer one.
+    ///
+    /// Kept to a few lines on purpose. Everything here is prepended to every
+    /// request in the conversation, so it is paid for over and over.
+    private static let chatContext = """
+        You are answering in a chat window, not a terminal. There is no \
+        interactive question tool here and none is needed: when the user has to \
+        choose something, ask in your reply and lay the options out as a short \
+        numbered list they can answer by number. Never mention that a question \
+        tool is unavailable and never preface a question with a note about the \
+        tooling. Your replies are rendered as Markdown, so write them as \
+        Markdown rather than as terminal output.
+        """
 
     private func stopProcess() {
         reader?.cancel()

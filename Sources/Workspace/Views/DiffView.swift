@@ -33,6 +33,12 @@ struct DiffView: View {
     /// Cached rather than recomputed in `body`, which also runs on every frame
     /// of a window resize.
     @State private var flattened = FlattenedDiff()
+    /// Files of a file-by-file diff that have been syntax-coloured, keyed by
+    /// path — see `Diff.fileByFileThreshold`. One file is coloured each time
+    /// the reader opens it, and kept in case they come back to it.
+    @State private var colouredFiles: [DiffFile.ID: DiffFile] = [:]
+    /// The parse `colouredFiles` was built from; anything older is thrown away.
+    @State private var colouredRevision: UUID?
 
     /// A flattened diff, tagged with the parse it was built from. `body` runs
     /// as soon as a new diff arrives but `onChange` rebuilds only afterwards,
@@ -46,19 +52,22 @@ struct DiffView: View {
     private let cornerRadius: CGFloat = 8
 
     /// The file index is only worth its width when there is more than one file
-    /// to choose between.
+    /// to choose between. A file-by-file diff always keeps it: with no
+    /// whole-diff view left, the index is the only way between its files.
     private var showsFileList: Bool {
-        diff.files.count > 1 && (showsFiles?.wrappedValue ?? store.showsDiffFiles)
+        guard diff.files.count > 1 else { return false }
+        return diff.isFileByFile || (showsFiles?.wrappedValue ?? store.showsDiffFiles)
     }
 
     /// The selection, ignored once the file it named is gone — a diff reloads
     /// while it is on screen, and a pull request can lose a file between two
-    /// pushes.
+    /// pushes. Nil shows every file, which a diff of many files never does: it
+    /// falls back to its first file instead.
     private var currentFile: DiffFile.ID? {
-        guard let selectedFile, diff.files.contains(where: { $0.id == selectedFile }) else {
-            return nil
+        if let selectedFile, diff.files.contains(where: { $0.id == selectedFile }) {
+            return selectedFile
         }
-        return selectedFile
+        return diff.isFileByFile ? diff.files.first?.id : nil
     }
 
     var body: some View {
@@ -117,6 +126,12 @@ struct DiffView: View {
     }
 
     private func rebuild() {
+        if diff.isFileByFile {
+            // The list has to agree with what is drawn, or a diff that fell
+            // back to its first file would show no selection at all.
+            if selectedFile != currentFile { selectedFile = currentFile }
+            colourCurrentFile()
+        }
         flattened = FlattenedDiff(
             revision: diff.revision,
             elements: DiffElement.flatten(
@@ -127,6 +142,26 @@ struct DiffView: View {
                 composing: composing
             )
         )
+    }
+
+    /// Colours the file on screen, for a diff `DiffHighlighter` left plain
+    /// because it holds too many files to colour at once.
+    private func colourCurrentFile() {
+        if colouredRevision != diff.revision {
+            colouredFiles.removeAll()
+            colouredRevision = diff.revision
+        }
+        guard let currentFile, colouredFiles[currentFile] == nil,
+              let file = diff.files.first(where: { $0.id == currentFile }) else { return }
+        colouredFiles[currentFile] = DiffHighlighter.highlight(file)
+    }
+
+    /// The file to draw, which for a file-by-file diff is the coloured copy
+    /// once there is one — `diff.files` holds the plain parse.
+    private func file(at index: Int) -> DiffFile {
+        let file = diff.files[index]
+        guard colouredRevision == diff.revision else { return file }
+        return colouredFiles[file.id] ?? file
     }
 
     /// One line of a file's card: its content, the card fill behind it, and the
@@ -159,7 +194,7 @@ struct DiffView: View {
 
     @ViewBuilder
     private func content(_ element: DiffElement, width: CGFloat) -> some View {
-        let file = diff.files[element.file]
+        let file = file(at: element.file)
         switch element.kind {
         case .fileHeader:
             DiffFileHeader(
@@ -406,7 +441,9 @@ struct DiffLayoutBar: View {
         @Bindable var store = store
         let filesShown = showsFiles ?? $store.showsDiffFiles
         return HStack(spacing: 10) {
-            if diff.files.count > 1 {
+            // A file-by-file diff keeps its index open — there is no whole-diff
+            // view to fall back on, so hiding it would strand the reader.
+            if diff.files.count > 1 && !diff.isFileByFile {
                 Toggle(isOn: filesShown) {
                     Image(systemName: "sidebar.left")
                 }
@@ -423,12 +460,26 @@ struct DiffLayoutBar: View {
                 Text("1 of \(diff.files.count) files")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Button("Show All") { selectedFile = nil }
-                    .buttonStyle(.link)
-                    .font(.caption)
-                    .help("Show every file in this diff again")
-                    .pointerCursor()
-                    .accessibilityLabel("Show all files, currently showing \(file.displayPath)")
+                if diff.isFileByFile {
+                    // Nothing to go back to: past the threshold the whole diff
+                    // is never built, so "Show All" would have to load it.
+                    Text("one at a time")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .help(
+                            """
+                            More than \(Diff.fileByFileThreshold) files changed, \
+                            so they load one at a time — pick another in the list.
+                            """
+                        )
+                } else {
+                    Button("Show All") { selectedFile = nil }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                        .help("Show every file in this diff again")
+                        .pointerCursor()
+                        .accessibilityLabel("Show all files, currently showing \(file.displayPath)")
+                }
             } else {
                 Text("\(diff.files.count) \(diff.files.count == 1 ? "file" : "files")")
                     .font(.caption)
@@ -436,6 +487,10 @@ struct DiffLayoutBar: View {
             }
 
             if let project = projectOfSingleFileDiff {
+                // Off past the threshold: a combined diff of that many files is
+                // exactly what the file-by-file rule exists to avoid building.
+                let changed = project.gitStatus?.changes.count ?? 0
+                let tooMany = changed > Diff.fileByFileThreshold
                 Button {
                     store.openAllChanges(project: project)
                 } label: {
@@ -443,7 +498,15 @@ struct DiffLayoutBar: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("Show one diff with every change in the working tree")
+                .disabled(tooMany)
+                .help(
+                    tooMany
+                        ? """
+                          \(changed) files have changed — more than \
+                          \(Diff.fileByFileThreshold), so they are read one at a time
+                          """
+                        : "Show one diff with every change in the working tree"
+                )
                 .pointerCursor()
             }
 
@@ -508,7 +571,19 @@ struct DiffFileList: View {
                     row(file).tag(file.id)
                 }
             } header: {
-                allFiles
+                // Past the threshold there is no whole diff to go back to, so
+                // the header is a count rather than a way in.
+                if diff.isFileByFile {
+                    HStack(spacing: 6) {
+                        Text("\(diff.files.count) Files")
+                        Spacer(minLength: 4)
+                        Text("one at a time").foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                    .padding(.trailing, 6)
+                } else {
+                    allFiles
+                }
             }
         }
         .listStyle(.sidebar)
