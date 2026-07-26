@@ -378,7 +378,13 @@ struct CompactFileRow: View {
                 .frame(width: 17)
             } else {
                 Image(systemName: FileIcon.symbol(for: node.url, isDirectory: node.isDirectory))
-                    .foregroundStyle(FileIcon.tint(for: node.url, isDirectory: node.isDirectory))
+                    // A folder is tinted the same accent the selected row is filled
+                    // with, so on that row it would vanish into the background.
+                    .foregroundStyle(
+                        isSelected
+                            ? AnyShapeStyle(.white)
+                            : AnyShapeStyle(FileIcon.tint(for: node.url, isDirectory: node.isDirectory))
+                    )
                     .font(.system(size: 10))
                     .frame(width: 17)
             }
