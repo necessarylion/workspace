@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Left sidebar. One project at a time, seen through five tabs.
+/// Left sidebar. One project at a time, seen through six tabs.
 struct NavigatorView: View {
     @Environment(WorkspaceStore.self) private var store
 
@@ -44,8 +44,7 @@ struct NavigatorView: View {
             set: { store.navigatorTab = $0 }
         )) {
             ForEach(WorkspaceStore.NavigatorTab.allCases) { tab in
-                Label(tab.title, systemImage: tab.symbol)
-                    .labelStyle(.iconOnly)
+                tabIcon(tab)
                     .help(tab.title)
                     .tag(tab)
             }
@@ -59,6 +58,19 @@ struct NavigatorView: View {
         .background(.bar)
     }
 
+    /// A glyph for each tab, except Claude's, which gets Claude's own mark —
+    /// the same one the dashboard button and the chat carry, rather than the
+    /// generic sparkles every app now draws for "AI".
+    @ViewBuilder
+    private func tabIcon(_ tab: WorkspaceStore.NavigatorTab) -> some View {
+        if tab == .claude {
+            ClaudeMark(size: 15)
+        } else {
+            Label(tab.title, systemImage: tab.symbol)
+                .labelStyle(.iconOnly)
+        }
+    }
+
     @ViewBuilder
     private func content(_ project: Project) -> some View {
         switch store.navigatorTab {
@@ -70,6 +82,8 @@ struct NavigatorView: View {
             ChangeListView(project: project)
         case .terminals:
             TerminalListView(project: project)
+        case .claude:
+            ClaudeSessionListView(project: project)
         case .info:
             InfoPanelView(project: project)
         }
@@ -957,10 +971,13 @@ struct ChangeListView: View {
 
 // MARK: - Terminals
 
-/// The shells of **one** folder, newest first: the repository you are in, or the
-/// home folder while a home shell is on screen. Never both at once — a list that
-/// mixed every repository's shells was impossible to read — and the shells of
-/// the other repositories are shown when you switch to them.
+/// The shells of **one** folder, in the order they were started: the repository
+/// you are in, or the home folder while a home shell is on screen. Never both at
+/// once — a list that mixed every repository's shells was impossible to read —
+/// and the shells of the other repositories are shown when you switch to them.
+///
+/// The order never changes while shells are shown, so a card stays under the
+/// pointer instead of jumping to the top the moment it is clicked.
 ///
 /// Terminals outlive the viewer, so this list is how the user gets back to one
 /// they left.
@@ -973,7 +990,7 @@ struct TerminalListView: View {
         store.visibleTerminalScope ?? .project(project.id)
     }
 
-    private var terminals: [RecentTerminal] { store.terminals(in: scope) }
+    private var terminals: [OpenTerminal] { store.terminals(in: scope) }
 
     private var footerSummary: String {
         let running = terminals.count { $0.session.isRunning }

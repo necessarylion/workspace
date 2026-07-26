@@ -27,6 +27,41 @@ enum Shell {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     }
 
+    /// The `PATH` every command here runs with, for the one runner that cannot
+    /// go through `run`/`runScript`: ``StreamingShellProcess`` stays up for a
+    /// whole conversation, so it starts its process itself and needs the same
+    /// answer this resolved once.
+    static func resolvedPath() async -> String? {
+        await InteractivePath.shared.value()
+    }
+
+    /// Where a tool actually is, as the user's own prompt would find it.
+    ///
+    /// Asking `command -v` through `runScript` is not the same question. That
+    /// runs a **login** shell, and a login shell re-reads ~/.zprofile — where
+    /// `brew shellenv` puts /opt/homebrew/bin back in front of whatever `PATH`
+    /// we handed it. A tool installed in two places is then found in the copy
+    /// the user's own prompt would *not* use, which is how the chat ended up
+    /// driving a `claude` two hundred versions behind the one they run.
+    ///
+    /// An interactive shell has the last word on `PATH`, so it gets asked, and
+    /// the absolute path it gives back settles the question for good.
+    static func interactiveLocation(of tool: String) async -> String? {
+        // A marker, because an interactive rc file prints whatever it likes.
+        let marker = "__workspace_which__"
+        let output = await execute(
+            ["-ilc", "printf '\\n\(marker)%s\\n' \"$(command -v \(quote(tool)) 2>/dev/null)\""],
+            timeout: 20
+        )
+        guard let line = output.stdout
+            .split(separator: "\n")
+            .last(where: { $0.hasPrefix(marker) })
+        else { return nil }
+
+        let path = line.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
+        return path.isEmpty ? nil : path
+    }
+
     static func run(
         _ arguments: [String],
         in directory: URL? = nil,
@@ -102,7 +137,7 @@ enum Shell {
             }
 
             // Kill runaway network calls so the UI never waits forever.
-            nonisolated(unsafe) let watched = process
+            let watched = process
             let watchdog = DispatchWorkItem {
                 if watched.isRunning { watched.terminate() }
             }

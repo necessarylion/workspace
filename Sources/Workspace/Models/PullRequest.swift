@@ -104,6 +104,21 @@ enum PullRequestService {
         return prs
     }
 
+    /// One pull request by number, in whatever state it is in. A `#123` in a
+    /// commit message usually points at a request that has already merged, so
+    /// this cannot go looking through the list of open ones.
+    static func load(number: Int, for remote: RemoteInfo, in directory: URL) async throws -> PullRequest {
+        var pr: PullRequest
+        switch remote.kind {
+        case .github: pr = try await loadGitHub(number: number, in: directory)
+        case .bitbucket: pr = try await loadBitbucket(number: number, remote: remote, in: directory)
+        case .unknown: throw PullRequestError.unsupportedHost
+        }
+        pr.repositoryOwner = remote.owner
+        pr.repositorySlug = remote.slug
+        return pr
+    }
+
     /// Unified diff for one pull request.
     static func diff(for pr: PullRequest, in directory: URL) async -> String? {
         switch pr.host {
@@ -128,14 +143,57 @@ enum PullRequestService {
         }
     }
 
+    /// The description again, with its mentions named — or nothing when it
+    /// already reads properly.
+    ///
+    /// `bkt pr list` hands back the raw Markdown alone, and there a mention is
+    /// an account id: "Hello @{712020:297e58ad-…}". The name lives only in
+    /// Bitbucket's own rendering of the same text, so a description that has one
+    /// of those in it costs one extra call to fetch that rendering. A
+    /// description without any costs nothing.
+    static func namedMentions(in pr: PullRequest, directory: URL) async -> String? {
+        guard pr.host == .bitbucket, pr.body.contains("@{"),
+              !pr.repositoryOwner.isEmpty, !pr.repositorySlug.isEmpty
+        else { return nil }
+
+        let path = "/2.0/repositories/\(pr.repositoryOwner)/\(pr.repositorySlug)/pullrequests/\(pr.number)"
+        let result = await Shell.run(["bkt", "api", path], in: directory, timeout: 60)
+        guard result.isSuccess,
+              let object = try? JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any],
+              let rendered = object["rendered"] as? [String: Any],
+              let html = (rendered["description"] as? [String: Any])?["html"] as? String
+        else { return nil }
+
+        let resolved = BitbucketMarkup.resolvingMentions(in: pr.body, html: html)
+        return resolved == pr.body ? nil : resolved
+    }
+
     // MARK: - GitHub
+
+    private static let gitHubFields = "number,title,author,headRefName,headRefOid,baseRefName,url,isDraft,updatedAt,additions,deletions,body,reviewDecision"
+
+    private struct GitHubItem: Decodable {
+        struct Author: Decodable { let login: String? }
+        let number: Int
+        let title: String
+        let author: Author?
+        let headRefName: String
+        let headRefOid: String?
+        let baseRefName: String
+        let url: String?
+        let isDraft: Bool
+        let updatedAt: String?
+        let additions: Int?
+        let deletions: Int?
+        let body: String?
+        let reviewDecision: String?
+    }
 
     private static func loadGitHub(in directory: URL) async throws -> [PullRequest] {
         guard await Shell.isAvailable("gh") else { throw PullRequestError.cliMissing("gh") }
 
-        let fields = "number,title,author,headRefName,headRefOid,baseRefName,url,isDraft,updatedAt,additions,deletions,body,reviewDecision"
         let result = await GitHubCLI.run(
-            ["pr", "list", "--state", "open", "--limit", "50", "--json", fields],
+            ["pr", "list", "--state", "open", "--limit", "50", "--json", gitHubFields],
             in: directory,
             timeout: 60
         )
@@ -143,48 +201,51 @@ enum PullRequestService {
             throw PullRequestError.commandFailed(result.failureMessage)
         }
 
-        struct Item: Decodable {
-            struct Author: Decodable { let login: String? }
-            let number: Int
-            let title: String
-            let author: Author?
-            let headRefName: String
-            let headRefOid: String?
-            let baseRefName: String
-            let url: String?
-            let isDraft: Bool
-            let updatedAt: String?
-            let additions: Int?
-            let deletions: Int?
-            let body: String?
-            let reviewDecision: String?
-        }
-
         let data = Data(result.stdout.utf8)
-        let items = (try? JSONDecoder().decode([Item].self, from: data)) ?? []
+        let items = (try? JSONDecoder().decode([GitHubItem].self, from: data)) ?? []
+        return items.map(pullRequest(from:))
+    }
 
-        return items.map { item in
-            let url = item.url.flatMap(URL.init(string:))
-            return PullRequest(
-                number: item.number,
-                title: item.title,
-                author: item.author?.login ?? "unknown",
-                // `gh` gives a login and no picture, and the pull request's own
-                // URL says which GitHub the login belongs to.
-                avatarURL: AvatarURL.gitHub(login: item.author?.login, host: url?.host),
-                sourceBranch: item.headRefName,
-                targetBranch: item.baseRefName,
-                body: item.body ?? "",
-                url: url,
-                isDraft: item.isDraft,
-                updatedAt: item.updatedAt.flatMap(parseDate),
-                additions: item.additions,
-                deletions: item.deletions,
-                reviewDecision: item.reviewDecision,
-                host: .github,
-                headSHA: item.headRefOid ?? ""
-            )
+    /// `gh pr view` answers for a request in any state, which is what a `#123`
+    /// pointing at a merged one needs.
+    private static func loadGitHub(number: Int, in directory: URL) async throws -> PullRequest {
+        guard await Shell.isAvailable("gh") else { throw PullRequestError.cliMissing("gh") }
+
+        let result = await GitHubCLI.run(
+            ["pr", "view", "\(number)", "--json", gitHubFields],
+            in: directory,
+            timeout: 60
+        )
+        guard result.isSuccess else {
+            throw PullRequestError.commandFailed(result.failureMessage)
         }
+        guard let item = try? JSONDecoder().decode(GitHubItem.self, from: Data(result.stdout.utf8)) else {
+            throw PullRequestError.commandFailed("Could not read what gh said about #\(number).")
+        }
+        return pullRequest(from: item)
+    }
+
+    private static func pullRequest(from item: GitHubItem) -> PullRequest {
+        let url = item.url.flatMap(URL.init(string:))
+        return PullRequest(
+            number: item.number,
+            title: item.title,
+            author: item.author?.login ?? "unknown",
+            // `gh` gives a login and no picture, and the pull request's own
+            // URL says which GitHub the login belongs to.
+            avatarURL: AvatarURL.gitHub(login: item.author?.login, host: url?.host),
+            sourceBranch: item.headRefName,
+            targetBranch: item.baseRefName,
+            body: item.body ?? "",
+            url: url,
+            isDraft: item.isDraft,
+            updatedAt: item.updatedAt.flatMap(parseDate),
+            additions: item.additions,
+            deletions: item.deletions,
+            reviewDecision: item.reviewDecision,
+            host: .github,
+            headSHA: item.headRefOid ?? ""
+        )
     }
 
     // MARK: - Bitbucket
@@ -217,6 +278,65 @@ enum PullRequestService {
         throw PullRequestError.commandFailed(lastMessage)
     }
 
+    private static func loadBitbucket(
+        number: Int,
+        remote: RemoteInfo,
+        in directory: URL
+    ) async throws -> PullRequest {
+        guard await Shell.isAvailable("bkt") else { throw PullRequestError.cliMissing("bkt") }
+
+        // Same dance as the list: name the repository outright, and fall back to
+        // whatever context bkt is configured with.
+        var attempts: [[String]] = []
+        let base = ["bkt", "pr", "view", "\(number)", "--json"]
+        if !remote.owner.isEmpty && !remote.slug.isEmpty {
+            attempts.append(base + ["--workspace", remote.owner, "--repo", remote.slug])
+            attempts.append(base + ["--project", remote.owner, "--repo", remote.slug])
+        }
+        attempts.append(base)
+
+        var lastMessage = "bkt found no pull request #\(number)."
+        for command in attempts {
+            let result = await Shell.run(command, in: directory, timeout: 60)
+            guard result.isSuccess else {
+                lastMessage = result.failureMessage
+                continue
+            }
+            if let pr = decodeBitbucketOne(result.stdout) {
+                return pr
+            }
+            lastMessage = "Could not read bkt's JSON output."
+        }
+        throw PullRequestError.commandFailed(lastMessage)
+    }
+
+    /// `bkt pr view` answers with one pull request where `pr list` answers with
+    /// a list, and which key it hangs it off differs between flavours. Whatever
+    /// shape it arrives in, it is re-wrapped as a one-item list, so the list
+    /// decoder stays the only place that knows Bitbucket's field names.
+    private static func decodeBitbucketOne(_ json: String) -> PullRequest? {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)) else { return nil }
+
+        var item: [String: Any]?
+        if let dictionary = object as? [String: Any] {
+            if let one = dictionary["pull_request"] as? [String: Any] {
+                item = one
+            } else if let list = dictionary["pull_requests"] as? [[String: Any]] {
+                item = list.first
+            } else if dictionary["id"] != nil {
+                item = dictionary
+            }
+        } else if let list = object as? [[String: Any]] {
+            item = list.first
+        }
+
+        guard let item,
+              let wrapped = try? JSONSerialization.data(withJSONObject: ["pull_requests": [item]]),
+              let text = String(data: wrapped, encoding: .utf8)
+        else { return nil }
+        return decodeBitbucket(text)?.first
+    }
+
     private static func decodeBitbucket(_ json: String) -> [PullRequest]? {
         struct Response: Decodable {
             struct Item: Decodable {
@@ -240,6 +360,14 @@ enum PullRequestService {
                     let html: Link?
                 }
                 struct Summary: Decodable { let raw: String? }
+                /// Bitbucket's own rendering of the description. Only `bkt pr
+                /// view` and the REST API carry it — `pr list` does not — and it
+                /// is the only place a mention's account id is paired with a
+                /// name, which is what `BitbucketMarkup` needs.
+                struct Rendered: Decodable {
+                    struct Field: Decodable { let html: String? }
+                    let description: Field?
+                }
 
                 let id: Int
                 let title: String
@@ -249,6 +377,8 @@ enum PullRequestService {
                 let destination: Ref?
                 let links: Links?
                 let summary: Summary?
+                let description: String?
+                let rendered: Rendered?
                 let updated_on: String?
             }
             let pull_requests: [Item]
@@ -271,7 +401,10 @@ enum PullRequestService {
                     ?? AvatarURL.hosted(item.author?.avatarUrl),
                 sourceBranch: item.source?.branch?.name ?? "",
                 targetBranch: item.destination?.branch?.name ?? "",
-                body: item.summary?.raw ?? "",
+                body: BitbucketMarkup.resolvingMentions(
+                    in: item.summary?.raw ?? item.description ?? "",
+                    html: item.rendered?.description?.html
+                ),
                 url: item.links?.html?.href.flatMap(URL.init(string:)),
                 isDraft: false,
                 updatedAt: item.updated_on.flatMap(parseDate),

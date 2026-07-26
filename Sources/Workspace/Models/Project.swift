@@ -104,6 +104,7 @@ final class Project: Identifiable {
         remote = await remoteTask
         gitStatus = await statusTask
         apply(await commitTask)
+        startWatchingGitIfNeeded()
 
         if loadPullRequests {
             await refreshPullRequests()
@@ -113,6 +114,51 @@ final class Project: Identifiable {
     func refreshGitStatus() async {
         gitStatus = await GitStatus.load(for: url)
         await refreshCommits()
+        startWatchingGitIfNeeded()
+    }
+
+    // MARK: - Git run outside the app
+
+    /// Live while this is a repository; see `startWatchingGitIfNeeded`.
+    @ObservationIgnored private var gitWatcher: GitDirectoryWatcher?
+    /// The pending reload, kept so a burst of writes coalesces into one.
+    @ObservationIgnored private var gitWatchTask: Task<Void, Never>?
+
+    /// Starts listening for git commands the app did not run itself — a
+    /// `git checkout` in the embedded terminal above all. Everything on screen
+    /// that names the branch reads `gitStatus`, so nothing noticed until the
+    /// user happened to trigger a refresh by hand.
+    ///
+    /// Called after every status read rather than from `init`, because a folder
+    /// can become a repository (`git init`) while the app is open, and because
+    /// this is the point where we know it is one.
+    private func startWatchingGitIfNeeded() {
+        guard gitWatcher == nil, gitStatus != nil else { return }
+        gitWatcher = GitDirectoryWatcher(repository: url) { [weak self] in
+            Task { @MainActor in self?.gitDirectoryChanged() }
+        }
+    }
+
+    /// Git writes in bursts — a checkout rewrites HEAD, the index and the logs
+    /// one after another — so the reads wait for it to go quiet instead of
+    /// running once per write.
+    private func gitDirectoryChanged() {
+        gitWatchTask?.cancel()
+        gitWatchTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            await self?.reloadAfterExternalGitChange()
+        }
+    }
+
+    /// The branch name, the history, the change list and the Files tab, all of
+    /// which a checkout moves at once.
+    private func reloadAfterExternalGitChange() async {
+        // One of our own commands is running: its writes are what woke us, and
+        // it reloads everything itself when it finishes.
+        guard !isRunningGitCommand else { return }
+        await refreshGitStatus()
+        refreshFileTree()
     }
 
     /// Re-reads the history, as deep as it has been read so far. Cheap — it is

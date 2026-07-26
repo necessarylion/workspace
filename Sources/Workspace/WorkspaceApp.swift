@@ -77,6 +77,16 @@ struct WorkspaceApp: App {
 
                 Divider()
 
+                Button("Ask Claude") {
+                    if let project = store.selectedProject {
+                        store.openClaudeChat(in: project)
+                    }
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+                .disabled(store.selectedProject == nil)
+
+                Divider()
+
                 Button("Open Terminal") {
                     if let project = store.selectedProject {
                         store.openTerminal(in: project)

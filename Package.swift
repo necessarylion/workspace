@@ -27,8 +27,8 @@ let package = Package(
                 .product(name: "CodeEditLanguages", package: "CodeEditLanguages")
             ],
             path: "Sources/Workspace",
-            // The Mermaid renderer's HTML host and its bundled script, loaded
-            // through `Bundle.module` at runtime.
+            // The diagram renderers' HTML hosts with their bundled scripts, and
+            // Claude's mark — all loaded through `Bundle.module` at runtime.
             resources: [.process("Resources")],
             linkerSettings: [
                 // Everything libghostty (a static Zig/C/C++ archive) pulls in.

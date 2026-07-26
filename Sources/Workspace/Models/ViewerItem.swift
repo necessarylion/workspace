@@ -16,6 +16,8 @@ final class ViewerItem: Identifiable {
         /// Shells. A `nil` project is the window-wide terminal — shells that
         /// belong to no repository, rooted in the home folder.
         case terminal(projectID: URL?)
+        /// A conversation with Claude Code about one repository.
+        case claude(projectID: URL)
 
         var key: String {
             switch self {
@@ -24,6 +26,7 @@ final class ViewerItem: Identifiable {
             case .commit(let project, let sha): "commit:\(project.path):\(sha)"
             case .pullRequest(let project, let number): "pr:\(project.path):\(number)"
             case .terminal(let project): "term:\(project?.path ?? "~")"
+            case .claude(let project): "claude:\(project.path)"
             }
         }
     }
@@ -80,6 +83,9 @@ final class ViewerItem: Identifiable {
     var document: OpenDocument?
     var diff: Diff?
     var pullRequest: PullRequest?
+
+    /// The conversation, for a `.claude` item.
+    var claude: ClaudeSession?
 
     // Terminal tabs: one item holds every shell for its project.
     var terminals: [TerminalSession] = []
@@ -145,6 +151,7 @@ final class ViewerItem: Identifiable {
         case .commit(let project, _): project
         case .pullRequest(let project, _): project
         case .terminal(let project): project
+        case .claude(let project): project
         }
     }
 
@@ -155,6 +162,7 @@ final class ViewerItem: Identifiable {
         case .commit: "clock.arrow.circlepath"
         case .pullRequest: "arrow.triangle.pull"
         case .terminal: "terminal"
+        case .claude: "sparkles"
         }
     }
 
@@ -187,6 +195,15 @@ final class ViewerItem: Identifiable {
     nonisolated var isTerminal: Bool {
         if case .terminal = kind { true } else { false }
     }
+
+    nonisolated var isClaude: Bool {
+        if case .claude = kind { true } else { false }
+    }
+
+    /// Whether closing the item should keep it alive. A shell and a Claude
+    /// conversation both have something running behind them, so ✕ puts the
+    /// dashboard back rather than throwing the session away.
+    nonisolated var survivesClosing: Bool { isTerminal || isClaude }
 
     init(kind: Kind, title: String, subtitle: String? = nil) {
         self.kind = kind

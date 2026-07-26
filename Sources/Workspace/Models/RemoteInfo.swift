@@ -49,6 +49,17 @@ struct RemoteInfo: Sendable, Hashable {
         }
     }
 
+    /// The host's own page for one pull request, for when the app cannot fetch
+    /// it — the CLI missing or not signed in, say.
+    func pullRequestURL(number: Int) -> URL? {
+        guard let base = webURL else { return nil }
+        switch kind {
+        case .github: return base.appendingPathComponent("pull/\(number)")
+        case .bitbucket: return base.appendingPathComponent("pull-requests/\(number)")
+        case .unknown: return nil
+        }
+    }
+
     /// Parses SSH (`git@host:owner/repo.git`), SSH-with-scheme
     /// (`ssh://git@host:7999/scm/PROJ/repo.git`) and HTTPS remotes.
     ///

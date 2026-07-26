@@ -344,8 +344,15 @@ extension PullRequestService {
         values.enumerated().compactMap { index, item in
             if item["deleted"] as? Bool == true { return nil }
             if item["pending"] as? Bool == true { return nil }
-            let body = (item["content"] as? [String: Any])?["raw"] as? String ?? ""
-            guard !body.isEmpty else { return nil }
+            let content = item["content"] as? [String: Any]
+            let raw = content?["raw"] as? String ?? ""
+            guard !raw.isEmpty else { return nil }
+            // The raw Markdown spells a mention as an account id; only the
+            // rendered HTML knows whose id it is.
+            let body = BitbucketMarkup.resolvingMentions(
+                in: raw,
+                html: content?["html"] as? String
+            )
 
             let user = item["user"] as? [String: Any]
             let author = BitbucketUser.name(from: user) ?? "unknown"
@@ -383,10 +390,15 @@ extension PullRequestService {
         var seen: Set<String> = []
 
         func comment(from dictionary: [String: Any], index: Int) -> PullRequestComment? {
-            let content = (dictionary["content"] as? [String: Any])?["raw"] as? String
+            let rendered = dictionary["content"] as? [String: Any]
+            let raw = rendered?["raw"] as? String
                 ?? dictionary["text"] as? String
                 ?? dictionary["body"] as? String
-            guard let content, !content.isEmpty else { return nil }
+            guard let raw, !raw.isEmpty else { return nil }
+            let content = BitbucketMarkup.resolvingMentions(
+                in: raw,
+                html: rendered?["html"] as? String
+            )
 
             let userDictionary = (dictionary["user"] ?? dictionary["author"]) as? [String: Any]
             let author = BitbucketUser.name(from: userDictionary) ?? "unknown"

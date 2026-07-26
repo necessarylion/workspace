@@ -35,6 +35,9 @@ struct ContentView: View {
         // The panes draw their own header rows and make their own room for the
         // traffic lights, so none of them wants the title bar's safe area.
         .ignoresSafeArea()
+        // The window opens with nothing focused rather than in the sidebar's
+        // filter box, so ⎋ closes the open item from the first keystroke.
+        .withoutInitialTextFocus()
         // Each pane draws its own header row, so the window needs no title of
         // its own; this only names the window in the Window menu.
         .navigationTitle("Workspace")

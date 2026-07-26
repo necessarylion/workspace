@@ -107,6 +107,7 @@ struct MarkdownText: View {
         case quote(String)
         case code(language: String, text: String)
         case mermaid(String)
+        case image(url: String, alt: String)
         case table(headers: [String], rows: [[String]])
         case rule
         case spacer
@@ -177,6 +178,17 @@ struct MarkdownText: View {
         case .mermaid(let source):
             MermaidDiagram(source: source)
                 .padding(.vertical, 4)
+        case .image(let address, let alt):
+            // A picture is only drawn for an address the app could actually
+            // fetch; a relative one in a comment points into a repository
+            // checkout the viewer has no idea about, so it stays as its text.
+            if let url = URL(string: address), url.scheme == "http" || url.scheme == "https" {
+                MarkdownImage(url: url, alt: alt)
+                    .padding(.vertical, 2)
+            } else {
+                inline(alt.isEmpty ? address : alt)
+                    .foregroundStyle(.secondary)
+            }
         case .table(let headers, let rows):
             // No horizontal scroll view around this: one would offer the grid
             // unbounded width, so a cell would never wrap and a wide table would
@@ -373,8 +385,29 @@ struct MarkdownText: View {
         }
 
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = String(rawLine)
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            var line = String(rawLine)
+            var trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Pictures come out of the line before anything else looks at it, so
+            // an image sitting on a bullet or at the end of a sentence still
+            // becomes a picture and the words around it still read as words.
+            // `AttributedString` would otherwise swallow the whole `![…](…)`
+            // and draw nothing at all.
+            var images: [(url: String, alt: String)] = []
+            if !inCode, line.contains("![") {
+                let split = splitImages(from: line)
+                line = split.text
+                trimmed = line.trimmingCharacters(in: .whitespaces)
+                images = split.images
+            }
+            defer {
+                for image in images {
+                    result.append(.image(url: image.url, alt: image.alt))
+                }
+            }
+            // A line that was nothing but pictures leaves no text behind, and an
+            // empty line here would only add a gap above them.
+            let isImageOnly = !images.isEmpty && trimmed.isEmpty
 
             if !inCode, trimmed.hasPrefix("|"), trimmed.dropFirst().contains("|") {
                 tableBuffer.append(tableCells(trimmed))
@@ -401,7 +434,9 @@ struct MarkdownText: View {
             let leading = line.prefix { $0 == " " || $0 == "\t" }
             let indent = leading.reduce(0) { $0 + ($1 == "\t" ? 2 : 1) } / 2
 
-            if trimmed.isEmpty {
+            if isImageOnly {
+                // The pictures are all this line had; `defer` appends them.
+            } else if trimmed.isEmpty {
                 result.append(.spacer)
             } else if trimmed == "---" || trimmed == "***" {
                 result.append(.rule)
@@ -434,6 +469,59 @@ struct MarkdownText: View {
             flushCode()
         }
         return result
+    }
+
+    /// Pulls every `![alt](url)` out of one line, handing back what is left of
+    /// the line and the pictures in the order they appeared.
+    ///
+    /// Bitbucket writes an attribute list after the image —
+    /// `![](…png){: data-layout='center' }` — which is not Markdown any parser
+    /// here knows; it is swallowed along with the image rather than left behind
+    /// as stray braces in the middle of a sentence.
+    private static func splitImages(from line: String) -> (text: String, images: [(url: String, alt: String)]) {
+        var text = ""
+        var images: [(url: String, alt: String)] = []
+        var index = line.startIndex
+
+        while index < line.endIndex {
+            guard line[index] == "!",
+                  let bracket = line.index(index, offsetBy: 1, limitedBy: line.endIndex),
+                  bracket < line.endIndex, line[bracket] == "[",
+                  let altEnd = line[bracket...].firstIndex(of: "]"),
+                  let open = line.index(altEnd, offsetBy: 1, limitedBy: line.endIndex),
+                  open < line.endIndex, line[open] == "(",
+                  // A closing paren inside the address would end it early, but
+                  // an address with one in it is rare enough not to trade the
+                  // simplicity for.
+                  let close = line[open...].firstIndex(of: ")")
+            else {
+                text.append(line[index])
+                index = line.index(after: index)
+                continue
+            }
+
+            let alt = String(line[line.index(after: bracket)..<altEnd])
+            let address = String(line[line.index(after: open)..<close])
+                .trimmingCharacters(in: .whitespaces)
+            images.append((url: address, alt: alt.trimmingCharacters(in: .whitespaces)))
+            index = line.index(after: close)
+
+            // The `{: … }` Bitbucket hangs off the end, when there is one. The
+            // leading colon is what marks it as an attribute list rather than a
+            // brace the author happened to type next.
+            var attributes = index
+            while attributes < line.endIndex, line[attributes] == " " {
+                attributes = line.index(after: attributes)
+            }
+            if attributes < line.endIndex, line[attributes] == "{",
+               let colon = line.index(attributes, offsetBy: 1, limitedBy: line.endIndex),
+               colon < line.endIndex, line[colon] == ":",
+               let end = line[colon...].firstIndex(of: "}") {
+                index = line.index(after: end)
+            }
+        }
+
+        return (text, images)
     }
 
     /// "| a | b |" → ["a", "b"].

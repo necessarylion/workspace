@@ -1,9 +1,12 @@
+import AppKit
 import Foundation
 
 /// The Markdown document as a printable HTML page, block for block the same as
 /// `MarkdownText` draws on screen — only lighter, because this is what goes into
 /// the PDF. Nothing here is loaded from the network: the one script the page can
-/// pull in is the checked-in copy of mermaid, put beside it by `MarkdownPDF`.
+/// pull in is the checked-in copy of mermaid, put beside it by `MarkdownPDF`,
+/// and a picture is written in as the bytes the preview already downloaded.
+@MainActor
 enum MarkdownHTML {
     /// `margin` is the gap the sheets are printed with: the page keeps it left
     /// and right itself, and `prepare` leaves room for it above and below.
@@ -56,6 +59,16 @@ enum MarkdownHTML {
             // The source, and nothing else — the script below swaps in the
             // drawn diagram once mermaid has had it.
             return "<div class=\"diagram\">\(escape(source))</div>"
+        case .image(let address, let alt):
+            // The page is rendered off-line, in a web view with no sign-in of
+            // its own, so the picture cannot be fetched here — it goes in as the
+            // bytes the app already has. One it never loaded is named instead of
+            // being left as a hole in the page.
+            guard let inlined = dataURI(for: address) else {
+                let name = alt.isEmpty ? address : alt
+                return "<p class=\"missing\">\(escape(name))</p>"
+            }
+            return "<p class=\"picture\"><img src=\"\(inlined)\" alt=\"\(escape(alt))\" /></p>"
         case .table(let headers, let rows):
             let head = headers.map { "<th>\(inline($0))</th>" }.joined()
             let body = rows.map { row in
@@ -74,6 +87,19 @@ enum MarkdownHTML {
             // the stylesheet.
             return ""
         }
+    }
+
+    /// The picture at `address` as a `data:` URI, or nothing when the preview
+    /// never managed to load it — a private Bitbucket attachment with no account
+    /// behind it, most often.
+    private static func dataURI(for address: String) -> String? {
+        guard let url = URL(string: address),
+              let image = RemoteImageLoader.shared.cached(url),
+              let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:])
+        else { return nil }
+        return "data:image/png;base64,\(png.base64EncodedString())"
     }
 
     /// A list row: the marker in a column of its own, so a wrapped line lines up
@@ -188,6 +214,13 @@ enum MarkdownHTML {
     tbody tr:nth-child(even) { background: #fafafc; }
     .diagram { text-align: center; }
     .diagram svg { max-width: 100%; height: auto; }
+    .picture img {
+      max-width: 100%;
+      height: auto;
+      border: 1px solid #e2e2e6;
+      border-radius: 5px;
+    }
+    .missing { color: #77777f; font-style: italic; }
     """
     }
 

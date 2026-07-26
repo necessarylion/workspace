@@ -11,7 +11,7 @@ import Foundation
 final class WorkspaceStore {
     /// Which list the left sidebar is showing.
     enum NavigatorTab: String, CaseIterable, Identifiable {
-        case files, pullRequests, changes, terminals, info
+        case files, pullRequests, changes, terminals, claude, info
 
         var id: String { rawValue }
 
@@ -21,6 +21,7 @@ final class WorkspaceStore {
             case .pullRequests: "PRs"
             case .changes: "Changes"
             case .terminals: "Terminals"
+            case .claude: "Claude"
             case .info: "Info"
             }
         }
@@ -31,6 +32,7 @@ final class WorkspaceStore {
             case .pullRequests: "arrow.triangle.pull"
             case .changes: "plusminus"
             case .terminals: "terminal"
+            case .claude: "sparkles"
             case .info: "info.circle"
             }
         }
@@ -170,10 +172,12 @@ final class WorkspaceStore {
         projects.removeAll { $0.id == project.id }
         LanguageServerRegistry.shared.shutdownServices(inside: project.url)
 
-        // Forget anything that belonged to it, its shells included — the
-        // window-wide terminal is untouched, it belongs to no repository.
+        // Forget anything that belonged to it, its shells and its Claude
+        // conversation included — the window-wide terminal is untouched, it
+        // belongs to no repository.
         for (key, item) in items where item.projectID == project.id {
             item.terminals.forEach { $0.terminate() }
+            item.claude?.shutDown()
             items[key] = nil
         }
         persistTerminals()
@@ -516,10 +520,10 @@ final class WorkspaceStore {
             showsDashboard = true
             return
         }
-        // A terminal is only ever closed tab by tab, by the user. This puts the
-        // dashboard back and leaves its shells running, ready in the Terminals
-        // tab.
-        if current.isTerminal {
+        // A terminal is only ever closed tab by tab, by the user, and a Claude
+        // conversation is only ever thrown away from inside it. This puts the
+        // dashboard back and leaves both running.
+        if current.survivesClosing {
             showsDashboard = true
             return
         }
@@ -573,6 +577,7 @@ final class WorkspaceStore {
         case .commit(let projectID, _): projectID
         case .pullRequest(let projectID, _): projectID
         case .terminal(let projectID): projectID
+        case .claude(let projectID): projectID
         }
     }
 
@@ -588,8 +593,8 @@ final class WorkspaceStore {
             viewer.history.removeFirst()
             viewer.index -= 1
             // A terminal outlives its history entry: its shells keep running
-            // until the user closes their tabs.
-            if !isOpenAnywhere(oldest), items[oldest]?.isTerminal != true {
+            // until the user closes their tabs. So does a Claude conversation.
+            if !isOpenAnywhere(oldest), items[oldest]?.survivesClosing != true {
                 items[oldest] = nil
             }
         }
@@ -753,6 +758,53 @@ final class WorkspaceStore {
         }
         if item.syncState == nil {
             Task { await refreshSyncState(item, project: project, pr: pr) }
+        }
+        // The list bkt answered with names a mention by account id only; this
+        // trades one call for the names, and returns straight away when the
+        // description has no mention in it.
+        Task {
+            guard let named = await PullRequestService.namedMentions(in: pr, directory: project.url)
+            else { return }
+            item.pullRequest?.body = named
+        }
+    }
+
+    /// Opens a pull request known only by its number — a `#123` written in a
+    /// commit message. The list the navigator holds is of open requests only,
+    /// and a commit usually names one that has already merged, so anything not
+    /// in that list is fetched from the host on the spot.
+    func openPullRequest(number: Int, project: Project) {
+        let kind = ViewerItem.Kind.pullRequest(projectID: project.id, number: number)
+        if let pr = project.pullRequests.first(where: { $0.number == number })
+            ?? items[kind.key]?.pullRequest {
+            openPullRequest(pr, project: project)
+            return
+        }
+
+        // The number is all there is to show until the host answers.
+        let item = items[kind.key] ?? ViewerItem(kind: kind, title: "#\(number)", subtitle: project.name)
+        item.isLoading = true
+        item.errorMessage = nil
+        present(item)
+        navigatorTab = .pullRequests
+
+        Task {
+            guard let remote = project.remote, remote.kind != .unknown else {
+                item.isLoading = false
+                item.errorMessage = PullRequestError.unsupportedHost.localizedDescription
+                return
+            }
+            do {
+                let pr = try await PullRequestService.load(number: number, for: remote, in: project.url)
+                item.pullRequest = pr
+                item.title = pr.title
+                item.subtitle = nil
+                item.isLoading = false
+                openPullRequest(pr, project: project)
+            } catch {
+                item.isLoading = false
+                item.errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -1082,25 +1134,27 @@ final class WorkspaceStore {
         )
     }
 
-    /// Every shell still open, most recently used first. Terminal items are
-    /// never dropped on their own, so this outlives closing the viewer and
-    /// switching repositories — and, being saved, quitting the app.
-    var recentTerminals: [RecentTerminal] {
+    /// Every shell still open, in the order they were started. The order is
+    /// deliberately fixed: showing a shell must not move its card, or the list
+    /// reshuffles under the pointer on every click. Terminal items are never
+    /// dropped on their own, so this outlives closing the viewer and switching
+    /// repositories — and, being saved, quitting the app.
+    var openTerminals: [OpenTerminal] {
         items.values
             .filter(\.isTerminal)
+            .sorted { $0.id < $1.id }
             .flatMap { item in
                 item.terminals.enumerated().map {
-                    RecentTerminal(session: $0.element, item: item, position: $0.offset + 1)
+                    OpenTerminal(session: $0.element, item: item, position: $0.offset + 1)
                 }
             }
-            .sorted { $0.session.lastUsedAt > $1.session.lastUsedAt }
     }
 
-    /// The shells of one folder, newest first. The navigator lists one scope at
+    /// The shells of one folder, oldest first. The navigator lists one scope at
     /// a time: a repository's shells never sit among another repository's, and
     /// the home ones are their own list.
-    func terminals(in scope: TerminalScope) -> [RecentTerminal] {
-        recentTerminals.filter {
+    func terminals(in scope: TerminalScope) -> [OpenTerminal] {
+        openTerminals.filter {
             switch scope {
             case .project(let id): $0.item.projectID == id
             case .home: $0.item.projectID == nil
@@ -1141,7 +1195,7 @@ final class WorkspaceStore {
     /// repository being switched away from — but a repository's own board
     /// should count its own.
     func terminalCount(in project: Project) -> Int {
-        recentTerminals.count { $0.item.projectID == project.id }
+        openTerminals.count { $0.item.projectID == project.id }
     }
 
     /// Opens one of the navigator's lists, unfolding the pane if it is away.
@@ -1161,15 +1215,18 @@ final class WorkspaceStore {
     /// where the first card is the one that starts one.
     func showTerminals(in project: Project) {
         showNavigator(.terminals)
-        if let recent = recentTerminals.first(where: { $0.item.projectID == project.id }) {
-            showTerminal(recent)
-        }
+        // The list itself no longer moves the last shell used to the top, so the
+        // one to bring back is looked up by `lastUsedAt` here.
+        let recent = openTerminals
+            .filter { $0.item.projectID == project.id }
+            .max { $0.session.lastUsedAt < $1.session.lastUsedAt }
+        if let recent { showTerminal(recent) }
     }
 
     /// Puts one shell from the terminals list back on screen.
-    func showTerminal(_ recent: RecentTerminal) {
-        selectTerminal(recent.session, in: recent.item)
-        present(recent.item)
+    func showTerminal(_ terminal: OpenTerminal) {
+        selectTerminal(terminal.session, in: terminal.item)
+        present(terminal.item)
     }
 
     /// Makes a tab the visible one and marks it as the newest in the list. This
@@ -1183,14 +1240,14 @@ final class WorkspaceStore {
     }
 
     /// Whether this exact shell is what the viewer is showing.
-    func isShowing(_ recent: RecentTerminal) -> Bool {
+    func isShowing(_ terminal: OpenTerminal) -> Bool {
         !showsDashboard
-            && current?.id == recent.item.id
-            && recent.item.selectedTerminal?.id == recent.session.id
+            && current?.id == terminal.item.id
+            && terminal.item.selectedTerminal?.id == terminal.session.id
     }
 
-    func closeTerminal(_ recent: RecentTerminal) {
-        closeTerminalTab(recent.session, in: recent.item)
+    func closeTerminal(_ terminal: OpenTerminal) {
+        closeTerminalTab(terminal.session, in: terminal.item)
     }
 
     /// ⌃` — in and out of the selected repository's shells, the way an editor's
@@ -1405,12 +1462,41 @@ final class WorkspaceStore {
 
     // MARK: - External tools
 
-    /// The Claude desktop app, only used to borrow its icon.
-    static let claudeBundleIdentifier = "com.anthropic.claudefordesktop"
-
     /// Starts Claude Code on this repository, in its own terminal tab.
     func openClaude(in project: Project) {
         openTerminal(in: project, runningCommand: "claude", title: "Claude")
+    }
+
+    /// Opens the repository's Claude conversation in the viewer — the same
+    /// `claude`, driven rather than typed at. One per repository, kept alive
+    /// like a terminal, so leaving it and coming back finds the transcript and
+    /// the half-written prompt where they were.
+    @discardableResult
+    func openClaudeChat(in project: Project) -> ViewerItem {
+        let kind = ViewerItem.Kind.claude(projectID: project.id)
+        let item = items[kind.key] ?? ViewerItem(
+            kind: kind,
+            title: "Claude",
+            subtitle: project.name
+        )
+        if item.claude == nil {
+            item.claude = ClaudeSession(directory: project.url)
+        }
+        // Like a terminal, this item lives outside the history's clean-up, so
+        // it is registered here rather than waiting to be presented.
+        items[item.id] = item
+        present(item)
+        // The viewer shows one conversation, so the navigator shows the rest —
+        // the same move opening a terminal or a pull request makes.
+        navigatorTab = .claude
+        return item
+    }
+
+    /// A repository's conversation, if one has been opened. The sessions list
+    /// asks with this rather than making one: looking at the list must not
+    /// start anything.
+    func claudeSession(for project: Project) -> ClaudeSession? {
+        items[ViewerItem.Kind.claude(projectID: project.id).key]?.claude
     }
 
     /// Opens the project in another editor, if it is installed.

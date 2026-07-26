@@ -93,7 +93,12 @@ struct GitStatus: Sendable, Hashable {
         let result = await Shell.run(
             ["git", "status", "--porcelain=v1", "--branch", "-z"],
             in: directory,
-            timeout: 30
+            timeout: 30,
+            // Reading the status normally rewrites `.git/index` to cache the
+            // stat information it just gathered. That write looks exactly like
+            // a checkout to `GitDirectoryWatcher`, which would then ask for
+            // another status — so this read is told to touch nothing.
+            environment: ["GIT_OPTIONAL_LOCKS": "0"]
         )
         guard result.isSuccess else {
             _ = await ignoredTask

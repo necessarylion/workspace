@@ -11,7 +11,8 @@ final class TerminalSession: Identifiable {
     nonisolated let directory: URL
     /// Live tab title — ghostty updates it from the shell (OSC 0/2).
     var title: String
-    /// When this shell was last brought on screen, for the "recent" ordering.
+    /// When this shell was last brought on screen. The lists keep a fixed
+    /// order, so this only picks which shell a repository comes back to.
     var lastUsedAt = Date()
     /// Called when the shell exits or ghostty asks to close the surface.
     @ObservationIgnored var onExit: (() -> Void)?
@@ -80,7 +81,7 @@ final class TerminalSession: Identifiable {
 
 /// One running shell together with the terminal item that holds it, so the
 /// terminals list can show it and put it back on screen.
-struct RecentTerminal: Identifiable {
+struct OpenTerminal: Identifiable {
     let session: TerminalSession
     let item: ViewerItem
     /// Its place among its own item's tabs, from 1. Shells in the same folder

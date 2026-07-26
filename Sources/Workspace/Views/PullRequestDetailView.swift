@@ -568,11 +568,15 @@ struct PullRequestDetailView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
                     ForEach(item.commits) { commit in
-                        CommitRow(commit: commit) {
-                            Task {
-                                await store.showCommit(commit, on: item, project: project, pr: pr)
-                            }
-                        }
+                        CommitRow(
+                            commit: commit,
+                            onOpen: {
+                                Task {
+                                    await store.showCommit(commit, on: item, project: project, pr: pr)
+                                }
+                            },
+                            openPullRequest: { store.openPullRequest(number: $0, project: project) }
+                        )
                     }
                 }
                 .padding(12)
@@ -663,15 +667,21 @@ struct PullRequestDetailView: View {
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 AuthorAvatar(name: commit.author, url: commit.avatarURL, size: 16)
                     .alignmentGuide(.firstTextBaseline) { $0.height * 0.8 }
-                Text(commit.headline)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(2)
+                CommitMessageText(
+                    text: commit.headline,
+                    font: .preferredFont(forTextStyle: .callout).weighted(.medium),
+                    lineLimit: 2,
+                    openReference: { store.openPullRequest(number: $0, project: project) }
+                )
             }
             if !commit.body.isEmpty {
-                Text(commit.body)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(4)
+                CommitMessageText(
+                    text: commit.body,
+                    font: .preferredFont(forTextStyle: .caption1),
+                    color: .secondaryLabelColor,
+                    lineLimit: 4,
+                    openReference: { store.openPullRequest(number: $0, project: project) }
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1182,8 +1192,13 @@ struct PullRequestActionSheet: View {
 struct CommitRow: View {
     let commit: PullRequestCommit
     let onOpen: () -> Void
+    /// Following a `#123` written in the message.
+    let openPullRequest: (Int) -> Void
 
     @State private var isHovering = false
+    /// The message draws itself in AppKit and reports the pointer separately,
+    /// so the row keeps its highlight while the pointer is over the text.
+    @State private var isHoveringMessage = false
 
     var body: some View {
         Button(action: onOpen) {
@@ -1197,12 +1212,18 @@ struct CommitRow: View {
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
                     .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+                    // Held at its full size: a very long subject would otherwise
+                    // squeeze the hash down to a stripe.
+                    .fixedSize()
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(commit.headline)
-                        .font(.callout)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
+                    CommitMessageText(
+                        text: commit.headline,
+                        lineLimit: 2,
+                        openReference: openPullRequest,
+                        otherClick: onOpen,
+                        hoverChanged: { isHoveringMessage = $0 }
+                    )
                     HStack(spacing: 5) {
                         if let date = commit.date {
                             Text(date.formatted(.relative(presentation: .named)))
@@ -1212,6 +1233,9 @@ struct CommitRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
+                // The subject gets the room the row has left over, rather than
+                // splitting it with the gap that follows.
+                .layoutPriority(1)
 
                 Spacer(minLength: 6)
 
@@ -1223,7 +1247,7 @@ struct CommitRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .background(
-                .quaternary.opacity(isHovering ? 0.34 : 0.22),
+                .quaternary.opacity(isHovering || isHoveringMessage ? 0.34 : 0.22),
                 in: RoundedRectangle(cornerRadius: 8)
             )
         }

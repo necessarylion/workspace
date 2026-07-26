@@ -191,7 +191,9 @@ struct ViewerView: View {
         return HStack(spacing: 7) {
             // A commit is one person's work, so the face says more than the
             // glyph every other kind of item gets.
-            if let author = item.authorName {
+            if item.isClaude {
+                ClaudeMark(size: 15)
+            } else if let author = item.authorName {
                 AuthorAvatar(name: author, url: item.authorAvatarURL, size: 16)
             } else if let brand = item.brand {
                 BrandMark(name: brand.name, size: 13, color: brand.color)
@@ -258,17 +260,49 @@ struct ViewerView: View {
             fileContent(item)
         case .workingDiff, .commit:
             diffContent(item)
-        case .pullRequest(let projectID, _):
+        case .pullRequest(let projectID, let number):
             if let pr = item.pullRequest, let project = store.project(withID: projectID) {
                 PullRequestDetailView(item: item, pr: pr, project: project)
+            } else if item.isLoading {
+                // Opened by number, from a `#123` in a commit message: the host
+                // has not said what it is yet.
+                ProgressView("Loading pull request #\(number)…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ContentUnavailableView("Pull request unavailable", systemImage: "arrow.triangle.pull")
+                unavailablePullRequest(number, projectID: projectID, message: item.errorMessage)
             }
         case .terminal:
             if item.terminals.isEmpty {
                 ContentUnavailableView("Terminal ended", systemImage: "terminal")
             } else {
                 TerminalContainerView(item: item)
+            }
+        case .claude(let projectID):
+            if let session = item.claude {
+                ClaudeChatView(session: session, project: store.project(withID: projectID))
+            } else {
+                ContentUnavailableView("No conversation", systemImage: "sparkles")
+            }
+        }
+    }
+
+    /// A pull request the host would not give up. Its page is still worth an
+    /// offer — the CLI may simply not be signed in to that repository.
+    @ViewBuilder
+    private func unavailablePullRequest(
+        _ number: Int,
+        projectID: URL,
+        message: String?
+    ) -> some View {
+        let url = store.project(withID: projectID)?.remote?.pullRequestURL(number: number)
+        ContentUnavailableView {
+            Label("Pull request #\(number) unavailable", systemImage: "arrow.triangle.pull")
+        } description: {
+            Text(message ?? "The host did not answer for this pull request.")
+        } actions: {
+            if let url {
+                Button("Open in Browser") { NSWorkspace.shared.open(url) }
+                    .pointerCursor()
             }
         }
     }
@@ -449,7 +483,8 @@ struct WelcomeView: View {
     private func projectOverview(_ project: Project) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             // The name itself is in the header bar above. What is left is where
-            // the repository lives and which branch it is on.
+            // the repository lives and which branch it is on — and, at the end
+            // of the row, the way into Claude.
             HStack(spacing: 6) {
                 GitHostIcon(host: project.host, size: 14)
                 Text(project.remote?.fullName ?? project.url.path)
@@ -458,6 +493,8 @@ struct WelcomeView: View {
                     Image(systemName: "arrow.triangle.branch")
                     Text(status.branch)
                 }
+                Spacer(minLength: 12)
+                AskClaudeButton { store.openClaudeChat(in: project) }
             }
             .font(.callout)
             .foregroundStyle(.secondary)
@@ -584,9 +621,11 @@ struct WelcomeView: View {
                                 .frame(height: 1)
                         }
                         ForEach(day.commits) { commit in
-                            RepositoryCommitRow(commit: commit) {
-                                store.openCommit(commit, project: project)
-                            }
+                            RepositoryCommitRow(
+                                commit: commit,
+                                open: { store.openCommit(commit, project: project) },
+                                openPullRequest: { store.openPullRequest(number: $0, project: project) }
+                            )
                         }
                     }
                 }
@@ -643,13 +682,50 @@ struct WelcomeView: View {
     }
 }
 
+/// The way into the chat, at the top of the dashboard. It carries Claude's own
+/// icon rather than a glyph, so it is found by looking rather than by reading —
+/// which is the point of putting it above everything else on the board.
+struct AskClaudeButton: View {
+    let open: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 6) {
+                ClaudeMark(size: 14)
+                Text("Ask Claude")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+            .background(
+                .quaternary.opacity(isHovering ? 0.5 : 0.3),
+                in: Capsule()
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .pointerCursor()
+        .help("Open a Claude Code conversation about this repository")
+        .fixedSize()
+    }
+}
+
 /// One commit of the repository's history on the dashboard. The whole row opens
 /// what that commit changed.
 struct RepositoryCommitRow: View {
     let commit: RepositoryCommit
     let open: () -> Void
+    /// Following a `#123` written in the message.
+    let openPullRequest: (Int) -> Void
 
     @State private var isHovering = false
+    /// The message draws itself in AppKit, so it reports the pointer separately
+    /// — without this the row would drop its highlight over the message.
+    @State private var isHoveringMessage = false
 
     var body: some View {
         Button(action: open) {
@@ -665,11 +741,19 @@ struct RepositoryCommitRow: View {
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
                     .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+                    // Held at its full size: a 200-character merge subject would
+                    // otherwise squeeze the hash down to a stripe.
+                    .fixedSize()
 
-                Text(commit.headline)
-                    .font(.callout)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                CommitMessageText(
+                    text: commit.headline,
+                    openReference: openPullRequest,
+                    otherClick: open,
+                    hoverChanged: { isHoveringMessage = $0 }
+                )
+                // The subject gets the room the row has left over, rather than
+                // splitting it with the gap that follows.
+                .layoutPriority(1)
 
                 Spacer(minLength: 8)
 
@@ -678,6 +762,9 @@ struct RepositoryCommitRow: View {
                 if let date = commit.date {
                     Text(date.formatted(date: .omitted, time: .shortened))
                         .foregroundStyle(.tertiary)
+                        // For the same reason as the hash: the hour reads across,
+                        // never one letter to a line.
+                        .fixedSize()
                 }
             }
             .font(.caption.monospacedDigit())
@@ -686,7 +773,7 @@ struct RepositoryCommitRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .background(
-                .quaternary.opacity(isHovering ? 0.34 : 0.18),
+                .quaternary.opacity(isHovering || isHoveringMessage ? 0.34 : 0.18),
                 in: RoundedRectangle(cornerRadius: 8)
             )
         }
