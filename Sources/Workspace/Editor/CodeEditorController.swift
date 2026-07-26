@@ -214,12 +214,11 @@ final class CodeEditorController: NSViewController {
         highlightVisible()
     }
 
-    /// The face, size and line spacing chosen in Settings. Applied before the
-    /// view is loaded it only seeds the theme, so the first layout already uses
-    /// them rather than laying the file out twice.
-    func applyAppearance(font: NSFont, lineHeight: CGFloat) {
-        guard theme.font != font || theme.lineHeightMultiple != lineHeight else { return }
-        let theme = SyntaxTheme(font: font, lineHeightMultiple: lineHeight)
+    /// The face, size, line spacing and colours chosen in Settings. Applied
+    /// before the view is loaded it only seeds the theme, so the first layout
+    /// already uses them rather than laying the file out twice.
+    func applyAppearance(_ theme: SyntaxTheme) {
+        guard self.theme != theme else { return }
         if isViewLoaded {
             updateTheme(theme)
         } else {

@@ -85,6 +85,18 @@ struct WorkspaceApp: App {
                 .keyboardShortcut("t", modifiers: [.control, .command])
                 .disabled(store.selectedProject == nil)
 
+                // ⌃` the way editors do it: the same key in and back out. It
+                // has to be a menu item — the terminal swallows plain keys, and
+                // a key equivalent is dispatched before it ever sees them.
+                Button(
+                    store.current?.isTerminal == true && !store.showsDashboard
+                        ? "Hide Terminal"
+                        : "Show Terminal"
+                ) {
+                    store.toggleTerminal()
+                }
+                .keyboardShortcut("`", modifiers: .control)
+
                 // From inside a terminal this adds a tab next to it; from
                 // anywhere else it starts one for the selected repository.
                 Button("New Terminal Tab") {

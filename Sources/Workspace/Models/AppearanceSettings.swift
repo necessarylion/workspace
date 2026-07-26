@@ -32,6 +32,11 @@ final class AppearanceSettings {
         didSet { UserDefaults.standard.set(editorLineHeight, forKey: Keys.lineHeight) }
     }
 
+    /// The theme the editor and the diff are drawn with.
+    var palette: SyntaxPalette {
+        didSet { UserDefaults.standard.set(palette.name, forKey: Keys.theme) }
+    }
+
     /// False leaves the terminal to the user's own Ghostty config.
     var overridesTerminalFont: Bool {
         didSet {
@@ -71,6 +76,7 @@ final class AppearanceSettings {
         static let editorSize = "appearance.editorFontSize"
         static let diffSize = "appearance.diffFontSize"
         static let lineHeight = "appearance.editorLineHeight"
+        static let theme = "appearance.theme"
         static let terminalOverride = "appearance.terminalFontOverride"
         static let terminalFont = "appearance.terminalFont"
         static let terminalSize = "appearance.terminalFontSize"
@@ -91,6 +97,8 @@ final class AppearanceSettings {
         editorLineHeight = Self.lineHeightRange.contains(storedLineHeight)
             ? storedLineHeight
             : Default.lineHeight
+
+        palette = SyntaxPalette.named(defaults.string(forKey: Keys.theme))
     }
 
     private static func size(_ stored: Double, or fallback: Double) -> Double {
@@ -111,7 +119,7 @@ final class AppearanceSettings {
     var editorFont: NSFont { Self.font(named: codeFontName, size: editorFontSize) }
 
     var editorTheme: SyntaxTheme {
-        SyntaxTheme(font: editorFont, lineHeightMultiple: editorLineHeight)
+        SyntaxTheme(font: editorFont, lineHeightMultiple: editorLineHeight, palette: palette)
     }
 
     /// The diff's font, as SwiftUI wants it. Fixed size rather than a text
@@ -190,6 +198,7 @@ final class AppearanceSettings {
             || diffFontSize != Default.diffSize
             || editorLineHeight != Default.lineHeight
             || overridesTerminalFont
+            || palette.name != SyntaxPalette.all[0].name
     }
 
     func restoreDefaults() {
@@ -199,6 +208,7 @@ final class AppearanceSettings {
         editorLineHeight = Default.lineHeight
         terminalFontName = nil
         terminalFontSize = Default.terminalSize
+        palette = SyntaxPalette.all[0]
         // Last, so the terminal is rebuilt once, with everything else already back.
         overridesTerminalFont = false
     }

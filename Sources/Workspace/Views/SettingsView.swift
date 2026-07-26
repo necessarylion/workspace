@@ -12,7 +12,7 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             FontSettings()
-                .tabItem { Label("Fonts", systemImage: "textformat") }
+                .tabItem { Label("Appearance", systemImage: "paintpalette") }
             RequirementsSettings()
                 .tabItem { Label("Requirements", systemImage: "wrench.and.screwdriver") }
             LanguageServerSettings()
@@ -43,6 +43,28 @@ private struct FontSettings: View {
     var body: some View {
         VStack(spacing: 0) {
             Form {
+                Section {
+                    Picker(
+                        "Theme",
+                        selection: Binding(
+                            get: { appearance.palette.name },
+                            set: { name in appearance.palette = SyntaxPalette.named(name) }
+                        )
+                    ) {
+                        ForEach(SyntaxPalette.all, id: \.name) { palette in
+                            Text(palette.name).tag(palette.name)
+                        }
+                    }
+                    .pointerCursor()
+                    themeSwatches
+                } header: {
+                    Text("Theme")
+                } footer: {
+                    Text("Colours for the editor and the diff. Both themes travel with the app, so a file looks the same on every Mac you run it on.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+
                 Section {
                     FacePicker(
                         title: "Face",
@@ -92,6 +114,7 @@ private struct FontSettings: View {
                             set: { appearance.overridesTerminalFont = $0 }
                         )
                     )
+                    .pointerCursor()
                     FacePicker(
                         title: "Face",
                         // Ghostty picks its own face when we name none — it is
@@ -133,6 +156,46 @@ private struct FontSettings: View {
             Divider()
             footer
         }
+    }
+
+    /// The theme's own colours, on the theme's own background — quicker to
+    /// judge than any name, and the only way to tell two dark themes apart.
+    private var themeSwatches: some View {
+        let palette = appearance.palette
+        return HStack(spacing: 0) {
+            ForEach(Self.swatchCaptures, id: \.self) { capture in
+                Text(capture.token)
+                    .font(appearance.previewFont(named: appearance.codeFontName, size: 11))
+                    .foregroundStyle(Color(nsColor: palette.style(for: capture.capture)?.color ?? palette.foreground))
+                    .padding(.trailing, 10)
+            }
+            Spacer()
+        }
+        .lineLimit(1)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Color(nsColor: palette.background ?? AppColors.viewerBackground),
+            in: .rect(cornerRadius: 6)
+        )
+    }
+
+    /// One word per colour the eye actually looks for in code.
+    private static let swatchCaptures: [SwatchCapture] = [
+        SwatchCapture(token: "import", capture: "include"),
+        SwatchCapture(token: "class", capture: "storageclass"),
+        SwatchCapture(token: "Type", capture: "type"),
+        SwatchCapture(token: "call()", capture: "function"),
+        SwatchCapture(token: "\"text\"", capture: "string"),
+        SwatchCapture(token: "42", capture: "number"),
+        SwatchCapture(token: "param", capture: "variable.parameter"),
+        SwatchCapture(token: "// note", capture: "comment")
+    ]
+
+    struct SwatchCapture: Hashable {
+        let token: String
+        let capture: String
     }
 
     /// `lineHeight` is a multiple of the font's own height, the way the editor

@@ -9,6 +9,7 @@ final class Project: Identifiable {
         var hash: String
         var subject: String
         var author: String
+        var avatarURL: URL?
         var date: Date?
     }
 
@@ -34,7 +35,13 @@ final class Project: Identifiable {
     /// What the branch is sitting on right now.
     var headCommit: Commit? {
         recentCommits.first.map {
-            Commit(hash: $0.shortSHA, subject: $0.headline, author: $0.author, date: $0.date)
+            Commit(
+                hash: $0.shortSHA,
+                subject: $0.headline,
+                author: $0.displayAuthor,
+                avatarURL: $0.avatarURL,
+                date: $0.date
+            )
         }
     }
 
@@ -137,6 +144,14 @@ final class Project: Identifiable {
     private func apply(_ page: RepositoryCommit.Page) {
         recentCommits = page.commits
         hasMoreCommits = page.hasMore
+        // Who these addresses belong to on the host, so a commit row shows the
+        // same face the pull request tiles above it do.
+        AvatarDirectory.shared.learn(
+            emails: page.commits.map(\.authorEmail),
+            remote: remote,
+            branch: gitStatus?.branch,
+            in: url
+        )
     }
 
     func refreshPullRequests() async {
@@ -211,6 +226,58 @@ final class Project: Identifiable {
 
     func stageAll() async {
         await runGit(["add", "--all"])
+    }
+
+    /// Throws a file's changes away — staged and unstaged alike, because a file
+    /// left half-reverted is not what "discard" means — and deletes it outright
+    /// when git never tracked it. Nothing here can be undone, so the caller asks
+    /// the user first.
+    @discardableResult
+    func discard(_ paths: [String]) async -> Bool {
+        guard !paths.isEmpty, !isRunningGitCommand else { return false }
+        isRunningGitCommand = true
+        gitError = nil
+        defer { isRunningGitCommand = false }
+
+        // Which of these paths HEAD has a version of. The rest — new files, and
+        // files staged but never committed — have nothing to restore, so they
+        // are deleted instead. `-z` because ls-tree otherwise quotes any path
+        // with an unusual character in it.
+        let listed = await Shell.run(
+            ["git", "ls-tree", "HEAD", "--name-only", "-z", "--"] + paths,
+            in: url,
+            timeout: 30
+        )
+        let known = Set(listed.stdout.split(separator: "\0").map(String.init))
+
+        var steps: [[String]] = []
+        if listed.isSuccess {
+            // Drops the index entry for everything, new files included;
+            // `restore --staged` cannot do that.
+            steps.append(["reset", "--quiet", "HEAD", "--"] + paths)
+        } else {
+            // No HEAD yet: the branch has no commit, so there is only an index
+            // to empty.
+            steps.append(["rm", "--cached", "--force", "-r", "--quiet", "--ignore-unmatch", "--"] + paths)
+        }
+        let restore = paths.filter { known.contains($0) }
+        if !restore.isEmpty { steps.append(["checkout", "--"] + restore) }
+        let remove = paths.filter { !known.contains($0) }
+        // `-d` because git collapses a wholly untracked folder to the folder.
+        if !remove.isEmpty { steps.append(["clean", "--force", "-d", "--"] + remove) }
+
+        var succeeded = true
+        for step in steps {
+            let result = await Shell.run(["git"] + step, in: url, timeout: 120)
+            guard !result.isSuccess else { continue }
+            gitError = result.failureMessage.isEmpty
+                ? "git \(step.first ?? "") failed."
+                : result.failureMessage
+            succeeded = false
+            break
+        }
+        await refreshGitStatus()
+        return succeeded
     }
 
     /// True when the commit was made. `--only` with the staged paths would be

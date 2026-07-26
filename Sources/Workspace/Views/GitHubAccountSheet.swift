@@ -66,6 +66,11 @@ struct GitHubAccountSheet: View {
                     ? "largecircle.fill.circle"
                     : "circle")
                     .foregroundStyle(selection == account.login ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                AuthorAvatar(
+                    name: account.login,
+                    url: AvatarURL.gitHub(login: account.login),
+                    size: 20
+                )
                 Text(account.login)
                     .font(.callout.weight(.medium))
                 if account.isActive {

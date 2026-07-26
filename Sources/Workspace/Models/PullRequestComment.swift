@@ -31,6 +31,8 @@ struct PullRequestComment: Identifiable, Sendable, Hashable {
     /// The comment this one replies to, when the host threads its comments.
     var parentID: String?
     var author: String
+    /// The author's picture, when the host tells us where to find one.
+    var avatarURL: URL?
     var body: String
     var createdAt: Date?
     var kind: Kind
@@ -167,6 +169,7 @@ extension PullRequestService {
                     id: "issue-\(comment.id ?? "\(index)")",
                     parentID: nil,
                     author: comment.author?.login ?? "unknown",
+                    avatarURL: AvatarURL.gitHub(login: comment.author?.login, host: pr.url?.host),
                     body: comment.body ?? "",
                     createdAt: comment.createdAt.flatMap(parseTimestamp),
                     kind: .comment,
@@ -189,6 +192,7 @@ extension PullRequestService {
                     id: "review-\(review.id ?? "\(index)")",
                     parentID: nil,
                     author: review.author?.login ?? "unknown",
+                    avatarURL: AvatarURL.gitHub(login: review.author?.login, host: pr.url?.host),
                     body: body,
                     createdAt: review.submittedAt.flatMap(parseTimestamp),
                     kind: .review(state: state),
@@ -219,7 +223,16 @@ extension PullRequestService {
         guard result.isSuccess else { return [] }
 
         struct ReviewComment: Decodable {
-            struct User: Decodable { let login: String? }
+            struct User: Decodable {
+                let login: String?
+                /// The REST API, unlike `gh pr view`, hands the picture over.
+                let avatarURL: String?
+
+                enum CodingKeys: String, CodingKey {
+                    case login
+                    case avatarURL = "avatar_url"
+                }
+            }
             let id: Int
             let inReplyToID: Int?
             let user: User?
@@ -247,6 +260,8 @@ extension PullRequestService {
                 id: "review-comment-\(comment.id)",
                 parentID: comment.inReplyToID.map { "review-comment-\($0)" },
                 author: comment.user?.login ?? "unknown",
+                avatarURL: AvatarURL.hosted(comment.user?.avatarURL)
+                    ?? AvatarURL.gitHub(login: comment.user?.login, host: pr.url?.host),
                 body: comment.body ?? "",
                 createdAt: comment.createdAt.flatMap(parseTimestamp),
                 kind: .comment,
@@ -333,9 +348,8 @@ extension PullRequestService {
             guard !body.isEmpty else { return nil }
 
             let user = item["user"] as? [String: Any]
-            let author = user?["display_name"] as? String
-                ?? user?["nickname"] as? String
-                ?? "unknown"
+            let author = BitbucketUser.name(from: user) ?? "unknown"
+            let avatar = ((user?["links"] as? [String: Any])?["avatar"] as? [String: Any])?["href"]
 
             let identifier = "\(item["id"] ?? "cloud-\(index)")"
             let parent = (item["parent"] as? [String: Any])?["id"]
@@ -348,6 +362,7 @@ extension PullRequestService {
                 id: identifier,
                 parentID: parent.map { "\($0)" },
                 author: author,
+                avatarURL: AvatarURL.hosted(avatar as? String),
                 body: body,
                 createdAt: (item["created_on"] as? String).flatMap(parseTimestamp),
                 kind: .comment,
@@ -374,11 +389,14 @@ extension PullRequestService {
             guard let content, !content.isEmpty else { return nil }
 
             let userDictionary = (dictionary["user"] ?? dictionary["author"]) as? [String: Any]
-            let author = userDictionary?["display_name"] as? String
-                ?? userDictionary?["displayName"] as? String
-                ?? userDictionary?["username"] as? String
-                ?? userDictionary?["name"] as? String
-                ?? "unknown"
+            let author = BitbucketUser.name(from: userDictionary) ?? "unknown"
+
+            // Cloud hangs the picture off `links.avatar`, Data Center off a
+            // plain `avatarUrl` — and Data Center's is often a path, which
+            // `AvatarURL.hosted` drops rather than turn into a broken request.
+            let links = userDictionary?["links"] as? [String: Any]
+            let avatar = (links?["avatar"] as? [String: Any])?["href"] as? String
+                ?? userDictionary?["avatarUrl"] as? String
 
             let timestamp = dictionary["created_on"] as? String
                 ?? dictionary["createdDate"] as? String
@@ -406,6 +424,7 @@ extension PullRequestService {
                 id: identifier,
                 parentID: parent.map { "\($0)" },
                 author: author,
+                avatarURL: AvatarURL.hosted(avatar),
                 body: content,
                 createdAt: timestamp.flatMap(parseTimestamp),
                 kind: .comment,

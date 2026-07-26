@@ -5,6 +5,8 @@ struct PullRequest: Identifiable, Sendable, Hashable {
     var number: Int
     var title: String
     var author: String
+    /// The author's picture, when the host tells us where to find one.
+    var avatarURL: URL?
     var sourceBranch: String
     var targetBranch: String
     var body: String
@@ -31,6 +33,38 @@ struct PullRequest: Identifiable, Sendable, Hashable {
         case "REVIEW_REQUIRED": "Review required"
         default: nil
         }
+    }
+}
+
+/// The `links` object Bitbucket hangs off a user. Cloud keeps the avatar there;
+/// Data Center puts it in a plain `avatarUrl` beside it.
+struct BitbucketUserLinks: Decodable {
+    struct Link: Decodable { let href: String? }
+    let avatar: Link?
+}
+
+/// Reading a Bitbucket user object, whichever flavour of Bitbucket sent it.
+enum BitbucketUser {
+    /// The handle the account signs in with, which is what the app shows —
+    /// GitHub has nothing but handles, so a Bitbucket repository reading
+    /// "Pankaj Kamadiya" beside a GitHub one reading "ajsead" is two apps in
+    /// one. Cloud calls it `nickname` (older payloads `username`), Data Center
+    /// `name` or `slug`.
+    static func login(from user: [String: Any]?) -> String? {
+        for key in ["nickname", "username", "name", "slug"] {
+            if let value = user?[key] as? String, !value.isEmpty { return value }
+        }
+        return nil
+    }
+
+    /// The handle when the payload carries one, the person's full name when it
+    /// does not.
+    static func name(from user: [String: Any]?) -> String? {
+        if let login = login(from: user) { return login }
+        for key in ["display_name", "displayName"] {
+            if let value = user?[key] as? String, !value.isEmpty { return value }
+        }
+        return nil
     }
 }
 
@@ -130,14 +164,18 @@ enum PullRequestService {
         let items = (try? JSONDecoder().decode([Item].self, from: data)) ?? []
 
         return items.map { item in
-            PullRequest(
+            let url = item.url.flatMap(URL.init(string:))
+            return PullRequest(
                 number: item.number,
                 title: item.title,
                 author: item.author?.login ?? "unknown",
+                // `gh` gives a login and no picture, and the pull request's own
+                // URL says which GitHub the login belongs to.
+                avatarURL: AvatarURL.gitHub(login: item.author?.login, host: url?.host),
                 sourceBranch: item.headRefName,
                 targetBranch: item.baseRefName,
                 body: item.body ?? "",
-                url: item.url.flatMap(URL.init(string:)),
+                url: url,
                 isDraft: item.isDraft,
                 updatedAt: item.updatedAt.flatMap(parseDate),
                 additions: item.additions,
@@ -184,7 +222,14 @@ enum PullRequestService {
             struct Item: Decodable {
                 struct Author: Decodable {
                     let display_name: String?
+                    /// Cloud dropped `username` for `nickname`; both turn up,
+                    /// depending on the payload and the flavour.
                     let username: String?
+                    let nickname: String?
+                    /// Cloud puts the picture under `links.avatar`; Data Center
+                    /// names it `avatarUrl` on the user itself.
+                    let links: BitbucketUserLinks?
+                    let avatarUrl: String?
                 }
                 struct Ref: Decodable {
                     struct Branch: Decodable { let name: String? }
@@ -214,13 +259,16 @@ enum PullRequestService {
         }
 
         return response.pull_requests.map { item in
-            let author = item.author?.display_name?.isEmpty == false
-                ? item.author?.display_name
-                : item.author?.username
+            // The handle first, to read the same way GitHub's login does.
+            let author = [item.author?.username, item.author?.nickname, item.author?.display_name]
+                .compactMap { $0 }
+                .first { !$0.isEmpty }
             return PullRequest(
                 number: item.id,
                 title: item.title,
                 author: author ?? "unknown",
+                avatarURL: AvatarURL.hosted(item.author?.links?.avatar?.href)
+                    ?? AvatarURL.hosted(item.author?.avatarUrl),
                 sourceBranch: item.source?.branch?.name ?? "",
                 targetBranch: item.destination?.branch?.name ?? "",
                 body: item.summary?.raw ?? "",

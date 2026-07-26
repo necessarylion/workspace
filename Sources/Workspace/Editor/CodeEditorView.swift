@@ -10,11 +10,9 @@ struct CodeEditorView: NSViewControllerRepresentable {
     let document: OpenDocument
     let projectRoot: URL?
     var wrapsLines: Bool
-    /// The face, size and line spacing from Settings, passed in rather than
-    /// read here: a representable is not a view body, so nothing it reads is
-    /// observed.
-    var font: NSFont
-    var lineHeight: CGFloat
+    /// The font and colours from Settings, passed in rather than read here: a
+    /// representable is not a view body, so nothing it reads is observed.
+    var theme: SyntaxTheme
     var onOpenLocation: ((URL, Int) -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -26,7 +24,7 @@ struct CodeEditorView: NSViewControllerRepresentable {
         let coordinator = context.coordinator
         coordinator.controller = controller
         // Before the view loads, so the file is laid out in the right font once.
-        controller.applyAppearance(font: font, lineHeight: lineHeight)
+        controller.applyAppearance(theme)
 
         // Every callback goes through the coordinator: the controller is
         // reused across files, and closures capturing `document` directly
@@ -76,7 +74,7 @@ struct CodeEditorView: NSViewControllerRepresentable {
             controller.wrapsLines = wrapsLines
         }
 
-        controller.applyAppearance(font: font, lineHeight: lineHeight)
+        controller.applyAppearance(theme)
 
         if let line = document.revealLine {
             // Clearing the request is a state change, so it waits a runloop turn.

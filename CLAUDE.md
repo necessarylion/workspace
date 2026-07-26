@@ -59,6 +59,10 @@ The app is one window with three panes, and the mental model that drives the cod
 - **Host abstraction** — `PullRequest.swift` / `PullRequestComment.swift` define a
   unified PR model with separate `gh` and `bkt` loaders. New PR features must be
   implemented for both hosts.
+- **Themes** (`Themes/`) — one `SyntaxPalette` per file (capture name → colour),
+  listed in `Themes.swift`; the first entry is the default. They are checked in
+  rather than read from the user's VS Code at runtime, so a file looks the same
+  on every Mac. `Scripts/import-vscode-theme.swift "Some Theme"` ports a new one.
 - **Editor** (`Editor/`) — hand-rolled, not a library: `CodeEditorController` wires
   an `NSTextView` subclass (`CodeTextView`), the gutter (`LineNumberRuler`),
   incremental tree-sitter highlighting (`TreeSitterHighlighter`), and LSP.

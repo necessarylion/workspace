@@ -126,6 +126,7 @@ struct InfoPanelView: View {
                         .lineLimit(2)
                     HStack(spacing: 5) {
                         Text(commit.hash).font(.system(.caption2, design: .monospaced))
+                        AuthorAvatar(name: commit.author, url: commit.avatarURL, size: 13)
                         Text(commit.author)
                         if let date = commit.date {
                             Text(date.formatted(.relative(presentation: .named)))

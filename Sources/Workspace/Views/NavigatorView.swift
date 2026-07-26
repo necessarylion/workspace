@@ -406,6 +406,7 @@ struct PullRequestCard: View {
             }
 
             HStack(spacing: 5) {
+                AuthorAvatar(name: pr.author, url: pr.avatarURL, size: 14)
                 Text(pr.author)
                     .lineLimit(1)
                 Image(systemName: "arrow.right").imageScale(.small)
@@ -447,6 +448,10 @@ struct ChangeListView: View {
     @Environment(WorkspaceStore.self) private var store
     let project: Project
 
+    /// The file the discard button was pressed for, while its confirmation is
+    /// up. Discarding cannot be undone, so it never runs straight off the click.
+    @State private var pendingDiscard: GitStatus.Change?
+
     private var isBusy: Bool { project.isRunningGitCommand }
 
     private var canCommit: Bool {
@@ -487,6 +492,39 @@ struct ChangeListView: View {
         // rather than showing whatever the last scan found.
         .task(id: project.id) {
             await project.refreshGitStatus()
+        }
+        .confirmationDialog(
+            pendingDiscard.map { "Discard changes to \(($0.path as NSString).lastPathComponent)?" } ?? "",
+            isPresented: Binding(
+                get: { pendingDiscard != nil },
+                set: { if !$0 { pendingDiscard = nil } }
+            ),
+            presenting: pendingDiscard
+        ) { change in
+            Button(change.label == "Untracked" ? "Delete File" : "Discard Changes", role: .destructive) {
+                discard(change)
+            }
+            Button("Cancel", role: .cancel) { pendingDiscard = nil }
+        } message: { change in
+            Text(
+                change.label == "Untracked"
+                    ? "\(change.path) is not in git, so discarding deletes it. This cannot be undone."
+                    : "\(change.path) goes back to its last committed state, staged edits included. This cannot be undone."
+            )
+        }
+    }
+
+    private func discard(_ change: GitStatus.Change) {
+        pendingDiscard = nil
+        Task {
+            guard await project.discard([change.path]) else { return }
+            // The diff we were showing for this file no longer exists.
+            if let current = store.current,
+               case .workingDiff(let projectID, let path, _) = current.kind,
+               projectID == project.id, path == change.path {
+                store.closeCurrent()
+            }
+            store.showStatus("Discarded \((change.path as NSString).lastPathComponent)")
         }
     }
 
@@ -552,6 +590,16 @@ struct ChangeListView: View {
                 }
             }
             Spacer()
+            Button {
+                pendingDiscard = change
+            } label: {
+                Image(systemName: change.label == "Untracked" ? "trash" : "arrow.uturn.backward")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .disabled(isBusy)
+            .help(change.label == "Untracked" ? "Delete this untracked file" : "Discard this file's changes")
+            .pointerCursor(!isBusy)
             // The label this replaces is in the row's tooltip, and the coloured
             // symbol already says what kind of change it is.
             Button {

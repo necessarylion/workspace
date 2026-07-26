@@ -12,6 +12,9 @@ struct DiffView: View {
     @Binding var selectedFile: DiffFile.ID?
     /// The pull request view puts the switch in its own bar instead.
     var showsControls = true
+    /// Whether the file index is on screen. Left nil, this follows the
+    /// window-wide preference; a commit passes its own, which starts hidden.
+    var showsFiles: Binding<Bool>?
     /// What a pull request adds to a diff: the comments already anchored to a
     /// line, and the means to write another. A working-tree diff leaves it nil
     /// and behaves exactly as it did before.
@@ -44,7 +47,9 @@ struct DiffView: View {
 
     /// The file index is only worth its width when there is more than one file
     /// to choose between.
-    private var showsFileList: Bool { diff.files.count > 1 && store.showsDiffFiles }
+    private var showsFileList: Bool {
+        diff.files.count > 1 && (showsFiles?.wrappedValue ?? store.showsDiffFiles)
+    }
 
     /// The selection, ignored once the file it named is gone — a diff reloads
     /// while it is on screen, and a pull request can lose a file between two
@@ -74,7 +79,12 @@ struct DiffView: View {
     private var diffBody: some View {
         VStack(spacing: 0) {
             if showsControls {
-                DiffLayoutBar(diff: diff, layout: $layout, selectedFile: $selectedFile)
+                DiffLayoutBar(
+                    diff: diff,
+                    layout: $layout,
+                    selectedFile: $selectedFile,
+                    showsFiles: showsFiles
+                )
                 Divider()
             }
             // Vertical scrolling only: the diff always fits the window width,
@@ -389,17 +399,20 @@ struct DiffLayoutBar: View {
     let diff: Diff
     @Binding var layout: ViewerItem.DiffLayout
     @Binding var selectedFile: DiffFile.ID?
+    /// Nil follows the window-wide preference — see `DiffView.showsFiles`.
+    var showsFiles: Binding<Bool>?
 
     var body: some View {
         @Bindable var store = store
-        HStack(spacing: 10) {
+        let filesShown = showsFiles ?? $store.showsDiffFiles
+        return HStack(spacing: 10) {
             if diff.files.count > 1 {
-                Toggle(isOn: $store.showsDiffFiles) {
+                Toggle(isOn: filesShown) {
                     Image(systemName: "sidebar.left")
                 }
                 .toggleStyle(.button)
                 .controlSize(.small)
-                .help(store.showsDiffFiles ? "Hide the file list" : "Show the file list")
+                .help(filesShown.wrappedValue ? "Hide the file list" : "Show the file list")
                 .pointerCursor()
             }
 

@@ -397,7 +397,11 @@ struct PullRequestDetailView: View {
                 // No title here: the window header already names the pull
                 // request, and the description reads as its own thing.
                 HStack(spacing: 8) {
-                    Label(pr.author, systemImage: "person.crop.circle")
+                    Label {
+                        Text(pr.author)
+                    } icon: {
+                        AuthorAvatar(name: pr.author, url: pr.avatarURL, size: 16)
+                    }
                     Label {
                         Text(pr.host.displayName)
                     } icon: {
@@ -596,6 +600,12 @@ struct PullRequestDetailView: View {
                     selectedFile: Binding(
                         get: { item.commitDiffFile },
                         set: { item.commitDiffFile = $0 }
+                    ),
+                    // One commit of a pull request reads like any other commit:
+                    // the file index waits until it is asked for.
+                    showsFiles: Binding(
+                        get: { item.showsCommitFiles },
+                        set: { item.showsCommitFiles = $0 }
                     )
                 )
             } else if item.isLoadingCommitDiff {
@@ -646,9 +656,6 @@ struct PullRequestDetailView: View {
 
                 Spacer(minLength: 8)
 
-                Text(commit.author)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 if let date = commit.date {
                     Text(date.formatted(.relative(presentation: .named)))
                         .font(.caption)
@@ -656,9 +663,14 @@ struct PullRequestDetailView: View {
                 }
             }
 
-            Text(commit.headline)
-                .font(.callout.weight(.medium))
-                .lineLimit(2)
+            // The face leads the message, the way it leads every commit row.
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                AuthorAvatar(name: commit.author, url: commit.avatarURL, size: 16)
+                    .alignmentGuide(.firstTextBaseline) { $0.height * 0.8 }
+                Text(commit.headline)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(2)
+            }
             if !commit.body.isEmpty {
                 Text(commit.body)
                     .font(.caption)
@@ -1180,6 +1192,10 @@ struct CommitRow: View {
     var body: some View {
         Button(action: onOpen) {
             HStack(alignment: .top, spacing: 9) {
+                // Leads the row, as on the dashboard. The name is not written
+                // out — hovering the face says it.
+                AuthorAvatar(name: commit.author, url: commit.avatarURL, size: 16)
+
                 Text(commit.shortSHA)
                     .font(.caption.monospaced())
                     .padding(.horizontal, 5)
@@ -1191,8 +1207,7 @@ struct CommitRow: View {
                         .font(.callout)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
-                    HStack(spacing: 6) {
-                        Text(commit.author)
+                    HStack(spacing: 5) {
                         if let date = commit.date {
                             Text(date.formatted(.relative(presentation: .named)))
                                 .foregroundStyle(.tertiary)
@@ -1321,12 +1336,16 @@ struct CommentBubble: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
-                Image(systemName: comment.kind.symbol)
-                    .foregroundStyle(tint)
+                AuthorAvatar(name: comment.author, url: comment.avatarURL, size: 20)
                 Text(comment.author)
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(comment.authorColor)
+                // The face already says a person wrote this, so the plain
+                // comment icon is dropped; a review keeps its icon, which is
+                // what carries approved versus changes requested.
                 if case .review(let state) = comment.kind {
+                    Image(systemName: comment.kind.symbol)
+                        .foregroundStyle(tint)
                     Text(state.replacingOccurrences(of: "_", with: " ").lowercased())
                         .font(.caption2)
                         .padding(.horizontal, 5)

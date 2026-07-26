@@ -39,6 +39,15 @@ struct ContentView: View {
         // its own; this only names the window in the Window menu.
         .navigationTitle("Workspace")
         .overlay(alignment: .bottom) { statusToast }
+        .overlay {
+            if store.isSwitchingProjects {
+                ProjectSwitcherOverlay()
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: store.isSwitchingProjects)
+        .onWindowKeyEvent(matching: [.keyDown, .flagsChanged]) { event, window in
+            handleSwitcherKey(event, in: window)
+        }
         // Checked once at launch, so the sidebar's Settings button can point out
         // a missing `gh`/`bkt` before a pull request list comes back empty.
         .task { await tools.refresh() }
@@ -46,6 +55,54 @@ struct ContentView: View {
         .sheet(item: $store.gitHubAccountPrompt) { prompt in
             GitHubAccountSheet(prompt: prompt)
         }
+    }
+
+    // MARK: - Repository switcher (⌃⇥)
+
+    private static let tabKeyCode: UInt16 = 48
+    private static let returnKeyCode: UInt16 = 36
+    private static let leftArrowKeyCode: UInt16 = 123
+    private static let rightArrowKeyCode: UInt16 = 124
+    /// ⎋ by keycode rather than `NSEvent.isEscape`, because ⌃ is usually still
+    /// down when it is pressed to call the whole thing off.
+    private static let escapeKeyCode: UInt16 = 53
+
+    /// ⌃⇥ has to be caught here rather than bound to a control: the terminal
+    /// keeps every key it is given, and holding ⌃ across several presses is not
+    /// something a shortcut can express. Returns true for the keys it takes.
+    private func handleSwitcherKey(_ event: NSEvent, in window: NSWindow) -> Bool {
+        // A sheet is its own conversation; it finishes first.
+        guard window.attachedSheet == nil else { return false }
+
+        // Letting go of ⌃ is what picks — the row is only up while it is held.
+        if event.type == .flagsChanged {
+            if store.isSwitchingProjects, !event.modifierFlags.contains(.control) {
+                store.commitProjectSwitcher()
+            }
+            return false
+        }
+
+        if event.keyCode == Self.tabKeyCode, event.modifierFlags.contains(.control) {
+            store.cycleProjectSwitcher(backwards: event.modifierFlags.contains(.shift))
+            return true
+        }
+
+        // The rest only mean anything while the row is up, and while it is up
+        // they are taken from whatever is underneath.
+        guard store.isSwitchingProjects else { return false }
+        switch event.keyCode {
+        case Self.leftArrowKeyCode:
+            store.moveProjectSwitcher(by: -1)
+        case Self.rightArrowKeyCode:
+            store.moveProjectSwitcher(by: 1)
+        case Self.returnKeyCode:
+            store.commitProjectSwitcher()
+        case Self.escapeKeyCode:
+            store.cancelProjectSwitcher()
+        default:
+            return false
+        }
+        return true
     }
 
     /// A rectangle with softened corners rather than a capsule: a git error runs

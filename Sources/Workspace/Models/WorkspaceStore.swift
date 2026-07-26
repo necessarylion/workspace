@@ -220,6 +220,71 @@ final class WorkspaceStore {
         }
     }
 
+    // MARK: - Repository switcher (⌃⇥)
+
+    /// Which repository the ⌃⇥ switcher is pointing at, as an index into
+    /// `projects`. `nil` while the switcher is away, which is most of the time.
+    ///
+    /// Nothing is selected until ⌃ is let go: the whole point of holding the key
+    /// is to look down the row first, and switching on every press would reload
+    /// each repository on the way past.
+    private(set) var switcherIndex: Int?
+
+    var isSwitchingProjects: Bool { switcherIndex != nil }
+
+    /// The repository the switcher is on, for the overlay to ring.
+    var switcherProject: Project? {
+        guard let switcherIndex, projects.indices.contains(switcherIndex) else { return nil }
+        return projects[switcherIndex]
+    }
+
+    /// ⌃⇥ — opens the switcher on the next repository, and moves one along for
+    /// every further press while ⌃ is still down. ⇧ turns it around. The list is
+    /// the sidebar's own order, the one the user dragged the cards into, and it
+    /// wraps at both ends.
+    ///
+    /// The filter box is ignored on purpose: it narrows what is *listed*, and a
+    /// switcher that could only reach some of the repositories would be a trap.
+    func cycleProjectSwitcher(backwards: Bool = false) {
+        guard projects.count > 1 else { return }
+        let from = switcherIndex
+            ?? projects.firstIndex { $0.id == selectedProjectID }
+            ?? 0
+        let step = backwards ? -1 : 1
+        switcherIndex = (from + step + projects.count) % projects.count
+    }
+
+    /// ← and → while the switcher is up, for picking one by eye rather than by
+    /// counting presses.
+    func moveProjectSwitcher(by step: Int) {
+        guard switcherIndex != nil else { return }
+        cycleProjectSwitcher(backwards: step < 0)
+    }
+
+    /// Puts the ring on one tile, for the pointer — clicking a tile picks it
+    /// whether or not ⇥ ever walked that far.
+    func moveProjectSwitcher(to index: Int) {
+        guard projects.indices.contains(index) else { return }
+        switcherIndex = index
+    }
+
+    /// ⌃ let go, or ⏎: the repository under the ring becomes the selected one.
+    /// Its viewer comes back exactly as it was left — each repository keeps its
+    /// own history — so this is a switch, not a reload.
+    func commitProjectSwitcher() {
+        guard let project = switcherProject else {
+            switcherIndex = nil
+            return
+        }
+        switcherIndex = nil
+        selectedProjectID = project.id
+    }
+
+    /// ⎋: the switcher goes away and the selection stays where it was.
+    func cancelProjectSwitcher() {
+        switcherIndex = nil
+    }
+
     /// Starring a repository. Pinned ones are kept at the top of the sidebar in
     /// alphabetical order, so this reorders the list as well as saving the flag.
     func togglePin(_ project: Project) {
@@ -621,6 +686,10 @@ final class WorkspaceStore {
             title: commit.headline,
             subtitle: "\(commit.shortSHA) · \(project.name)"
         )
+        // Re-set on every open: the host may have said who this address belongs
+        // to since the item was first made.
+        item.authorName = commit.displayAuthor
+        item.authorAvatarURL = commit.avatarURL
         present(item)
         if item.diff == nil {
             Task { await loadCommitDiff(item, project: project, sha: commit.sha) }
@@ -1096,6 +1165,21 @@ final class WorkspaceStore {
 
     func closeTerminal(_ recent: RecentTerminal) {
         closeTerminalTab(recent.session, in: recent.item)
+    }
+
+    /// ⌃` — in and out of the selected repository's shells, the way an editor's
+    /// terminal panel works. From anywhere else it shows them, starting one when
+    /// the repository has none; from inside them it puts the dashboard back, and
+    /// the shells keep running. With no repository selected it is the home
+    /// terminal, so the key does something before any repository is added.
+    func toggleTerminal() {
+        if !showsDashboard, let current, current.isTerminal {
+            closeCurrent()
+        } else if let project = selectedProject {
+            openTerminal(in: project)
+        } else {
+            openGlobalTerminal()
+        }
     }
 
     /// Always starts a fresh shell for a repository, next to any it already has.

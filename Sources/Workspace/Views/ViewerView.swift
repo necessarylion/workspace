@@ -28,6 +28,14 @@ struct ViewerView: View {
         // sidebars. Editor and diff draw the same colour; the terminal is
         // darker still.
         .background(Color(nsColor: AppColors.viewerBackground))
+        // ⎋ is the close button: it does what the ✕ in the header does. The
+        // editor and the comment boxes keep their own escapes — see
+        // `onEscapeKey` — and while the ⌃⇥ row is up, ⎋ belongs to it.
+        .onEscapeKey(
+            when: store.current != nil && !store.showsDashboard && !store.isSwitchingProjects
+        ) {
+            store.closeCurrent()
+        }
     }
 
     // MARK: - Header
@@ -97,8 +105,8 @@ struct ViewerView: View {
                 }
                 .help(
                     item.isTerminal
-                        ? "Back to the dashboard — the shells keep running (⇧⌘W)"
-                        : "Close and go back to the dashboard (⇧⌘W)"
+                        ? "Back to the dashboard — the shells keep running (⎋ or ⇧⌘W)"
+                        : "Close and go back to the dashboard (⎋ or ⇧⌘W)"
                 )
                 .pointerCursor()
             }
@@ -154,9 +162,15 @@ struct ViewerView: View {
             : item.title
 
         return HStack(spacing: 7) {
-            Image(systemName: item.symbol)
-                .foregroundStyle(.secondary)
-                .font(.caption)
+            // A commit is one person's work, so the face says more than the
+            // glyph every other kind of item gets.
+            if let author = item.authorName {
+                AuthorAvatar(name: author, url: item.authorAvatarURL, size: 16)
+            } else {
+                Image(systemName: item.symbol)
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+            }
             Text(title)
                 .font(.callout.weight(.medium))
                 .lineLimit(1)
@@ -242,8 +256,7 @@ struct ViewerView: View {
                         document: document,
                         projectRoot: store.project(containing: document.url)?.url,
                         wrapsLines: store.wrapsLines,
-                        font: AppearanceSettings.shared.editorFont,
-                        lineHeight: AppearanceSettings.shared.editorLineHeight,
+                        theme: AppearanceSettings.shared.editorTheme,
                         onOpenLocation: { url, line in
                             store.openFile(url, revealLine: line)
                         }
@@ -270,7 +283,12 @@ struct ViewerView: View {
             DiffView(
                 diff: diff,
                 layout: Binding(get: { item.diffLayout }, set: { item.diffLayout = $0 }),
-                selectedFile: Binding(get: { item.diffFile }, set: { item.diffFile = $0 })
+                selectedFile: Binding(get: { item.diffFile }, set: { item.diffFile = $0 }),
+                // A commit keeps its own, which starts hidden; a working-tree
+                // diff stays on the window-wide preference.
+                showsFiles: item.isCommit
+                    ? Binding(get: { item.showsCommitFiles }, set: { item.showsCommitFiles = $0 })
+                    : nil
             )
         } else {
             ContentUnavailableView(
@@ -602,6 +620,12 @@ struct RepositoryCommitRow: View {
     var body: some View {
         Button(action: open) {
             HStack(spacing: 9) {
+                // Leads the row: the rows line up into a column of faces, which
+                // is the fastest way to find your own commits in a long day.
+                // The name is not written out — hovering the face says it, and
+                // the subject deserves the width instead.
+                AuthorAvatar(name: commit.displayAuthor, url: commit.avatarURL, size: 16)
+
                 Text(commit.shortSHA)
                     .font(.caption.monospaced())
                     .padding(.horizontal, 5)
@@ -621,9 +645,6 @@ struct RepositoryCommitRow: View {
                     Text(date.formatted(date: .omitted, time: .shortened))
                         .foregroundStyle(.tertiary)
                 }
-                Text(commit.author)
-                    .lineLimit(1)
-                    .foregroundStyle(.secondary)
             }
             .font(.caption.monospacedDigit())
             .padding(.horizontal, 10)
@@ -759,7 +780,7 @@ struct PullRequestTile: View {
 
     private var footerRow: some View {
         HStack(spacing: 6) {
-            AuthorBadge(name: pr.author)
+            AuthorAvatar(name: pr.author, url: pr.avatarURL)
             Text(pr.author)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -791,38 +812,6 @@ struct PullRequestTile: View {
         }
         .font(.caption2.monospaced())
         .foregroundStyle(.tertiary)
-    }
-}
-
-/// The author's initials in a tinted disc — an avatar without a download. The
-/// colour comes from the name itself, so the same person is the same colour on
-/// every tile.
-struct AuthorBadge: View {
-    let name: String
-    var size: CGFloat = 16
-
-    private var initials: String {
-        let words = name
-            .split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "_" || $0 == "." })
-            .prefix(2)
-        let letters = words.compactMap(\.first)
-        return letters.isEmpty ? "?" : String(letters).uppercased()
-    }
-
-    /// A stable hue per name: the same string always lands on the same wheel
-    /// position, and no name lands on a colour the states above already use for
-    /// meaning — those are read, this one is only told apart.
-    private var tint: Color {
-        let hash = name.unicodeScalars.reduce(UInt32(7)) { $0 &* 31 &+ $1.value }
-        return Color(hue: Double(hash % 360) / 360, saturation: 0.45, brightness: 0.75)
-    }
-
-    var body: some View {
-        Text(initials)
-            .font(.system(size: size * 0.5, weight: .semibold))
-            .foregroundStyle(tint)
-            .frame(width: size, height: size)
-            .background(tint.opacity(0.22), in: Circle())
     }
 }
 

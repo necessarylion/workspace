@@ -274,6 +274,44 @@ final class CodeTextView: NSTextView {
         super.keyDown(with: event)
     }
 
+    /// Whether the completion list `complete(_:)` puts up is on screen.
+    ///
+    /// ⎋ closes the file otherwise (see `EscapeKey`), and while this list is up
+    /// ⎋ is the list's — dismissing it is the only way out of a completion you
+    /// did not want. `NSTextView` publishes no flag for it, so the two ends of
+    /// its own lifecycle are watched instead.
+    private(set) var isShowingCompletions = false
+
+    override func complete(_ sender: Any?) {
+        super.complete(sender)
+        isShowingCompletions = true
+    }
+
+    /// AppKit calls this however the list ends — a word picked, ⎋, or a click
+    /// somewhere else — with `flag` set on the last of them.
+    override func insertCompletion(
+        _ word: String,
+        forPartialWordRange charRange: NSRange,
+        movement: Int,
+        isFinal flag: Bool
+    ) {
+        super.insertCompletion(
+            word,
+            forPartialWordRange: charRange,
+            movement: movement,
+            isFinal: flag
+        )
+        if flag { isShowingCompletions = false }
+    }
+
+    /// Belt and braces: focus cannot leave with the list still up, and a flag
+    /// left stuck on would cost the user ⎋ for the rest of the session.
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { isShowingCompletions = false }
+        return resigned
+    }
+
     override func insertTab(_ sender: Any?) {
         insertText(String(repeating: " ", count: indentWidth), replacementRange: selectedRange())
     }

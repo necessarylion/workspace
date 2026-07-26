@@ -151,6 +151,13 @@ final class TreeSitterHighlighter {
     ///
     /// Later captures win when they overlap, which is how nested captures like
     /// `string` containing `string.escape` are meant to render.
+    ///
+    /// Predicates are resolved, and that is not optional: a highlight query
+    /// gives the same identifier half a dozen candidate captures — `constant`
+    /// for an ALL-CAPS name, `variable.builtin` for `this`, `function.builtin`
+    /// for a known global — and leaves it to `#match?` and `#eq?` to throw away
+    /// the ones that do not fit. Skip them and every identifier arrives wearing
+    /// all six, with the last one to be enumerated deciding its colour.
     func highlights(in range: NSRange) -> [(range: NSRange, capture: String)] {
         guard let query, let tree, let root = tree.rootNode else { return [] }
 
@@ -158,16 +165,139 @@ final class TreeSitterHighlighter {
         cursor.setRange(range)
         cursor.matchLimit = 256
 
+        let storage = text as NSString
+        let context = Predicate.Context(string: text)
+
         var result: [(range: NSRange, capture: String)] = []
-        for match in cursor {
+        for match in cursor.resolve(with: context) {
             for capture in match.captures {
                 guard let name = capture.name, capture.range.length > 0 else { continue }
-                let isPath = name.hasPrefix("string") && isModulePath(capture.node)
-                result.append((capture.range, isPath ? "string.import" : name))
+                guard let refined = refine(name, at: capture, in: storage) else { continue }
+                result.append((capture.range, refined))
             }
         }
-        return result
+        return resolveOverlaps(in: result)
     }
+
+    /// Where several captures land on exactly the same token, keeps the one
+    /// that says the most about it.
+    ///
+    /// Predicates thin the candidates out but cannot settle every case: the
+    /// same identifier is `variable.parameter` to one pattern and plain
+    /// `variable` to another, and both are true. Leaving it to enumeration
+    /// order means the answer depends on where a rule sits in a query file,
+    /// which is how parameters ended up the colour of ordinary variables.
+    /// Ranges that merely overlap are left alone — `string.escape` inside a
+    /// `string` is a smaller range, and still meant to win.
+    private func resolveOverlaps(
+        in captures: [(range: NSRange, capture: String)]
+    ) -> [(range: NSRange, capture: String)] {
+        var best: [NSRange: (index: Int, capture: String)] = [:]
+        var order: [NSRange] = []
+
+        for (index, entry) in captures.enumerated() {
+            guard let existing = best[entry.range] else {
+                best[entry.range] = (index, entry.capture)
+                order.append(entry.range)
+                continue
+            }
+            if Self.rank(of: entry.capture) > Self.rank(of: existing.capture) {
+                best[entry.range] = (existing.index, entry.capture)
+            }
+        }
+
+        return order.compactMap { range in
+            best[range].map { (range: range, capture: $0.capture) }
+        }
+    }
+
+    /// How much a capture is worth when two of them describe the same token.
+    ///
+    /// `variable` is deliberately at the bottom: every identifier is one, so
+    /// anything more specific that also matched is the better answer — except
+    /// where the grammar's guess is worse than "a name", which is why `type`
+    /// and `constructor` sit below it. An identifier only gets those two
+    /// alongside `variable` when the pattern behind them was a guess from the
+    /// capital letter; a real type annotation is a different node, and comes
+    /// with no competition at all.
+    private static func rank(of capture: String) -> Int {
+        switch capture.split(separator: ".").first.map(String.init) ?? capture {
+        case "keyword", "include", "storageclass", "conditional", "repeat", "exception":
+            return 100
+        case "comment", "string", "number", "float", "boolean", "character":
+            return 90
+        case "variable" where capture != "variable":
+            // variable.builtin, variable.parameter, variable.member …
+            return 80
+        case "function", "method", "constant", "attribute", "label", "tag":
+            return 70
+        case "property", "field":
+            return 60
+        case "variable":
+            return 50
+        case "type", "constructor", "namespace", "module":
+            return 40
+        default:
+            return 30
+        }
+    }
+
+    /// Narrows a capture the grammar left broad, or drops it entirely.
+    private func refine(_ name: String, at capture: QueryCapture, in storage: NSString) -> String? {
+        if name.hasPrefix("string"), isModulePath(capture.node) {
+            return "string.import"
+        }
+        // Grammars hand back one flat `keyword` for words an editor colours
+        // very differently — `import` is control flow, `private` is a storage
+        // modifier. The word itself is the only thing that tells them apart.
+        if name == "keyword", NSMaxRange(capture.range) <= storage.length {
+            return Self.keywordCaptures[storage.substring(with: capture.range)] ?? name
+        }
+        // A capital letter is all most grammars ask for before calling a name a
+        // constructor, which makes every imported class one. Only a `new` in
+        // front of it actually says so.
+        if name == "constructor", capture.node.parent?.nodeType != "new_expression" {
+            return nil
+        }
+        return name
+    }
+
+    /// Which capture a bare keyword really deserves, by the word itself.
+    ///
+    /// The split follows what TextMate grammars do, because that is what the
+    /// themes we import are written against: control flow is one colour,
+    /// declarations and modifiers another, word-shaped operators a third.
+    private static let keywordCaptures: [String: String] = {
+        var captures: [String: String] = [:]
+        for word in ["import", "export", "from", "include", "require", "use"] {
+            captures[word] = "include"
+        }
+        for word in ["if", "else", "elif", "switch", "case", "default", "when", "match", "guard", "unless"] {
+            captures[word] = "conditional"
+        }
+        for word in ["for", "while", "do", "loop", "foreach", "repeat"] {
+            captures[word] = "repeat"
+        }
+        for word in ["try", "catch", "finally", "throw", "throws", "raise", "rescue", "except"] {
+            captures[word] = "exception"
+        }
+        for word in ["return", "yield", "await", "break", "continue", "goto", "defer"] {
+            captures[word] = "keyword.return"
+        }
+        for word in [
+            "class", "struct", "enum", "interface", "protocol", "trait", "impl", "extension",
+            "type", "typealias", "const", "let", "var", "val", "function", "func", "fn", "def",
+            "static", "public", "private", "protected", "internal", "readonly", "abstract",
+            "declare", "async", "override", "final", "extends", "implements", "namespace",
+            "module", "package", "mut", "pub"
+        ] {
+            captures[word] = "storageclass"
+        }
+        for word in ["typeof", "instanceof", "keyof", "delete", "new", "satisfies", "as", "is", "in", "of"] {
+            captures[word] = "keyword.operator"
+        }
+        return captures
+    }()
 
     /// Whether a string node is the module an import names, rather than an
     /// ordinary string. Grammars capture both as `string`, so the distinction

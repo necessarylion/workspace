@@ -64,6 +64,17 @@ final class ViewerItem: Identifiable {
     var title: String
     var subtitle: String?
 
+    /// Whoever wrote what is open, when that is one person — a commit. The
+    /// header shows their face where it would otherwise draw a glyph.
+    var authorName: String?
+    var authorAvatarURL: URL?
+
+    /// Whether the file index shows beside a commit's diff. Off to start with:
+    /// a commit is read top to bottom as one change, so the list is in the way
+    /// until it is asked for — unlike a pull request, where it is how you get
+    /// around. Kept per item rather than window-wide for the same reason.
+    var showsCommitFiles = false
+
     // Payloads, filled in depending on `kind`.
     var document: OpenDocument?
     var diff: Diff?
@@ -150,6 +161,10 @@ final class ViewerItem: Identifiable {
 
     nonisolated var isPullRequest: Bool {
         if case .pullRequest = kind { true } else { false }
+    }
+
+    nonisolated var isCommit: Bool {
+        if case .commit = kind { true } else { false }
     }
 
     /// The full hash of the commit on screen, for the header's copy button. The

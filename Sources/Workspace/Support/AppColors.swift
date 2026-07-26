@@ -15,13 +15,15 @@ enum AppColors {
 }
 
 extension NSColor {
-    /// 0xRRGGBB, opaque.
-    convenience init(hex: Int) {
+    /// 0xRRGGBB, opaque unless told otherwise. Themes give the current-line
+    /// highlight and the indent guides an alpha, since both are meant to sit
+    /// over whatever the background is rather than replace it.
+    convenience init(hex: Int, alpha: CGFloat = 1) {
         self.init(
             srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
             green: CGFloat((hex >> 8) & 0xFF) / 255,
             blue: CGFloat(hex & 0xFF) / 255,
-            alpha: 1
+            alpha: alpha
         )
     }
 }

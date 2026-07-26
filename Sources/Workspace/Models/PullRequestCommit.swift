@@ -7,6 +7,8 @@ struct PullRequestCommit: Identifiable, Sendable, Hashable {
     /// Subject and body together, exactly as the author wrote them.
     var message: String
     var author: String
+    /// The author's picture, when the host tells us where to find one.
+    var avatarURL: URL?
     var date: Date?
     var url: URL?
 
@@ -60,6 +62,9 @@ extension PullRequestService {
                 struct Author: Decodable {
                     let name: String?
                     let login: String?
+                    /// Set when the commit was authored outside GitHub, which is
+                    /// the only handle on a picture for that person.
+                    let email: String?
                 }
                 let oid: String
                 let messageHeadline: String?
@@ -84,6 +89,8 @@ extension PullRequestService {
                 author: author?.login?.isEmpty == false
                     ? (author?.login ?? "unknown")
                     : (author?.name ?? "unknown"),
+                avatarURL: AvatarURL.gitHub(login: author?.login, host: pr.url?.host)
+                    ?? AvatarURL.gitIdentity(email: author?.email),
                 date: commit.committedDate.flatMap(parseTimestamp),
                 url: commitURL(for: pr, sha: commit.oid)
             )
@@ -150,11 +157,17 @@ extension PullRequestService {
             guard let sha = (item["hash"] as? String) ?? (item["id"] as? String) else { return nil }
             let author = item["author"] as? [String: Any]
             let user = author?["user"] as? [String: Any]
-            let name = user?["display_name"] as? String
+            let name = BitbucketUser.name(from: user)
                 ?? author?["displayName"] as? String
                 ?? author?["name"] as? String
                 ?? (author?["raw"] as? String).map(stripEmail)
                 ?? "unknown"
+
+            // A Bitbucket account carries its own picture; a commit from someone
+            // without one leaves only the `Name <email>` line to go on.
+            let links = user?["links"] as? [String: Any]
+            let avatar = (links?["avatar"] as? [String: Any])?["href"] as? String
+                ?? user?["avatarUrl"] as? String
 
             // Cloud sends an ISO timestamp in `date`, Data Center epoch
             // milliseconds in `authorTimestamp`.
@@ -166,6 +179,8 @@ extension PullRequestService {
                 sha: sha,
                 message: (item["message"] as? String) ?? "",
                 author: name,
+                avatarURL: AvatarURL.hosted(avatar)
+                    ?? AvatarURL.gitIdentity(raw: author?["raw"] as? String),
                 date: timestamp.flatMap(parseTimestamp),
                 url: commitURL(for: pr, sha: sha)
             )
