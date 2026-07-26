@@ -90,7 +90,31 @@ final class ClaudeSession: Identifiable {
         Task { cli = await ClaudeCLI.shared.info() }
     }
 
+    /// Ticks once every time the transcript grows — a delta arriving, a block
+    /// being confirmed, a message being added.
+    ///
+    /// It exists so the view can follow the reply down without reading the reply
+    /// itself. Measuring the tail's length instead meant the whole transcript
+    /// observed every character of the message being written, so each token
+    /// rebuilt every bubble on screen and re-counted the bytes of all of them;
+    /// a counter is one `Int` compared per token, and leaves the redraw to the
+    /// one paragraph that actually changed.
+    private(set) var growth = 0
+
     var isEmpty: Bool { messages.isEmpty }
+
+    /// What to call this conversation in a list of them: the first thing asked,
+    /// which is how Claude Code titles a transcript too. A chat with nothing in
+    /// it yet has no title to take, so it says what it is instead.
+    var displayTitle: String {
+        guard let first = messages.first(where: { $0.role == .user }) else {
+            return "New conversation"
+        }
+        let text = first.plainText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: " ")
+        return text.isEmpty ? "New conversation" : text
+    }
 
     /// Whether there is anything to send. Deliberately not "and it is not
     /// busy": the CLI takes a prompt while it is still answering the last one
@@ -164,6 +188,7 @@ final class ClaudeSession: Identifiable {
         message.blocks = [.text(ClaudeTextBlock(id: message.id + "-text", text: text))]
         message.attachments = files
         messages.append(message)
+        grew()
 
         isResponding = true
         activity = nil
@@ -485,6 +510,7 @@ final class ClaudeSession: Identifiable {
 
         message.blocks.append(new)
         blockSlots[messageID, default: [:]][index] = message.blocks.count - 1
+        grew()
     }
 
     private func appendDelta(_ delta: JSONValue, at index: Int, in messageID: String) {
@@ -500,8 +526,15 @@ final class ClaudeSession: Identifiable {
         case ("input_json_delta", .tool(let call)):
             call.partialInput += delta["partial_json"]?.stringValue ?? ""
         default:
-            break
+            return
         }
+        grew()
+    }
+
+    /// The transcript got longer. Bumping a counter is all the view needs to
+    /// know to follow it down — see ``ClaudeSession/growth``.
+    private func grew() {
+        growth &+= 1
     }
 
     /// The confirmed form of one block. These arrive one at a time, in order,
@@ -524,6 +557,7 @@ final class ClaudeSession: Identifiable {
 
         func insert(_ new: ClaudeBlock) {
             message.blocks.insert(new, at: min(slot, message.blocks.count))
+            grew()
         }
 
         switch block["type"]?.stringValue {
@@ -605,6 +639,7 @@ final class ClaudeSession: Identifiable {
         let message = ClaudeMessage(id: "past-\(messages.count)", role: .user)
         message.blocks = [.text(ClaudeTextBlock(id: "past-\(messages.count)-text", text: text))]
         messages.append(message)
+        grew()
     }
 
     /// A tool's output is a string for most tools and a list of text parts for
@@ -656,6 +691,7 @@ final class ClaudeSession: Identifiable {
         let note = ClaudeMessage(id: "note-\(UUID().uuidString)", role: .note)
         note.blocks = [.text(ClaudeTextBlock(id: note.id + "-text", text: text))]
         messages.append(note)
+        grew()
     }
 
     private func assistantMessage(_ id: String) -> ClaudeMessage {
@@ -670,6 +706,7 @@ final class ClaudeSession: Identifiable {
         message.isStreaming = true
         messagesByID[id] = message
         messages.append(message)
+        grew()
         return message
     }
 }

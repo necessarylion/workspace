@@ -46,19 +46,27 @@ struct ViewerView: View {
         return item.isClaude && item.claude != nil
     }
 
-    /// The chat, kept in the view tree for as long as the conversation exists.
-    /// Hidden rather than removed when something else is showing — and taken
-    /// out of hit testing with it, so a covered composer cannot catch a click.
+    /// Every conversation this repository has open, kept in the view tree for as
+    /// long as it exists. Hidden rather than removed when something else is
+    /// showing — and taken out of hit testing with it, so a covered composer
+    /// cannot catch a click.
+    ///
+    /// All of them are mounted, not just the one on screen: they run at the same
+    /// time, and a chat that was torn out of the tree while its turn ran would
+    /// come back having missed the transcript scrolling past.
     @ViewBuilder
     private var claudeLayer: some View {
         if let item = store.openClaudeItem,
-           let session = item.claude,
            case .claude(let projectID) = item.kind {
-            ClaudeChatView(session: session, project: store.project(withID: projectID))
-                .id(session.id)
-                .opacity(showsClaude ? 1 : 0)
-                .allowsHitTesting(showsClaude)
-                .accessibilityHidden(!showsClaude)
+            let project = store.project(withID: projectID)
+            ForEach(item.claudes, id: \.id) { session in
+                let isOnScreen = showsClaude && session.id == item.claude?.id
+                ClaudeChatView(session: session, project: project)
+                    .id(session.id)
+                    .opacity(isOnScreen ? 1 : 0)
+                    .allowsHitTesting(isOnScreen)
+                    .accessibilityHidden(!isOnScreen)
+            }
         }
     }
 
@@ -92,12 +100,10 @@ struct ViewerView: View {
     /// navigator's own controls on the right.
     private var headerBar: some View {
         HStack(spacing: 6) {
-            // The traffic lights float over whichever pane is leftmost. When
-            // the repositories panel is hidden, that is this one.
-            if !store.showsProjects {
-                Color.clear.frame(width: 68, height: 1)
-            }
-
+            // No room is left for the traffic lights: this pane is never the
+            // leftmost one. Folding the repositories pane leaves the rail behind,
+            // and the rail is wide enough to hold them — see
+            // ``CollapsedProjectsRail``.
             Button {
                 withAnimation { store.showsProjects.toggle() }
             } label: {
@@ -628,7 +634,10 @@ struct WelcomeView: View {
             commitHistory(project)
         }
         .padding(28)
-        .frame(maxWidth: 820, alignment: .leading)
+        // The board takes the whole pane rather than stopping at a reading
+        // width: it is tiles, not prose, and the grids below are adaptive — the
+        // width folding the navigator away gives back becomes another column of
+        // pull requests instead of a margin.
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 

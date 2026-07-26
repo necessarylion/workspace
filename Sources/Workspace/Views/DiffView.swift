@@ -82,7 +82,17 @@ struct DiffView: View {
         .onChange(of: collapsedFiles) { rebuild() }
         .onChange(of: composing) { rebuild() }
         .onChange(of: currentFile) { rebuild() }
-        .onChange(of: comments?.threads ?? [:]) { rebuild() }
+        // The lines that carry a thread, not the threads themselves: flattening
+        // only asks which lines to leave room under, and comparing the comment
+        // trees instead walked every reply on this pull request each time the
+        // window was resized.
+        .onChange(of: anchoredLines) { rebuild() }
+    }
+
+    /// The lines a thread hangs off, which is all the flattening needs to know.
+    private var anchoredLines: Set<DiffLineAnchor> {
+        guard let threads = comments?.threads else { return [] }
+        return Set(threads.keys)
     }
 
     private var diffBody: some View {
@@ -102,11 +112,15 @@ struct DiffView: View {
                 // Whole points only: a fractional width makes the split
                 // columns land off the pixel grid.
                 let width = max(proxy.size.width - 24, 320).rounded(.down)
+                // Resolved once for the whole diff rather than inside each
+                // cell: the lookup goes through `NSFont(name:size:)`, and a
+                // screenful of split rows asks for it a hundred times a frame.
+                let font = AppearanceSettings.shared.diffFont
                 ScrollViewReader { scroll in
                     ScrollView(.vertical) {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(flattened.revision == diff.revision ? flattened.elements : []) {
-                                card($0, width: width)
+                                card($0, width: width, font: font)
                             }
                         }
                         .padding(12)
@@ -138,7 +152,7 @@ struct DiffView: View {
                 diff,
                 only: currentFile,
                 collapsed: collapsedFiles,
-                anchored: Set((comments?.threads ?? [:]).keys),
+                anchored: anchoredLines,
                 composing: composing
             )
         )
@@ -166,39 +180,60 @@ struct DiffView: View {
 
     /// One line of a file's card: its content, the card fill behind it, and the
     /// slice of the card outline that belongs to this line.
-    private func card(_ element: DiffElement, width: CGFloat) -> some View {
-        content(element, width: width)
+    ///
+    /// Only the two lines that carry the rounding are drawn with a shape: a
+    /// stroked rectangle clipped to a rounded one costs a mask layer per line,
+    /// and a file of a thousand lines is a thousand of them for a corner that
+    /// appears twice. Every line in between gets the two hairlines it actually
+    /// shows.
+    @ViewBuilder
+    private func card(_ element: DiffElement, width: CGFloat, font: Font) -> some View {
+        let line = content(element, width: width, font: font)
             .frame(width: width, alignment: .leading)
             .background(.quaternary.opacity(0.15))
-            // Only the first and last line of a file are rounded; the border
-            // shape is stretched past the other lines so that its corners and
-            // its top and bottom edges fall outside the clip below, leaving
-            // just the two sides.
-            .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .strokeBorder(.quaternary, lineWidth: 1)
-                    .padding(.top, element.opensCard ? 0 : -cornerRadius)
-                    .padding(.bottom, element.closesCard ? 0 : -cornerRadius)
-            }
-            .clipShape(
-                UnevenRoundedRectangle(
-                    topLeadingRadius: element.opensCard ? cornerRadius : 0,
-                    bottomLeadingRadius: element.closesCard ? cornerRadius : 0,
-                    bottomTrailingRadius: element.closesCard ? cornerRadius : 0,
-                    topTrailingRadius: element.opensCard ? cornerRadius : 0
+        if element.opensCard || element.closesCard {
+            // The border shape is stretched past the edge the card does not end
+            // at, so that its corners and that edge fall outside the clip and
+            // meet the plain sides of the line next to it.
+            line
+                .overlay {
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .strokeBorder(.quaternary, lineWidth: 1)
+                        .padding(.top, element.opensCard ? 0 : -cornerRadius)
+                        .padding(.bottom, element.closesCard ? 0 : -cornerRadius)
+                }
+                .clipShape(
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: element.opensCard ? cornerRadius : 0,
+                        bottomLeadingRadius: element.closesCard ? cornerRadius : 0,
+                        bottomTrailingRadius: element.closesCard ? cornerRadius : 0,
+                        topTrailingRadius: element.opensCard ? cornerRadius : 0
+                    )
                 )
-            )
-            // The gap between cards, which the stack itself can no longer add.
-            .padding(.top, element.opensCard && element.file > 0 ? 8 : 0)
+                // The gap between cards, which the stack itself can no longer add.
+                .padding(.top, element.opensCard && element.file > 0 ? 8 : 0)
+        } else {
+            line
+                .overlay(alignment: .leading) { cardEdge }
+                .overlay(alignment: .trailing) { cardEdge }
+        }
+    }
+
+    /// One side of the card outline, for the lines between its ends.
+    private var cardEdge: some View {
+        Rectangle().fill(.quaternary).frame(width: 1)
     }
 
     @ViewBuilder
-    private func content(_ element: DiffElement, width: CGFloat) -> some View {
+    private func content(_ element: DiffElement, width: CGFloat, font: Font) -> some View {
         let file = file(at: element.file)
         switch element.kind {
         case .fileHeader:
             DiffFileHeader(
-                file: file,
+                path: file.displayPath,
+                change: file.change,
+                addedLines: file.addedLines,
+                removedLines: file.removedLines,
                 isCollapsed: Binding(
                     get: { collapsedFiles.contains(file.id) },
                     set: { isCollapsed in
@@ -217,7 +252,7 @@ struct DiffView: View {
                 .padding(10)
         case .hunkHeader:
             Text(file.hunks[element.hunk].header)
-                .font(AppearanceSettings.shared.diffFont)
+                .font(font)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
@@ -226,9 +261,19 @@ struct DiffView: View {
         case .row:
             let row = file.hunks[element.hunk].rows[element.row]
             if layout == .split {
-                SplitDiffRow(row: row, width: width, onComment: commentAction(file: file, row: row))
+                SplitDiffRow(
+                    row: row,
+                    width: width,
+                    font: font,
+                    onComment: commentAction(file: file, row: row)
+                )
             } else {
-                UnifiedDiffRows(row: row, width: width, onComment: commentAction(file: file, row: row))
+                UnifiedDiffRows(
+                    row: row,
+                    width: width,
+                    font: font,
+                    onComment: commentAction(file: file, row: row)
+                )
             }
         case .comments:
             let row = file.hunks[element.hunk].rows[element.row]
@@ -374,7 +419,13 @@ private struct DiffElement: Identifiable {
         composing: DiffLineAnchor? = nil
     ) -> [DiffElement] {
         var elements: [DiffElement] = []
-        elements.reserveCapacity(diff.files.count + diff.addedLines + diff.removedLines)
+        // Every row, not just the changed ones: counting only the +/- totals
+        // left the context lines to grow the array, which for a long diff means
+        // copying a list of tens of thousands of entries several times over.
+        let rows = diff.files.reduce(0) { total, file in
+            total + file.hunks.reduce(1) { $0 + $1.rows.count + 1 }
+        }
+        elements.reserveCapacity(rows)
 
         for (fileIndex, file) in diff.files.enumerated() {
             // The indices still address `diff.files`, so skipping a file here
@@ -661,8 +712,13 @@ struct DiffFileList: View {
 }
 
 extension DiffFile {
-    var changeSymbol: String {
-        switch change {
+    var changeSymbol: String { change.symbol }
+    var changeColor: Color { change.color }
+}
+
+extension DiffFile.Change {
+    var symbol: String {
+        switch self {
         case .added: "plus.square.fill"
         case .deleted: "minus.square.fill"
         case .renamed: "arrow.right.square.fill"
@@ -670,8 +726,8 @@ extension DiffFile {
         }
     }
 
-    var changeColor: Color {
-        switch change {
+    var color: Color {
+        switch self {
         case .added: .green
         case .deleted: .red
         case .renamed: .blue
@@ -681,8 +737,15 @@ extension DiffFile {
 }
 
 /// The top line of a file's card, and the fold control for the whole file.
+///
+/// Takes the few things it draws rather than the `DiffFile` they come from: it
+/// is a direct child of the lazy stack, and holding the file would have SwiftUI
+/// compare every hunk of it to decide whether this one strip had changed.
 struct DiffFileHeader: View {
-    let file: DiffFile
+    let path: String
+    let change: DiffFile.Change
+    let addedLines: Int
+    let removedLines: Int
     @Binding var isCollapsed: Bool
 
     var body: some View {
@@ -698,16 +761,16 @@ struct DiffFileHeader: View {
                     // removes thousands of rows, and animating that is exactly
                     // the work the lazy stack exists to avoid.
                     .animation(.easeInOut(duration: 0.15), value: isCollapsed)
-                Image(systemName: file.changeSymbol)
-                    .foregroundStyle(file.changeColor)
-                Text(file.displayPath)
+                Image(systemName: change.symbol)
+                    .foregroundStyle(change.color)
+                Text(path)
                     .font(.system(.callout, design: .monospaced).weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.head)
                 Spacer()
-                Text("+\(file.addedLines)")
+                Text("+\(addedLines)")
                     .foregroundStyle(.green)
-                Text("−\(file.removedLines)")
+                Text("−\(removedLines)")
                     .foregroundStyle(.red)
             }
             .font(.caption.monospacedDigit())
@@ -730,6 +793,8 @@ struct SplitDiffRow: View {
     let row: DiffRow
     /// Width of the whole row; the two columns split it between them.
     let width: CGFloat
+    /// Resolved by the diff, not per cell — see `DiffView.diffBody`.
+    let font: Font
     /// Opens a comment on the column that was clicked. Nil on a diff that takes
     /// no comments.
     var onComment: ((PullRequestComment.Side) -> Void)?
@@ -797,14 +862,13 @@ struct SplitDiffRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
         }
-        .font(AppearanceSettings.shared.diffFont)
+        .font(font)
         .padding(.horizontal, 8)
         .padding(.vertical, 1)
         .frame(width: width, alignment: .topLeading)
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(background(for: side))
-        .onHover { isInside in
-            guard onComment != nil else { return }
+        .onHover(if: onComment != nil) { isInside in
             hovered = isInside ? side : (hovered == side ? nil : hovered)
         }
     }
@@ -827,6 +891,8 @@ struct SplitDiffRow: View {
 struct UnifiedDiffRows: View {
     let row: DiffRow
     let width: CGFloat
+    /// Resolved by the diff, not per line — see `DiffView.diffBody`.
+    let font: Font
     var onComment: ((PullRequestComment.Side) -> Void)?
 
     @State private var hovered: PullRequestComment.Side?
@@ -881,14 +947,29 @@ struct UnifiedDiffRows: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
         }
-        .font(AppearanceSettings.shared.diffFont)
+        .font(font)
         .padding(.horizontal, 8)
         .padding(.vertical, 1)
         .frame(width: width, alignment: .leading)
         .background(color)
-        .onHover { isInside in
-            guard onComment != nil else { return }
+        .onHover(if: onComment != nil) { isInside in
             hovered = isInside ? side : (hovered == side ? nil : hovered)
+        }
+    }
+}
+
+private extension View {
+    /// `onHover`, but only where the pointer has something to do.
+    ///
+    /// A working-tree diff takes no comments, so nothing on a row reacts to the
+    /// pointer — and a tracking region per column per line is work the scroll
+    /// pays for on every frame of a file the size of a real one.
+    @ViewBuilder
+    func onHover(if enabled: Bool, perform: @escaping (Bool) -> Void) -> some View {
+        if enabled {
+            onHover(perform: perform)
+        } else {
+            self
         }
     }
 }

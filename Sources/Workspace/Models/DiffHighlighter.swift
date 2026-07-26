@@ -20,8 +20,9 @@ enum DiffHighlighter {
         var result = diff
         // One parser per language, reused across the diff's files.
         var highlighters: [String: TreeSitterHighlighter] = [:]
+        var colours = ColourCache()
         for fileIndex in result.files.indices {
-            colour(file: &result.files[fileIndex], using: &highlighters)
+            colour(file: &result.files[fileIndex], using: &highlighters, colours: &colours)
         }
         return result
     }
@@ -31,13 +32,33 @@ enum DiffHighlighter {
     static func highlight(_ file: DiffFile) -> DiffFile {
         var result = file
         var highlighters: [String: TreeSitterHighlighter] = [:]
-        colour(file: &result, using: &highlighters)
+        var colours = ColourCache()
+        colour(file: &result, using: &highlighters, colours: &colours)
         return result
+    }
+
+    /// Capture name → colour, for the length of one run.
+    ///
+    /// Resolving a name walks it back a dot at a time and rebuilds the string at
+    /// each step, and a diff asks the same few dozen questions tens of thousands
+    /// of times. Kept local rather than on the palette so that changing the
+    /// theme needs no invalidation: the next diff starts with an empty one.
+    @MainActor
+    private struct ColourCache {
+        private var colours: [String: NSColor?] = [:]
+
+        mutating func colour(for capture: String) -> NSColor? {
+            if let known = colours[capture] { return known }
+            let colour = SyntaxTheme.captureColor(for: capture)
+            colours[capture] = colour
+            return colour
+        }
     }
 
     private static func colour(
         file: inout DiffFile,
-        using highlighters: inout [String: TreeSitterHighlighter]
+        using highlighters: inout [String: TreeSitterHighlighter],
+        colours: inout ColourCache
     ) {
         guard !file.isBinary else { return }
 
@@ -49,8 +70,8 @@ enum DiffHighlighter {
         highlighters[key] = highlighter
 
         for hunkIndex in file.hunks.indices {
-            colour(rows: &file.hunks[hunkIndex].rows, side: .old, using: highlighter)
-            colour(rows: &file.hunks[hunkIndex].rows, side: .new, using: highlighter)
+            colour(rows: &file.hunks[hunkIndex].rows, side: .old, using: highlighter, colours: &colours)
+            colour(rows: &file.hunks[hunkIndex].rows, side: .new, using: highlighter, colours: &colours)
         }
     }
 
@@ -59,7 +80,8 @@ enum DiffHighlighter {
     private static func colour(
         rows: inout [DiffRow],
         side: Side,
-        using highlighter: TreeSitterHighlighter
+        using highlighter: TreeSitterHighlighter,
+        colours: inout ColourCache
     ) {
         // Collect the lines this side actually shows, remembering which row
         // each one came from.
@@ -77,25 +99,33 @@ enum DiffHighlighter {
         highlighter.setText(snippet)
         guard highlighter.isReady else { return }
 
-        // UTF-16 start offset of every line inside the snippet.
+        // UTF-16 start offset and length of every line inside the snippet.
+        // Measured once: bridging a line to `NSString` for its length inside the
+        // capture loop below charged for it again on every capture that touched
+        // it.
         var lineStarts: [Int] = []
+        var lineLengths: [Int] = []
+        lineStarts.reserveCapacity(lines.count)
+        lineLengths.reserveCapacity(lines.count)
         var offset = 0
         for line in lines {
+            let length = (line as NSString).length
             lineStarts.append(offset)
-            offset += (line as NSString).length + 1
+            lineLengths.append(length)
+            offset += length + 1
         }
 
         let attributed = lines.map { NSMutableAttributedString(string: $0) }
         let fullRange = NSRange(location: 0, length: (snippet as NSString).length)
         for capture in highlighter.highlights(in: fullRange) {
-            guard let color = SyntaxTheme.captureColor(for: capture.capture) else { continue }
-            var lineIndex = lineStarts.lastIndex { $0 <= capture.range.location } ?? 0
+            guard let color = colours.colour(for: capture.capture) else { continue }
+            var lineIndex = lineIndex(of: capture.range.location, in: lineStarts)
             let captureEnd = NSMaxRange(capture.range)
             // A capture can span line breaks; colour every line it touches.
             while lineIndex < lines.count, lineStarts[lineIndex] < captureEnd {
                 let lineRange = NSRange(
                     location: lineStarts[lineIndex],
-                    length: (lines[lineIndex] as NSString).length
+                    length: lineLengths[lineIndex]
                 )
                 let overlap = NSIntersectionRange(capture.range, lineRange)
                 if overlap.length > 0 {
@@ -119,5 +149,25 @@ enum DiffHighlighter {
             case .new: rows[rowIndex].newHighlighted = text
             }
         }
+    }
+
+    /// The line a UTF-16 offset falls on.
+    ///
+    /// `lineStarts` is ascending, so this is a binary search. It used to be
+    /// `lastIndex(where:)`, which scans from the end of the array — so a hunk of
+    /// a few hundred lines walked nearly all of them for every capture near its
+    /// top, and colouring one hunk cost the square of its length.
+    private static func lineIndex(of location: Int, in lineStarts: [Int]) -> Int {
+        var low = 0
+        var high = lineStarts.count - 1
+        while low < high {
+            let middle = (low + high + 1) / 2
+            if lineStarts[middle] <= location {
+                low = middle
+            } else {
+                high = middle - 1
+            }
+        }
+        return low
     }
 }

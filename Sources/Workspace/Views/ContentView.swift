@@ -22,6 +22,11 @@ struct ContentView: View {
                     .frame(width: sidebarWidth)
                     .frame(maxHeight: .infinity)
                 PaneResizer(width: $sidebarWidth, range: 140...380)
+            } else {
+                // Folded, the pane leaves a rail behind rather than nothing —
+                // the repositories are still one click apart.
+                CollapsedProjectsRail()
+                    .frame(maxHeight: .infinity)
             }
             ViewerView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -50,16 +55,6 @@ struct ContentView: View {
         .overlay {
             if store.isFindingFiles {
                 FileFinderOverlay()
-            }
-        }
-        // A pull request is read across the whole window, so the navigator folds
-        // away for it and comes back afterwards — see the store, which knows
-        // whether it was there in the first place. Watched here rather than done
-        // at every call site: opening one, back, forward, closing it and
-        // switching repository all come down to this one value changing.
-        .onChange(of: store.isShowingPullRequest, initial: true) {
-            withAnimation(.easeOut(duration: 0.12)) {
-                store.syncNavigatorWithPullRequest()
             }
         }
         .animation(.easeOut(duration: 0.12), value: store.isSwitchingProjects)

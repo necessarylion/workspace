@@ -63,13 +63,6 @@ final class WorkspaceStore {
     var showsProjects = true
     var showsNavigator = true
 
-    /// Where the navigator was before a pull request took the window. A pull
-    /// request is read across the whole width — the list of the other ones is
-    /// the last thing wanted beside it — so the pane folds away while one is on
-    /// screen and comes back exactly as it was afterwards. Nil means no pull
-    /// request has folded it, or that it has since been moved by hand.
-    private var navigatorBeforePullRequest: Bool?
-
     // Viewer (centre)
     private var items: [String: ViewerItem] = [:]
 
@@ -189,7 +182,7 @@ final class WorkspaceStore {
         // belongs to no repository.
         for (key, item) in items where item.projectID == project.id {
             item.terminals.forEach { $0.terminate() }
-            item.claude?.shutDown()
+            item.claudes.forEach { $0.shutDown() }
             items[key] = nil
         }
         persistTerminals()
@@ -478,31 +471,11 @@ final class WorkspaceStore {
         !showsDashboard && current?.isPullRequest == true
     }
 
-    /// Folds the navigator away while a pull request has the window, and puts it
-    /// back afterwards — but only if it was there to begin with. Driven from
-    /// `ContentView`, which watches `isShowingPullRequest`: every way into and
-    /// out of a pull request (opening one, back, forward, closing it, switching
-    /// repository) ends up changing that one value.
-    func syncNavigatorWithPullRequest() {
-        if isShowingPullRequest {
-            // Already folded for the pull request before this one: leave the
-            // remembered state alone, or it would record the folded pane.
-            guard navigatorBeforePullRequest == nil else { return }
-            navigatorBeforePullRequest = showsNavigator
-            showsNavigator = false
-        } else if let wasShowing = navigatorBeforePullRequest {
-            navigatorBeforePullRequest = nil
-            if wasShowing { showsNavigator = true }
-        }
-    }
-
     /// Shows or folds the navigator by hand — the button in the viewer's header
-    /// and the View menu. Doing it while a pull request is open counts as the new
-    /// preference, so closing the pull request leaves the pane where it was put
-    /// rather than undoing it.
+    /// and the View menu. Nothing else moves the pane: where it is left is where
+    /// it stays, whatever the viewer goes on to show.
     func toggleNavigator() {
         showsNavigator.toggle()
-        navigatorBeforePullRequest = nil
     }
 
     /// The conversation open for the selected repository, if one has been
@@ -741,7 +714,7 @@ final class WorkspaceStore {
         item.isLoading = true
         item.errorMessage = nil
         let text = await GitStatus.diff(paths: paths, in: project.url, isUntracked: isUntracked)
-        item.diff = DiffHighlighter.highlight(DiffParser.parse(text))
+        item.diff = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
         if item.diff?.isEmpty == true {
             item.errorMessage = "No textual changes to show for this file."
         }
@@ -768,7 +741,7 @@ final class WorkspaceStore {
             .filter { $0.label == "Untracked" }
             .map(\.path) ?? []
         let text = await GitStatus.diffAll(in: project.url, untrackedPaths: untracked)
-        item.diff = DiffHighlighter.highlight(DiffParser.parse(text))
+        item.diff = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
         if item.diff?.isEmpty == true {
             item.errorMessage = "No textual changes to show."
         }
@@ -798,7 +771,7 @@ final class WorkspaceStore {
         item.isLoading = true
         item.errorMessage = nil
         let text = await RepositoryCommit.diff(sha: sha, in: project.url)
-        item.diff = DiffHighlighter.highlight(DiffParser.parse(text))
+        item.diff = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
         if item.diff?.isEmpty == true {
             item.errorMessage = "This commit changed no text."
         }
@@ -813,9 +786,7 @@ final class WorkspaceStore {
         let item = items[kind.key] ?? ViewerItem(kind: kind, title: pr.title)
         item.pullRequest = pr
         present(item)
-        // The pane itself folds away for a pull request — see
-        // `syncNavigatorWithPullRequest` — but the list it is left on is the one
-        // of the other pull requests, which is where unfolding it belongs.
+        // The list beside a pull request belongs to the other pull requests.
         navigatorTab = .pullRequests
 
         if item.diff == nil {
@@ -883,7 +854,7 @@ final class WorkspaceStore {
         item.isLoading = true
         item.errorMessage = nil
         if let text = await PullRequestService.diff(for: pr, in: project.url) {
-            item.diff = DiffHighlighter.highlight(DiffParser.parse(text))
+            item.diff = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
         } else {
             item.errorMessage = "Could not load the diff for this pull request."
         }
@@ -1037,7 +1008,7 @@ final class WorkspaceStore {
         // The tab may have gone back to the list, or on to another commit,
         // while this was in flight — the patch is still worth keeping.
         if let text {
-            item.commitDiffs[commit.sha] = DiffHighlighter.highlight(DiffParser.parse(text))
+            item.commitDiffs[commit.sha] = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
         } else if item.selectedCommit?.sha == commit.sha {
             item.commitDiffError = "Could not load the changes in \(commit.shortSHA)."
         }
@@ -1366,12 +1337,7 @@ final class WorkspaceStore {
     /// alone does nothing visible while the pane is hidden.
     func showNavigator(_ tab: NavigatorTab) {
         navigatorTab = tab
-        if !showsNavigator {
-            showsNavigator = true
-            // Asked for outright, so a pull request that folded it away has no
-            // say in it any more.
-            navigatorBeforePullRequest = nil
-        }
+        showsNavigator = true
     }
 
     /// The terminals list, and — when this repository already has a shell — its
@@ -1634,23 +1600,18 @@ final class WorkspaceStore {
     }
 
     /// Opens the repository's Claude conversation in the viewer — the same
-    /// `claude`, driven rather than typed at. One per repository, kept alive
-    /// like a terminal, so leaving it and coming back finds the transcript and
-    /// the half-written prompt where they were.
+    /// `claude`, driven rather than typed at. Kept alive like a terminal, so
+    /// leaving it and coming back finds the transcript and the half-written
+    /// prompt where they were.
+    ///
+    /// Returns to the conversation already on screen rather than starting a
+    /// second one; ``newClaudeChat(in:)`` is how another is added.
     @discardableResult
     func openClaudeChat(in project: Project) -> ViewerItem {
-        let kind = ViewerItem.Kind.claude(projectID: project.id)
-        let item = items[kind.key] ?? ViewerItem(
-            kind: kind,
-            title: "Claude",
-            subtitle: project.name
-        )
-        if item.claude == nil {
-            item.claude = ClaudeSession(directory: project.url)
+        let item = claudeItem(for: project)
+        if item.claudes.isEmpty {
+            addClaudeSession(to: item, in: project)
         }
-        // Like a terminal, this item lives outside the history's clean-up, so
-        // it is registered here rather than waiting to be presented.
-        items[item.id] = item
         present(item)
         // The viewer shows one conversation, so the navigator shows the rest —
         // the same move opening a terminal or a pull request makes.
@@ -1658,11 +1619,77 @@ final class WorkspaceStore {
         return item
     }
 
-    /// A repository's conversation, if one has been opened. The sessions list
-    /// asks with this rather than making one: looking at the list must not
-    /// start anything.
+    /// Another conversation about the same repository, running beside the ones
+    /// already open. Each has its own `claude` process, so a turn under way in
+    /// one carries on while this one is typed into.
+    @discardableResult
+    func newClaudeChat(in project: Project) -> ClaudeSession {
+        let item = claudeItem(for: project)
+        let session = addClaudeSession(to: item, in: project)
+        present(item)
+        navigatorTab = .claude
+        return session
+    }
+
+    /// Puts one of the open conversations back on screen. The others keep
+    /// running: nothing is stopped by looking away from it.
+    func selectClaudeChat(_ session: ClaudeSession, in project: Project) {
+        let item = claudeItem(for: project)
+        guard item.claudes.contains(where: { $0.id == session.id }) else { return }
+        item.selectedClaudeID = session.id
+        present(item)
+        navigatorTab = .claude
+    }
+
+    /// Ends one conversation and forgets it, leaving the rest alone. Closing the
+    /// last one leaves the item with none, which is what the viewer reads as
+    /// "no chat here" — the transcript itself is on disk either way, so it can
+    /// be resumed from the list afterwards.
+    func closeClaudeChat(_ session: ClaudeSession, in project: Project) {
+        let item = claudeItem(for: project)
+        guard let index = item.claudes.firstIndex(where: { $0.id == session.id }) else { return }
+        session.shutDown()
+        item.claudes.remove(at: index)
+        if item.selectedClaudeID == session.id {
+            // The one before it, so closing down a row of chats walks back up
+            // the list instead of jumping to the end each time.
+            let next = min(max(index - 1, 0), item.claudes.count - 1)
+            item.selectedClaudeID = item.claudes.indices.contains(next) ? item.claudes[next].id : nil
+        }
+        if item.claudes.isEmpty, current?.id == item.id {
+            closeCurrent()
+        }
+    }
+
+    /// A repository's conversations, in the order they were started. Empty until
+    /// one is opened: listing them must not start anything.
+    func claudeSessions(in project: Project) -> [ClaudeSession] {
+        items[ViewerItem.Kind.claude(projectID: project.id).key]?.claudes ?? []
+    }
+
+    /// The conversation on screen for this repository, if any. The sessions list
+    /// asks with this rather than making one.
     func claudeSession(for project: Project) -> ClaudeSession? {
         items[ViewerItem.Kind.claude(projectID: project.id).key]?.claude
+    }
+
+    /// The one item that holds this repository's conversations, made on demand.
+    /// Like a terminal, it lives outside the history's clean-up, so it is
+    /// registered as soon as it exists rather than waiting to be presented.
+    private func claudeItem(for project: Project) -> ViewerItem {
+        let kind = ViewerItem.Kind.claude(projectID: project.id)
+        if let existing = items[kind.key] { return existing }
+        let item = ViewerItem(kind: kind, title: "Claude", subtitle: project.name)
+        items[item.id] = item
+        return item
+    }
+
+    @discardableResult
+    private func addClaudeSession(to item: ViewerItem, in project: Project) -> ClaudeSession {
+        let session = ClaudeSession(directory: project.url)
+        item.claudes.append(session)
+        item.selectedClaudeID = session.id
+        return session
     }
 
     /// Opens the project in another editor, if it is installed.

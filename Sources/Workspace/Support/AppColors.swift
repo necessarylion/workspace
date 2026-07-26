@@ -2,16 +2,20 @@ import AppKit
 
 /// The app's own surface colours. Fixed values, not system colours: the two
 /// sidebars keep the standard appearance, while the centre pane and the
-/// terminal are their own, deliberately flat shades.
+/// terminal are their own, deliberately flat shade.
 enum AppColors {
     /// The centre pane — editor, diff, pull request, dashboard.
-    static let viewerBackground = NSColor(hex: 0x28_28_28)
+    static let viewerHex = 0x28_28_28
 
-    /// The terminal, a shade darker so it reads as its own surface.
-    static let terminalBackground = NSColor(hex: 0x1E_1E_1E)
+    static let viewerBackground = NSColor(hex: viewerHex)
+
+    /// The terminal is the same surface as everything else the centre pane
+    /// shows, not a darker panel inside it: a shell opens in the same place a
+    /// file does, and two shades made that one swap look like two panes.
+    static let terminalBackground = NSColor(hex: viewerHex)
 
     /// The same value in the form ghostty's config file wants.
-    static let terminalBackgroundHex = "1e1e1e"
+    static let terminalBackgroundHex = "282828"
 }
 
 extension NSColor {

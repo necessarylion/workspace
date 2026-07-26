@@ -98,47 +98,13 @@ struct ProjectsSidebar: View {
     private var header: some View {
         HStack {
             Spacer()
-            homeTerminalButton
+            HomeTerminalButton()
         }
         .buttonStyle(.borderless)
         .padding(.leading, 78)
         .padding(.trailing, 12)
         .frame(height: 38)
         .background(.bar)
-    }
-
-    /// One press, one prompt in the home folder — no repository needed and no
-    /// menu in the way. It returns to the home shell you already have; ⌘T from
-    /// inside it opens another. The shells themselves are listed in the
-    /// navigator's Terminals tab.
-    ///
-    /// The badge counts the home shells that are open, so the ones no repository
-    /// lists are still visible from anywhere in the app.
-    private var homeTerminalButton: some View {
-        let count = store.terminals(in: .home).count
-
-        return Button {
-            store.openGlobalTerminal()
-        } label: {
-            Image(systemName: "terminal")
-                .overlay(alignment: .topTrailing) {
-                    if count > 0 {
-                        Text("\(count)")
-                            .font(.system(size: 8, weight: .bold).monospacedDigit())
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 3)
-                            .frame(minWidth: 12, minHeight: 12)
-                            .background(Capsule().fill(.tint))
-                            .offset(x: 8, y: -6)
-                    }
-                }
-                // Room for the badge, so it never runs past the pane's edge.
-                .padding(.trailing, count > 0 ? 8 : 0)
-        }
-        .help(count == 0
-            ? "Open a terminal in your home folder (⇧⌘T)"
-            : "\(count) terminal\(count == 1 ? "" : "s") in your home folder (⇧⌘T)")
-        .pointerCursor()
     }
 
     /// Matches the files pane's filter row, so both sidebars behave the same.
@@ -292,6 +258,144 @@ private extension View {
         } else {
             self
         }
+    }
+}
+
+/// One press, one prompt in the home folder — no repository needed and no menu
+/// in the way. It returns to the home shell you already have; ⌘T from inside it
+/// opens another. The shells themselves are listed in the navigator's Terminals
+/// tab.
+///
+/// The badge counts the home shells that are open, so the ones no repository
+/// lists are still visible from anywhere in the app. Its own view because the
+/// pane and the rail it folds to both carry it — a terminal that belongs to no
+/// repository should not be reachable only while the pane is open.
+struct HomeTerminalButton: View {
+    @Environment(WorkspaceStore.self) private var store
+
+    var body: some View {
+        let count = store.terminals(in: .home).count
+
+        return Button {
+            store.openGlobalTerminal()
+        } label: {
+            Image(systemName: "terminal")
+                .overlay(alignment: .topTrailing) {
+                    if count > 0 {
+                        Text("\(count)")
+                            .font(.system(size: 8, weight: .bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 3)
+                            .frame(minWidth: 12, minHeight: 12)
+                            .background(Capsule().fill(.tint))
+                            .offset(x: 8, y: -6)
+                    }
+                }
+                // Room for the badge, so it never runs past the pane's edge.
+                .padding(.trailing, count > 0 ? 8 : 0)
+        }
+        .help(count == 0
+            ? "Open a terminal in your home folder (⇧⌘T)"
+            : "\(count) terminal\(count == 1 ? "" : "s") in your home folder (⇧⌘T)")
+        .pointerCursor()
+    }
+}
+
+/// What the repositories pane collapses to, rather than nothing at all: a rail
+/// of every repository as a square card — its host's mark and its folder name —
+/// so switching repository never costs unfolding the pane first.
+///
+/// It is also what holds the traffic lights once the pane is folded, which is
+/// why it is no narrower than they are: hidden entirely, the lights floated over
+/// the viewer's own header and the row had to leave a hole for them.
+struct CollapsedProjectsRail: View {
+    @Environment(WorkspaceStore.self) private var store
+
+    /// Wide enough for the traffic lights to sit clear of the viewer beside it,
+    /// and no wider — the header row is theirs alone, so nothing the rail carries
+    /// competes with them for it.
+    static let width: CGFloat = 76
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Empty, but the same height as every other header row: the traffic
+            // lights live in it.
+            Color.clear
+                .frame(height: 38)
+                .frame(maxWidth: .infinity)
+                .background(.bar)
+
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(store.projects) { project in
+                        card(project)
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+
+            // The pane's footer, down to the two controls that belong to no
+            // repository in particular: a shell in the home folder, and the way
+            // to add a repository at all. The header above is the traffic
+            // lights' — this is the only row on the rail that is free.
+            Divider()
+            HStack(spacing: 12) {
+                HomeTerminalButton()
+                Button {
+                    store.promptForProjectFolder()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .help("Add a repository folder")
+                .pointerCursor()
+            }
+            .buttonStyle(.borderless)
+            .frame(maxWidth: .infinity)
+            .frame(height: 32)
+        }
+        .frame(width: Self.width)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    /// The search box is not on screen here, so the rail lists every repository
+    /// rather than `visibleProjects` — a filter left running would hide cards
+    /// with nothing on the rail to clear it.
+    private func card(_ project: Project) -> some View {
+        let isSelected = project.id == store.selectedProjectID
+
+        return VStack(spacing: 3) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(
+                        isSelected
+                            ? AnyShapeStyle(.tint.opacity(0.16))
+                            : AnyShapeStyle(.quaternary.opacity(0.25))
+                    )
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(
+                        isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear),
+                        lineWidth: 1.2
+                    )
+                GitHostIcon(host: project.host, size: 19)
+            }
+            .frame(width: 44, height: 44)
+
+            // The name is the only way to tell two GitHub repositories apart, so
+            // it is worth the two lines even at this width; the tooltip carries
+            // the whole of it for the ones that still do not fit.
+            Text(project.name)
+                .font(.system(size: 9))
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 4)
+        .contentShape(Rectangle())
+        .onTapGesture { store.selectedProjectID = project.id }
+        .pointerCursor()
+        .help(project.name)
     }
 }
 

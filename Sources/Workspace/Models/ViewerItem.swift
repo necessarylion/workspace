@@ -85,8 +85,18 @@ final class ViewerItem: Identifiable {
     var diff: Diff?
     var pullRequest: PullRequest?
 
-    /// The conversation, for a `.claude` item.
-    var claude: ClaudeSession?
+    // Conversations with Claude: one item holds every one of them for its
+    // project, the way the terminal item holds every shell. They run at the
+    // same time — a long turn in one keeps going while another is typed into —
+    // so the viewer picks which is on screen rather than which exists.
+    var claudes: [ClaudeSession] = []
+    var selectedClaudeID: UUID?
+
+    /// The conversation on screen. Falls back to the newest, so an item that has
+    /// only just been given its first session needs no separate selection step.
+    var claude: ClaudeSession? {
+        claudes.first { $0.id == selectedClaudeID } ?? claudes.last
+    }
 
     // Terminal tabs: one item holds every shell for its project.
     var terminals: [TerminalSession] = []

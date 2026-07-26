@@ -539,43 +539,43 @@ struct CompactFileRow: View {
 
     var body: some View {
         HStack(spacing: 3) {
-            Color.clear.frame(width: CGFloat(depth) * 12, height: 1)
+            Color.clear.frame(width: CGFloat(depth) * 14, height: 1)
 
             if node.isDirectory {
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 8, weight: .semibold))
+                    .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .rotationEffect(.degrees(node.isExpanded ? 90 : 0))
-                    .frame(width: 11)
+                    .frame(width: 12)
             } else {
-                Color.clear.frame(width: 11, height: 1)
+                Color.clear.frame(width: 12, height: 1)
             }
 
             if !node.isDirectory, let brand = FileIcon.brand(for: node.url) {
                 BrandMark(
                     name: brand.name,
-                    size: 11,
+                    size: 13,
                     color: isSelected ? .white : brand.color
                 )
-                .frame(width: 17)
+                .frame(width: 19)
             } else {
                 Image(systemName: FileIcon.symbol(for: node.url, isDirectory: node.isDirectory))
-                    // A folder is tinted the same accent the selected row is filled
-                    // with, so on that row it would vanish into the background.
+                    // The selected row is filled with the accent colour, which a
+                    // tinted glyph can be close enough to to disappear into.
                     .foregroundStyle(
                         isSelected
                             ? AnyShapeStyle(.white)
                             : AnyShapeStyle(FileIcon.tint(for: node.url, isDirectory: node.isDirectory))
                     )
-                    .font(.system(size: 10))
-                    .frame(width: 17)
+                    .font(.system(size: 12))
+                    .frame(width: 19)
             }
 
             if isRenaming {
                 nameField
             } else {
                 Text(node.name)
-                    .font(.system(size: 11.5))
+                    .font(.system(size: 13))
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
@@ -584,7 +584,7 @@ struct CompactFileRow: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 4)
-        .frame(height: 19)
+        .frame(height: 22)
         // Fades the row's own content only — the selection fill behind it is
         // added afterwards and stays solid.
         .opacity(isIgnored && !isSelected ? 0.45 : 1)
@@ -687,7 +687,7 @@ struct CompactFileRow: View {
             },
             cancel: { store.renamingFile = nil }
         )
-        .frame(height: 15)
+        .frame(height: 17)
     }
 
     /// Spring-loaded folders: opens after a short hold, and only if the drag is

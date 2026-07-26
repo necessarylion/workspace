@@ -28,7 +28,8 @@ struct RenameField: NSViewRepresentable {
         let field = FocusingTextField(string: text)
         field.selectsBaseName = selectsBaseName
         field.delegate = context.coordinator
-        field.font = .systemFont(ofSize: 11.5)
+        // Matches the row's own name text, so renaming does not resize it.
+        field.font = .systemFont(ofSize: 13)
         field.isBordered = false
         field.focusRingType = .none
         field.drawsBackground = true

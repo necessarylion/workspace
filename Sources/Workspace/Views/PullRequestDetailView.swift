@@ -61,8 +61,8 @@ struct PullRequestDetailView: View {
 
             // The tab fills the window, with the panel beside it on Details
             // only: a diff and a commit's patch are read across the whole
-            // width — the navigator folds away for them too — so a second
-            // column of anything there is a column taken from the code.
+            // width, so a second column of anything there is a column taken
+            // from the code.
             HStack(spacing: 0) {
                 Group {
                     switch item.pullRequestTab {

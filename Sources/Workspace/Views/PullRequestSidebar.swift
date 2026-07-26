@@ -8,8 +8,7 @@ import SwiftUI
 /// description, the builds as a tab of their own — and neither was worth a
 /// whole window. Together in a column they are read at a glance beside the
 /// conversation, and the Builds tab is gone. It stops at Details on purpose:
-/// the Diff and Commits tabs are read across the whole width, which is why the
-/// navigator folds away for a pull request in the first place.
+/// the Diff and Commits tabs want every pixel of width they can get.
 ///
 /// It does not fold away itself — there is no switch for it. Details is a page
 /// two columns wide, and half of what the tab is for would go with the panel.

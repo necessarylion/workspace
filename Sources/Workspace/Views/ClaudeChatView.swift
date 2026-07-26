@@ -111,17 +111,15 @@ struct ClaudeChatView: View {
                 .padding(.vertical, 20)
                 .frame(maxWidth: .infinity, alignment: .top)
             }
-            // Two signals, because a reply grows in two ways: a new message or
-            // a new tool row, and the text of the one being written.
-            .onChange(of: session.messages.count) { scrollDown(proxy) }
-            .onChange(of: tailLength) { scrollDown(proxy) }
-            .onChange(of: session.isResponding) { scrollDown(proxy) }
+            // Following the reply down is done by a view of its own rather than
+            // here. Watching the transcript grow from this level would mean this
+            // body — every bubble in the conversation — is rebuilt on every
+            // token; the follower draws nothing, so rebuilding it costs nothing.
+            .overlay {
+                ChatScrollFollower(session: session, proxy: proxy, anchor: bottomAnchor)
+            }
         }
         .textSelection(.enabled)
-    }
-
-    private func scrollDown(_ proxy: ScrollViewProxy) {
-        proxy.scrollTo(bottomAnchor, anchor: .bottom)
     }
 
     /// A clicked option. It goes straight off when there is nothing half
@@ -135,23 +133,6 @@ struct ClaudeChatView: View {
         } else {
             session.draft += (session.draft.hasSuffix(" ") ? "" : " ") + reply.text
         }
-    }
-
-    /// How much has been written into the last message so far. Only the tail is
-    /// measured: everything above it has stopped changing.
-    ///
-    /// Counted in UTF-8 bytes rather than characters. `String.count` walks the
-    /// whole string to group it into graphemes, and this is read on every pass
-    /// of the transcript's body while a reply is streaming — so a long answer
-    /// would be re-measured end to end per token. Any number that moves when
-    /// text arrives will do, and this one is free.
-    private var tailLength: Int {
-        session.messages.last?.blocks.reduce(0) { total, block in
-            switch block {
-            case .text(let text), .thinking(let text): total + text.text.utf8.count
-            case .tool(let call): total + call.partialInput.utf8.count + (call.result?.utf8.count ?? 0)
-            }
-        } ?? 0
     }
 
     /// Whether text is arriving right now, so the spinner does not sit under a
@@ -190,6 +171,37 @@ struct ClaudeChatView: View {
         case "tool_use", "tool_running": "Running a tool…"
         default: status.replacingOccurrences(of: "_", with: " ").capitalized + "…"
         }
+    }
+}
+
+// MARK: - Following the reply
+
+/// Keeps the transcript parked at the bottom while a reply is being written.
+///
+/// It draws nothing. The point is *where* it sits in the view tree: the counter
+/// it watches ticks on every token, and whichever view reads it is rebuilt that
+/// often. Here that is a `Color.clear`. Read from the transcript's own body
+/// instead — which is what measuring the last message amounted to — and every
+/// bubble, every tool row and every code block in the conversation was rebuilt
+/// per token, which is what made a long answer crawl.
+private struct ChatScrollFollower: View {
+    let session: ClaudeSession
+    let proxy: ScrollViewProxy
+    let anchor: String
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+            // A new turn always wins: sending a prompt means looking at what
+            // comes back, wherever the transcript happened to be left.
+            .onChange(of: session.messages.count) { follow() }
+            .onChange(of: session.isResponding) { follow() }
+            .onChange(of: session.growth) { follow() }
+    }
+
+    private func follow() {
+        proxy.scrollTo(anchor, anchor: .bottom)
     }
 }
 
@@ -848,16 +860,6 @@ private struct ClaudeComposer: View {
 
             Spacer(minLength: 8)
 
-            Button {
-                session.newChat()
-            } label: {
-                Image(systemName: "square.and.pencil")
-            }
-            .buttonStyle(.borderless)
-            .disabled(session.isEmpty)
-            .help("Start a new conversation")
-            .pointerCursor(!session.isEmpty)
-
             sendButton
         }
     }
@@ -901,9 +903,8 @@ private struct ClaudeComposer: View {
                     session.interrupt()
                 } label: {
                     Label("Stop", systemImage: "stop.fill")
-                        .labelStyle(.iconOnly)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .tint(.red)
                 .help("Stop what Claude is doing now")

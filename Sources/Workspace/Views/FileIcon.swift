@@ -111,7 +111,10 @@ enum FileIcon {
     }
 
     static func symbol(for url: URL, isDirectory: Bool = false) -> String {
-        if isDirectory { return "folder" }
+        // Filled, the way Xcode's navigator draws one: an outline folder reads as
+        // the same weight as the file glyphs beside it, and the folders are the
+        // rows you scan a tree by.
+        if isDirectory { return "folder.fill" }
         if isTest(url) { return "testtube.2" }
         let name = url.lastPathComponent.lowercased()
         if name == "dockerfile" || name.hasPrefix("dockerfile.") || name.hasPrefix("docker-compose.") {
@@ -143,7 +146,10 @@ enum FileIcon {
     }
 
     static func tint(for url: URL, isDirectory: Bool = false) -> Color {
-        if isDirectory { return .accentColor }
+        // Xcode's folder blue, not the accent colour: the accent is also what a
+        // selected row is filled with, so the two moved together and a folder
+        // changed colour depending on the theme it was read under.
+        if isDirectory { return .folder }
         if isTest(url) { return .test }
         let name = url.lastPathComponent.lowercased()
         if name.hasPrefix(".git") { return .git }
@@ -198,4 +204,5 @@ private extension Color {
     static let env = Color(red: 0.83, green: 0.68, blue: 0.22)
     static let pdf = Color(red: 0.86, green: 0.24, blue: 0.24)
     static let test = Color(red: 0.34, green: 0.70, blue: 0.50)
+    static let folder = Color(red: 0.36, green: 0.64, blue: 0.96)
 }

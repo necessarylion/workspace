@@ -86,6 +86,17 @@ struct DiffRow: Sendable, Hashable, Identifiable {
 }
 
 enum DiffParser {
+    /// The same parse, off the main thread.
+    ///
+    /// `parse` is pure and its result is `Sendable`, but it is not cheap: the
+    /// word-level pass runs an LCS over the tokens of every changed line, and a
+    /// pull request of a few thousand lines stalls the window for as long as it
+    /// takes. Every caller loads its patch with `await` already, so the wait
+    /// costs nothing extra and the rest of the app keeps drawing.
+    static func parseInBackground(_ text: String) async -> Diff {
+        await Task.detached(priority: .userInitiated) { parse(text) }.value
+    }
+
     /// Parses `git diff` / `gh pr diff` output.
     static func parse(_ text: String) -> Diff {
         var files: [DiffFile] = []
