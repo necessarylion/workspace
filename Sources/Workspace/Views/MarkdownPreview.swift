@@ -96,14 +96,17 @@ struct MarkdownPreview: View {
 struct MarkdownText: View {
     let text: String
 
-    private enum Block {
+    /// Not private: `MarkdownPDF` writes the same document out to a file and
+    /// walks this very list, so the page and the PDF cannot drift apart.
+    enum Block {
         case heading(level: Int, text: String)
         case paragraph(String)
         case bullet(indent: Int, text: String)
         case numbered(indent: Int, number: String, text: String)
         case task(done: Bool, text: String)
         case quote(String)
-        case code(String)
+        case code(language: String, text: String)
+        case mermaid(String)
         case table(headers: [String], rows: [[String]])
         case rule
         case spacer
@@ -158,9 +161,11 @@ struct MarkdownText: View {
                 Rectangle().fill(.quaternary).frame(width: 3)
                 inline(text).foregroundStyle(.secondary)
             }
-        case .code(let code):
+        case .code(let language, let code):
             ScrollView(.horizontal) {
-                Text(code)
+                // Coloured by the editor's own tree-sitter setup when the fence
+                // names a language we have a grammar for, plain when it does not.
+                codeText(code, language: language)
                     .font(.system(.callout, design: .monospaced))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
@@ -169,6 +174,9 @@ struct MarkdownText: View {
             // The fill alone is faint against a dark viewer; the outline is
             // what actually marks where the block starts and stops.
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))
+        case .mermaid(let source):
+            MermaidDiagram(source: source)
+                .padding(.vertical, 4)
         case .table(let headers, let rows):
             // No horizontal scroll view around this: one would offer the grid
             // unbounded width, so a cell would never wrap and a wide table would
@@ -228,6 +236,13 @@ struct MarkdownText: View {
         case .spacer:
             Spacer().frame(height: 2)
         }
+    }
+
+    private func codeText(_ code: String, language: String) -> Text {
+        guard let highlighted = MarkdownCodeHighlighter.highlight(code, language: language) else {
+            return Text(code)
+        }
+        return Text(highlighted)
     }
 
     private func headingFont(_ level: Int) -> Font {
@@ -309,11 +324,30 @@ struct MarkdownText: View {
         return NSFont.preferredFont(forTextStyle: style).pointSize
     }
 
-    private var blocks: [Block] {
+    private var blocks: [Block] { Self.blocks(in: text) }
+
+    static func blocks(in text: String) -> [Block] {
         var result: [Block] = []
         var codeBuffer: [String] = []
         var inCode = false
+        /// The word after the opening ``` — "swift", "mermaid", or nothing.
+        var codeLanguage = ""
         var tableBuffer: [[String]] = []
+
+        /// A fence is a diagram when it says so and has something in it;
+        /// everything else stays a code block.
+        func flushCode() {
+            let body = codeBuffer.joined(separator: "\n")
+            let language = codeLanguage
+            codeBuffer.removeAll()
+            codeLanguage = ""
+            let hasContent = !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if language.lowercased() == "mermaid", hasContent {
+                result.append(.mermaid(body))
+            } else {
+                result.append(.code(language: language, text: body))
+            }
+        }
 
         func flushTable() {
             guard !tableBuffer.isEmpty else { return }
@@ -350,8 +384,9 @@ struct MarkdownText: View {
 
             if trimmed.hasPrefix("```") {
                 if inCode {
-                    result.append(.code(codeBuffer.joined(separator: "\n")))
-                    codeBuffer.removeAll()
+                    flushCode()
+                } else {
+                    codeLanguage = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 }
                 inCode.toggle()
                 continue
@@ -394,14 +429,15 @@ struct MarkdownText: View {
         }
 
         flushTable()
+        // An unterminated fence — the file is still being typed, most likely.
         if inCode, !codeBuffer.isEmpty {
-            result.append(.code(codeBuffer.joined(separator: "\n")))
+            flushCode()
         }
         return result
     }
 
     /// "| a | b |" → ["a", "b"].
-    private func tableCells(_ line: String) -> [String] {
+    private static func tableCells(_ line: String) -> [String] {
         var inner = Substring(line)
         if inner.hasPrefix("|") { inner = inner.dropFirst() }
         if inner.hasSuffix("|") { inner = inner.dropLast() }
@@ -411,7 +447,7 @@ struct MarkdownText: View {
     }
 
     /// "3. text" or "3) text" → ("3", "text"); nil when not an ordered item.
-    private func orderedItem(_ line: String) -> (number: String, text: String)? {
+    private static func orderedItem(_ line: String) -> (number: String, text: String)? {
         let digits = line.prefix(while: \.isNumber)
         guard !digits.isEmpty, digits.count <= 4 else { return nil }
         let rest = line.dropFirst(digits.count)

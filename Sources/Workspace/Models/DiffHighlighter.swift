@@ -19,9 +19,7 @@ enum DiffHighlighter {
             let file = result.files[fileIndex]
             guard !file.isBinary else { continue }
 
-            let language = CodeLanguage.detectLanguageFrom(
-                url: URL(fileURLWithPath: file.newPath)
-            )
+            let language = CodeLanguage.forFile(url: URL(fileURLWithPath: file.newPath))
             guard language.id != CodeLanguage.default.id else { continue }
 
             let key = language.id.rawValue

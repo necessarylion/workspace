@@ -10,6 +10,9 @@ import SwiftUI
 enum FileIcon {
     /// The logo to draw for this file, if the ecosystem has one.
     static func brand(for url: URL) -> (name: String, color: Color)? {
+        // A spec sits next to the thing it tests, so the language's own logo is
+        // the one icon it must not borrow — see ``isTest``.
+        if isTest(url) { return nil }
         if let named = namedBrand(for: url.lastPathComponent.lowercased()) { return named }
 
         return switch url.pathExtension.lowercased() {
@@ -47,9 +50,38 @@ enum FileIcon {
         case "graphql", "gql": ("graphql", .graphql)
         case "sh", "bash", "zsh", "fish": ("gnubash", .green)
         case "dockerfile": ("docker", .docker)
+        case "pdf": ("acrobat", .pdf)
         default: nil
         }
     }
+
+    /// Whether the file is a test for the file beside it, by the naming each
+    /// ecosystem happens to use. Only for languages that write tests as source
+    /// files — `notes.test` or `data_spec.json` are not tests of anything.
+    static func isTest(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        guard testableExtensions.contains(ext) else { return false }
+
+        let stem = url.deletingPathExtension().lastPathComponent.lowercased()
+        // app.spec.ts, api.test.js
+        if stem.hasSuffix(".spec") || stem.hasSuffix(".test") { return true }
+        // handler_test.go, user_spec.rb
+        if stem.hasSuffix("_test") || stem.hasSuffix("_spec") { return true }
+        // test_parser.py
+        if stem.hasPrefix("test_") { return true }
+        // StoreTests.swift — the CamelCase suffix, so only where it is the
+        // convention; plain English words end in "tests" too.
+        if camelCaseTestExtensions.contains(ext), stem.hasSuffix("tests") { return true }
+        return false
+    }
+
+    /// Languages whose tests live in source files of the same kind.
+    private static let testableExtensions: Set<String> = [
+        "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs",
+        "py", "rb", "go", "rs", "php", "java", "kt", "kts", "swift", "dart", "cs",
+    ]
+
+    private static let camelCaseTestExtensions: Set<String> = ["swift", "kt", "kts", "java", "cs"]
 
     /// Files whose whole name carries the meaning — including the dotfiles a
     /// repository is half made of.
@@ -80,6 +112,7 @@ enum FileIcon {
 
     static func symbol(for url: URL, isDirectory: Bool = false) -> String {
         if isDirectory { return "folder" }
+        if isTest(url) { return "testtube.2" }
         let name = url.lastPathComponent.lowercased()
         if name == "dockerfile" || name.hasPrefix("dockerfile.") || name.hasPrefix("docker-compose.") {
             return "shippingbox"
@@ -95,6 +128,7 @@ enum FileIcon {
         case "json", "jsonc", "json5", "yaml", "yml", "toml", "plist", "xml": return "curlybraces"
         case "png", "jpg", "jpeg", "gif", "heic", "tiff", "webp", "bmp", "icns": return "photo"
         case "svg": return "scribble"
+        case "drawio", "dio": return "rectangle.connected.to.line.below"
         case "sh", "bash", "zsh", "fish": return "terminal"
         case "lock": return "lock"
         case "ttf", "otf", "woff", "woff2": return "textformat"
@@ -110,6 +144,7 @@ enum FileIcon {
 
     static func tint(for url: URL, isDirectory: Bool = false) -> Color {
         if isDirectory { return .accentColor }
+        if isTest(url) { return .test }
         let name = url.lastPathComponent.lowercased()
         if name.hasPrefix(".git") { return .git }
 
@@ -161,4 +196,6 @@ private extension Color {
     static let graphql = Color(red: 0.89, green: 0.20, blue: 0.60)
     static let git = Color(red: 0.94, green: 0.33, blue: 0.20)
     static let env = Color(red: 0.83, green: 0.68, blue: 0.22)
+    static let pdf = Color(red: 0.86, green: 0.24, blue: 0.24)
+    static let test = Color(red: 0.34, green: 0.70, blue: 0.50)
 }

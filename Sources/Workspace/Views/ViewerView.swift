@@ -85,15 +85,28 @@ struct ViewerView: View {
 
             Spacer(minLength: 12)
 
-            if store.current?.document?.isMarkdown == true {
-                Toggle(isOn: Binding(
-                    get: { store.markdownPreview },
-                    set: { store.markdownPreview = $0 }
-                )) {
+            // Only while the preview is up: what the button saves is the page
+            // being read, not the source behind it.
+            if store.visibleDocument?.isMarkdown == true, store.markdownPreview {
+                Button {
+                    store.saveCurrentDocumentAsPDF()
+                } label: {
+                    Image(systemName: "arrow.down.circle")
+                }
+                .help("Save this preview as a PDF (⇧⌘E)")
+                .pointerCursor()
+            }
+
+            if let preview = previewToggle {
+                Toggle(isOn: preview) {
                     Image(systemName: "eye")
                 }
                 .toggleStyle(.button)
-                .help("Preview Markdown")
+                .help(
+                    store.visibleDocument?.isDrawio == true
+                        ? "Draw the diagram instead of showing its XML"
+                        : "Preview Markdown"
+                )
                 .pointerCursor()
             }
 
@@ -131,6 +144,20 @@ struct ViewerView: View {
         .background(.bar)
     }
 
+    /// The eye in the header row, or nothing when the open file has no rendered
+    /// form. One switch, but which flag it holds depends on the file: Markdown
+    /// opens as its source and a diagram opens drawn, so they cannot share one.
+    private var previewToggle: Binding<Bool>? {
+        guard let document = store.visibleDocument else { return nil }
+        if document.isMarkdown {
+            return Binding(get: { store.markdownPreview }, set: { store.markdownPreview = $0 })
+        }
+        if document.isDrawio {
+            return Binding(get: { store.drawioPreview }, set: { store.drawioPreview = $0 })
+        }
+        return nil
+    }
+
     /// What the header says while the dashboard is up: the repository the board
     /// belongs to, in the slot and the shape the open item's breadcrumb uses, so
     /// the row never reads as empty and the name never moves.
@@ -166,6 +193,8 @@ struct ViewerView: View {
             // glyph every other kind of item gets.
             if let author = item.authorName {
                 AuthorAvatar(name: author, url: item.authorAvatarURL, size: 16)
+            } else if let brand = item.brand {
+                BrandMark(name: brand.name, size: 13, color: brand.color)
             } else {
                 Image(systemName: item.symbol)
                     .foregroundStyle(.secondary)
@@ -251,12 +280,15 @@ struct ViewerView: View {
             case .text:
                 if document.isMarkdown && store.markdownPreview {
                     MarkdownPreview(text: document.text)
+                } else if document.isDrawio && store.drawioPreview {
+                    DrawioPreview(xml: document.text)
                 } else {
                     CodeEditorView(
                         document: document,
                         projectRoot: store.project(containing: document.url)?.url,
                         wrapsLines: store.wrapsLines,
                         theme: AppearanceSettings.shared.editorTheme,
+                        takesFocusOnAppear: store.editorTakesFocus,
                         onOpenLocation: { url, line in
                             store.openFile(url, revealLine: line)
                         }
@@ -264,6 +296,8 @@ struct ViewerView: View {
                 }
             case .image:
                 imagePreview(document.url)
+            case .pdf:
+                PDFPreview(url: document.url)
             case .unsupported(let reason):
                 ContentUnavailableView(
                     "Cannot show this file",

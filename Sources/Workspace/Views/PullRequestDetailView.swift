@@ -117,7 +117,6 @@ struct PullRequestDetailView: View {
             if let review = pr.reviewLabel {
                 badge(review, color: review == "Approved" ? .green : .orange)
             }
-            syncBadge
 
             Spacer(minLength: 8)
 
@@ -196,10 +195,10 @@ struct PullRequestDetailView: View {
             if item.isRunningPullRequestAction {
                 ProgressView().controlSize(.small)
             }
-            if item.syncState?.isBehind == true {
+            if let state = item.syncState, state.isBehind {
                 actionButton(
-                    "Update from \(pr.targetBranch)",
-                    symbol: "arrow.down.to.line",
+                    "\(behindPhrase(state.behind)) behind \(pr.targetBranch), sync now",
+                    symbol: "arrow.triangle.2.circlepath",
                     tint: .orange,
                     help: "Bring \(pr.targetBranch) into \(pr.sourceBranch)"
                 ) {
@@ -257,14 +256,11 @@ struct PullRequestDetailView: View {
         }
     }
 
-    /// Whether the branch still has the target branch's latest work under it.
-    /// Silent while it is up to date — there is nothing to say then — and a
-    /// count once it is behind. Acting on it is the bar below's business.
-    @ViewBuilder
-    private var syncBadge: some View {
-        if let state = item.syncState, state.isBehind {
-            badge("\(state.behind) behind \(pr.targetBranch)", color: .orange)
-        }
+    /// How far behind, in words. The count only ever appears on the button that
+    /// acts on it — a badge saying the same thing next to it was one thing too
+    /// many to read.
+    private func behindPhrase(_ count: Int) -> String {
+        count == 1 ? "1 commit" : "\(count) commits"
     }
 
     /// The menu entry that re-counts the drift, which doubles as the place the

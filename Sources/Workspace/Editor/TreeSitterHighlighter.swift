@@ -247,6 +247,15 @@ final class TreeSitterHighlighter {
         if name.hasPrefix("string"), isModulePath(capture.node) {
             return "string.import"
         }
+        // A YAML key is a scalar like any other, so the grammar's blanket
+        // string rule claims it as well as the `property` rule meant for it —
+        // and `string` outranks `property`, which leaves keys and values the
+        // same colour, i.e. most of the file in one colour. The key is only a
+        // string in the parser's sense; drop that capture and let `property`
+        // stand.
+        if language.id == .yaml, name.hasPrefix("string"), isMappingKey(capture.node) {
+            return nil
+        }
         // Grammars hand back one flat `keyword` for words an editor colours
         // very differently — `import` is control flow, `private` is a storage
         // modifier. The word itself is the only thing that tells them apart.
@@ -298,6 +307,26 @@ final class TreeSitterHighlighter {
         }
         return captures
     }()
+
+    /// Whether a scalar is the key of a mapping rather than a value, told by
+    /// the pair's own `key` field so both block (`name: value`) and flow
+    /// (`{ name: value }`) mappings answer the same way.
+    ///
+    /// The scalar sits two or three levels under the pair — quoted scalars are
+    /// a `flow_node` away, plain ones go through `plain_scalar` first.
+    private func isMappingKey(_ node: Node) -> Bool {
+        var child = node
+        var ancestor = node.parent
+        for _ in 0..<3 {
+            guard let current = ancestor else { return false }
+            if let key = current.child(byFieldName: "key") {
+                return key.id == child.id
+            }
+            child = current
+            ancestor = current.parent
+        }
+        return false
+    }
 
     /// Whether a string node is the module an import names, rather than an
     /// ordinary string. Grammars capture both as `string`, so the distinction

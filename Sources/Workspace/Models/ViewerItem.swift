@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// One thing shown in the centre of the window.
 ///
@@ -155,6 +156,14 @@ final class ViewerItem: Identifiable {
         case .pullRequest: "arrow.triangle.pull"
         case .terminal: "terminal"
         }
+    }
+
+    /// The logo to draw in place of ``symbol``, for a file whose format has one.
+    /// The header reads as the same file the navigator has selected, so it has
+    /// to reach for the same mark — an SF Symbol next to a brand icon looks
+    /// like two different files.
+    nonisolated var brand: (name: String, color: Color)? {
+        if case .file(let url) = kind { FileIcon.brand(for: url) } else { nil }
     }
 
     var isDirty: Bool { document?.isDirty ?? false }

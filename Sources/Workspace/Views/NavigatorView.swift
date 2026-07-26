@@ -82,6 +82,12 @@ struct FileListView: View {
     @Environment(WorkspaceStore.self) private var store
     let project: Project
 
+    /// A drag hovering over the list itself, which drops into the repository root.
+    @State private var isRootDropTarget = false
+    /// Raised whenever the tree should take the keyboard — see
+    /// `FileTreeKeyCatcher`, which does the taking.
+    @State private var keyboardClaims = 0
+
     var body: some View {
         VStack(spacing: 0) {
             searchField
@@ -90,6 +96,69 @@ struct FileListView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(
+            FileTreeKeyCatcher(claims: keyboardClaims, handle: handle)
+                .frame(width: 0, height: 0)
+        )
+        // Switching repository leaves a selection of paths that are not in this
+        // tree, and a half-typed rename that belongs to the other one.
+        .onChange(of: project.id) {
+            store.clearFileSelection()
+            store.renamingFile = nil
+        }
+        // The rename box takes the keyboard while it is open; closing it hands
+        // the keys back to the list, so ⏎ can rename the next row straight away.
+        .onChange(of: store.renamingFile) { _, renaming in
+            if renaming == nil { keyboardClaims += 1 }
+        }
+    }
+
+    /// A click on a row: it takes the keyboard, moves the selection, and — with
+    /// no modifier held — opens the file or opens the folder.
+    ///
+    /// The file opens **without** taking the keyboard, the way VS Code's
+    /// explorer does: the keys stay here for ⏎, ⌘⌫ and the arrows until the
+    /// editor itself is clicked.
+    private func activate(_ node: FileNode, modifiers: NSEvent.ModifierFlags) {
+        keyboardClaims += 1
+        store.renamingFile = nil
+        store.selectFile(node.url, modifiers: modifiers, visible: rowURLs)
+        guard modifiers.intersection([.command, .shift]).isEmpty else { return }
+        if node.isDirectory {
+            node.isExpanded.toggle()
+        } else {
+            store.openFile(node.url, takingFocus: false)
+        }
+    }
+
+    /// The rows on screen, in order — what ⇧-click and the arrow keys count in.
+    private var rowURLs: [URL] {
+        let query = store.fileSearchText.trimmingCharacters(in: .whitespaces)
+        return query.isEmpty
+            ? visibleRows.map(\.node.url)
+            : store.fileSearchResults(in: project).map(\.url)
+    }
+
+    /// ⏎ renames, ⌘⌫ trashes, ↑↓ walk the rows and ⇧↑↓ extend the selection —
+    /// the same keys the Finder answers.
+    private func handle(_ key: FileTreeKey) -> Bool {
+        // With the rename box open every one of these keys is the box's: ⏎
+        // commits the new name, ⎋ drops it, and the arrows move the caret.
+        guard store.renamingFile == nil else { return false }
+        let selected = store.selectedFiles
+        switch key {
+        case .rename:
+            guard selected.count == 1, let url = selected.first else { return false }
+            store.renamingFile = url
+            return true
+        case .trash:
+            guard !selected.isEmpty else { return false }
+            store.deleteFiles(Array(selected), project: project)
+            return true
+        case .move(let delta, let extending):
+            store.moveFileSelection(by: delta, extending: extending, visible: rowURLs)
+            return true
+        }
     }
 
     private var searchField: some View {
@@ -155,9 +224,11 @@ struct FileListView: View {
                 if query.isEmpty {
                     ForEach(visibleRows) { entry in
                         CompactFileRow(
+                            project: project,
                             node: entry.node,
                             depth: entry.depth,
-                            isIgnored: project.isIgnored(entry.node.url)
+                            isIgnored: project.isIgnored(entry.node.url),
+                            activate: { activate(entry.node, modifiers: $0) }
                         )
                     }
                 } else {
@@ -170,9 +241,11 @@ struct FileListView: View {
                     } else {
                         ForEach(results) { node in
                             CompactFileRow(
+                                project: project,
                                 node: node,
                                 depth: 0,
-                                isIgnored: project.isIgnored(node.url)
+                                isIgnored: project.isIgnored(node.url),
+                                activate: { activate(node, modifiers: $0) }
                             )
                         }
                     }
@@ -180,6 +253,27 @@ struct FileListView: View {
             }
             .padding(.vertical, 3)
             .padding(.horizontal, 6)
+        }
+        // The empty space below the rows is still the repository folder, so a
+        // drop there lands in its root. Rows sit on top of this and take their
+        // own drops first.
+        .dropDestination(for: URL.self) { urls, _ in
+            store.importFiles(urls, into: project.url, project: project)
+            return true
+        } isTargeted: { isRootDropTarget = $0 }
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(isRootDropTarget ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 1.5)
+                .padding(2)
+                .allowsHitTesting(false)
+        )
+        // Clicking past the last row lets the selection go, the way clicking the
+        // empty part of a Finder window does.
+        .contentShape(Rectangle())
+        .onTapGesture {
+            keyboardClaims += 1
+            store.renamingFile = nil
+            store.clearFileSelection()
         }
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 12) {
@@ -226,16 +320,39 @@ struct FileTreeEntry: Identifiable {
 /// One 19pt row: disclosure chevron, icon, name.
 struct CompactFileRow: View {
     @Environment(WorkspaceStore.self) private var store
+    let project: Project
     let node: FileNode
     let depth: Int
     /// Covered by `.gitignore`: still there, still openable, just faded so the
     /// tracked files stand out.
     var isIgnored = false
+    /// A click on the row, with whatever modifier was held — the list does the
+    /// selecting, since a ⇧-range only means something in the order it draws.
+    var activate: (NSEvent.ModifierFlags) -> Void = { _ in }
     @State private var isHovering = false
+    @State private var isDropTarget = false
 
-    private var isSelected: Bool {
+    /// Picked in the tree. Not the same as being open in the viewer: a
+    /// selection is what the next action works on, and it can be several rows.
+    private var isSelected: Bool { store.selectedFiles.contains(node.url) }
+
+    /// Showing in the viewer right now.
+    private var isOpen: Bool {
         guard case .file(let url) = store.current?.kind, !store.showsDashboard else { return false }
         return url == node.url
+    }
+
+    private var isRenaming: Bool { store.renamingFile == node.url }
+
+    /// The rows this row's menu, keys and drags act on: the whole selection when
+    /// it is part of it, itself alone when it is not.
+    private var targets: [URL] { store.fileActionTargets(node.url) }
+
+    /// Where a drop on this row lands. A file row takes its folder, the way
+    /// Finder and every file tree does it — the row is where the pointer is, the
+    /// folder it sits in is what can hold a file.
+    private var dropFolder: URL {
+        node.isDirectory ? node.url : node.url.deletingLastPathComponent()
     }
 
     var body: some View {
@@ -266,11 +383,15 @@ struct CompactFileRow: View {
                     .frame(width: 17)
             }
 
-            Text(node.name)
-                .font(.system(size: 11.5))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+            if isRenaming {
+                nameField
+            } else {
+                Text(node.name)
+                    .font(.system(size: 11.5))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+            }
 
             Spacer(minLength: 0)
         }
@@ -280,33 +401,114 @@ struct CompactFileRow: View {
         // added afterwards and stays solid.
         .opacity(isIgnored && !isSelected ? 0.45 : 1)
         .background(
-            isSelected
-                ? AnyShapeStyle(.tint)
-                : isHovering ? AnyShapeStyle(.quaternary.opacity(0.5)) : AnyShapeStyle(.clear),
+            background,
             in: RoundedRectangle(cornerRadius: 4)
+        )
+        // While a drag is over the row, the folder it would land in is outlined
+        // — on a file row that is the row's own folder, which is why the fill
+        // goes with it rather than just a border.
+        .background(
+            isDropTarget ? AnyShapeStyle(.tint.opacity(0.18)) : AnyShapeStyle(.clear),
+            in: RoundedRectangle(cornerRadius: 4)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .strokeBorder(isDropTarget ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 1.5)
         )
         .contentShape(Rectangle())
         .pointerCursor()
         .onHover { isHovering = $0 }
-        .onTapGesture {
-            if node.isDirectory {
-                node.isExpanded.toggle()
-            } else {
-                store.openFile(node.url)
+        // The modifier is read off the event that is still being handled, which
+        // is how ⌘-click and ⇧-click are told apart from a plain one. A click
+        // inside the open rename box belongs to the box.
+        .onTapGesture { if !isRenaming { activate(NSEvent.modifierFlags) } }
+        // Dragging a row out hands over the real file, so it can be dropped in
+        // Finder, in another folder here, or in any app that takes files. Only
+        // the row under the pointer travels — a drop back into the tree picks up
+        // the rest of the selection from the store.
+        .draggable(startDrag()) {
+            Label(
+                targets.count > 1 ? "\(targets.count) items" : node.name,
+                systemImage: FileIcon.symbol(for: node.url, isDirectory: node.isDirectory)
+            )
+            .font(.system(size: 11.5))
+            .padding(4)
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            store.importFiles(urls, into: dropFolder, project: project)
+            return true
+        } isTargeted: { targeted in
+            isDropTarget = targeted
+            // Hovering over a closed folder opens it, so a file can be dropped
+            // further in without letting go of the drag first.
+            if targeted && node.isDirectory && !node.isExpanded {
+                openOnHover()
             }
         }
         .contextMenu {
-            if !node.isDirectory {
+            // Named for how many rows it will touch, so a menu opened on one row
+            // of several never looks like it applies to that row alone.
+            let many = targets.count > 1 ? " \(targets.count) Items" : ""
+            if !node.isDirectory, targets.count == 1 {
                 Button("Open") { store.openFile(node.url) }
                 Divider()
             }
+            Button("Rename…") { store.renamingFile = node.url }
+                .disabled(targets.count > 1)
+            Button("Duplicate\(many)") {
+                store.duplicateFiles(targets, project: project)
+            }
+            Button("Move\(many.isEmpty ? "" : many) to Trash") {
+                store.deleteFiles(targets, project: project)
+            }
+            Divider()
             Button("Reveal in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([node.url])
+                NSWorkspace.shared.activateFileViewerSelecting(targets)
             }
-            Button("Copy Path") {
+            Button("Copy Path\(targets.count > 1 ? "s" : "")") {
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(node.url.path, forType: .string)
+                NSPasteboard.general.setString(targets.map(\.path).joined(separator: "\n"), forType: .string)
             }
+        }
+    }
+
+    /// The file this drag carries, noting the rest of the selection on the way
+    /// out. Evaluated when the drag actually starts, not while the row is drawn.
+    private func startDrag() -> URL {
+        store.beginFileDrag(targets)
+        return node.url
+    }
+
+    /// Selected wins over open, and both over the hover: a row can be all three
+    /// at once, and the selection is what the next key or menu item acts on.
+    private var background: AnyShapeStyle {
+        if isSelected { return AnyShapeStyle(.tint) }
+        if isOpen { return AnyShapeStyle(.tint.opacity(0.2)) }
+        return isHovering ? AnyShapeStyle(.quaternary.opacity(0.5)) : AnyShapeStyle(.clear)
+    }
+
+    /// The name, editable in place — ⏎ renames, ⎋ leaves it as it was, and so
+    /// does clicking away, because an abandoned box should not rename anything.
+    private var nameField: some View {
+        RenameField(
+            text: node.name,
+            selectsBaseName: !node.isDirectory,
+            commit: { name in
+                store.renamingFile = nil
+                store.renameFile(node.url, to: name, project: project)
+            },
+            cancel: { store.renamingFile = nil }
+        )
+        .frame(height: 15)
+    }
+
+    /// Spring-loaded folders: opens after a short hold, and only if the drag is
+    /// still over the row by then.
+    private func openOnHover() {
+        Task {
+            try? await Task.sleep(for: .milliseconds(600))
+            guard isDropTarget, !node.isExpanded else { return }
+            node.isExpanded = true
         }
     }
 }
@@ -509,7 +711,7 @@ struct ChangeListView: View {
             Text(
                 change.label == "Untracked"
                     ? "\(change.path) is not in git, so discarding deletes it. This cannot be undone."
-                    : "\(change.path) goes back to its last committed state, staged edits included. This cannot be undone."
+                    : "\(change.displayPath) goes back to its last committed state, staged edits included. This cannot be undone."
             )
         }
     }
@@ -517,7 +719,7 @@ struct ChangeListView: View {
     private func discard(_ change: GitStatus.Change) {
         pendingDiscard = nil
         Task {
-            guard await project.discard([change.path]) else { return }
+            guard await project.discard(change.gitPaths) else { return }
             // The diff we were showing for this file no longer exists.
             if let current = store.current,
                case .workingDiff(let projectID, let path, _) = current.kind,
@@ -549,7 +751,7 @@ struct ChangeListView: View {
                     ForEach(project.stagedChanges) { row($0) }
                 } header: {
                     header("Staged", count: project.stagedChanges.count, action: "Unstage All") {
-                        let paths = project.stagedChanges.map(\.path)
+                        let paths = project.stagedChanges.flatMap(\.gitPaths)
                         Task { await project.unstage(paths) }
                     }
                 }
@@ -578,10 +780,18 @@ struct ChangeListView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text((change.path as NSString).lastPathComponent)
                     .lineLimit(1)
-                // A file at the root has no folder above it; an empty line here
-                // would still take its height and push the name off centre.
+                // A rename spends this line on where the file came from — the
+                // new name alone says nothing about what happened. Otherwise the
+                // folder, except at the root, where an empty line would still
+                // take its height and push the name off centre.
                 let directory = (change.path as NSString).deletingLastPathComponent
-                if !directory.isEmpty {
+                if let originalPath = change.originalPath, originalPath != change.path {
+                    Text("from \(originalPath)")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                } else if !directory.isEmpty {
                     Text(directory)
                         .font(.caption)
                         .foregroundStyle(.tertiary)
@@ -603,7 +813,7 @@ struct ChangeListView: View {
             // The label this replaces is in the row's tooltip, and the coloured
             // symbol already says what kind of change it is.
             Button {
-                let paths = [change.path]
+                let paths = change.gitPaths
                 Task {
                     if change.isStaged {
                         await project.unstage(paths)
@@ -621,7 +831,7 @@ struct ChangeListView: View {
             .pointerCursor(!isBusy)
         }
         .contentShape(Rectangle())
-        .help("\(change.label) · \(change.path)")
+        .help("\(change.label) · \(change.displayPath)")
         .pointerCursor()
         .tag(change.path)
     }

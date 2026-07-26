@@ -197,6 +197,28 @@ final class Project: Identifiable {
         root.reloadChildren()
     }
 
+    /// Re-reads every folder the tree has open. What the Files tab lists after a
+    /// git command: staging, discarding and checking out all move files about,
+    /// and the tab used to keep showing what was there before.
+    func refreshFileTree() {
+        root.refreshLoadedTree()
+    }
+
+    /// Re-reads one folder of the tree after files landed in it, and opens it so
+    /// they are on screen. Everything else keeps the state it had.
+    func refreshFileTree(at folderURL: URL) {
+        guard let node = root.loadedNode(at: folderURL) else {
+            // Not read yet: whatever was dropped is there the first time the
+            // folder is expanded.
+            return
+        }
+        if node.isDirectory && !node.isExpanded {
+            node.isExpanded = true  // loads the children, the new files included
+        } else {
+            node.refreshChildren()
+        }
+    }
+
     // MARK: - Staging, committing, pushing
 
     /// Whatever is in the commit box. It lives on the project rather than in the
@@ -277,6 +299,9 @@ final class Project: Identifiable {
             break
         }
         await refreshGitStatus()
+        // Discarding deletes untracked files and brings tracked ones back, so
+        // the Files tab is out of date until it re-reads.
+        refreshFileTree()
         return succeeded
     }
 
@@ -355,6 +380,9 @@ final class Project: Identifiable {
                 : result.failureMessage
         }
         await refreshGitStatus()
+        // Every one of these can change what is on disk — a checkout most of
+        // all — so the file tree re-reads with the status.
+        refreshFileTree()
         return result.isSuccess
     }
 }

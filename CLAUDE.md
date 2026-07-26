@@ -67,6 +67,35 @@ The app is one window with three panes, and the mental model that drives the cod
   an `NSTextView` subclass (`CodeTextView`), the gutter (`LineNumberRuler`),
   incremental tree-sitter highlighting (`TreeSitterHighlighter`), and LSP.
   `CodeEditorView` is the SwiftUI bridge.
+- **Markdown** (`Views/MarkdownPreview.swift`) — a hand-rolled block renderer used
+  for `.md` files, PR descriptions and comments. A fenced block is coloured by
+  `Models/MarkdownCodeHighlighter.swift`, which runs the editor's
+  `TreeSitterHighlighter` over the snippet and takes its colours from the
+  current palette — the fence's language word replaces the file name the editor
+  detects from, and the result is cached per (language, palette, text). A
+  ` ```mermaid ` fence goes to `Views/MermaidDiagramView.swift`.
+- **Diagrams** (`Views/DiagramWebView.swift`) — mermaid fences and `.drawio`
+  files are both drawn by the real JavaScript library in a `WKWebView`, and both
+  go through this one representable: it loads a page from `Resources/` as a
+  **file URL** (which is what lets the page pull its library in with a plain
+  relative `<script src>`), calls one function on it with the diagram's text,
+  and hands whatever the page posts back to the caller. `MermaidDiagramView`
+  sizes itself to the height the page reports; `DrawioPreview` fills the pane.
+  The libraries (`mermaid.min.js`, `drawio-viewer.min.js`) are checked in and
+  declared in `Package.swift` (`resources:`), reached through `Bundle.module`;
+  `Scripts/bundle.sh` already copies the resource bundle into the app. Nothing
+  is fetched at runtime — same reason as the themes. Two traps if you touch
+  `drawio-host.html`: draw.io's `toolbar-nohide` pins the toolbar by holding the
+  diagram at `overflow: visible`, which kills scrolling *and* panning, and a
+  top-level `let` in the page is invisible to the JS Swift evaluates — hang
+  anything Swift must reach off `window`.
+- **PDF** (`Views/PDFPreviewView.swift`) — a `.pdf` file is a `Content.pdf`
+  document shown in a PDFKit `PDFView`, wrapped only enough to add the floating
+  page/zoom bar the window has no toolbar for. `PDFPreviewController` owns the
+  `PDFView` (so the bar can drive it and scrolling survives SwiftUI updates) and
+  reads page and scale back out of `PDFViewPageChanged`/`PDFViewScaleChanged`.
+  `OpenDocument` detects the extension before its 4 MB text guard — PDFKit reads
+  a document page by page.
 - **LSP** (`LSP/`) — hand-rolled JSON-RPC over stdio (`LSPConnection`), a typed
   subset of the protocol (`LSPTypes`), one `LanguageService` per server, and
   `LanguageServerRegistry` mapping language → server binary, started lazily per

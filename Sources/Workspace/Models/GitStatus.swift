@@ -4,7 +4,10 @@ import Foundation
 struct GitStatus: Sendable, Hashable {
     struct Change: Sendable, Hashable, Identifiable {
         let code: String        // porcelain XY code, e.g. " M", "??"
+        /// Where the file is now. For a rename or a copy that is the new name.
         let path: String
+        /// The name a renamed or copied file had before, nil for everything else.
+        var originalPath: String?
         var id: String { path }
 
         var isStaged: Bool {
@@ -12,14 +15,28 @@ struct GitStatus: Sendable, Hashable {
             return first != " " && first != "?"
         }
 
+        /// Which of the two porcelain letters describes this row: the index side
+        /// when the change is staged, the working tree side otherwise. Reading
+        /// the pair as a whole missed the mixed codes — "RM", "AM", "MD" — and
+        /// left the raw letters on screen.
+        private var statusLetter: Character? {
+            guard let index = code.first else { return nil }
+            let worktree = code.dropFirst().first ?? " "
+            if index == "?" { return "?" }
+            if index == "U" || worktree == "U" { return "U" }
+            return isStaged ? index : worktree
+        }
+
         var label: String {
-            switch code.trimmingCharacters(in: .whitespaces) {
-            case "M", "MM": "Modified"
-            case "A", "AM": "Added"
+            switch statusLetter {
+            case "M": "Modified"
+            case "A": "Added"
             case "D": "Deleted"
             case "R": "Renamed"
-            case "??": "Untracked"
-            case "UU": "Conflict"
+            case "C": "Copied"
+            case "T": "Type Changed"
+            case "?": "Untracked"
+            case "U": "Conflict"
             default: code.trimmingCharacters(in: .whitespaces)
             }
         }
@@ -29,11 +46,27 @@ struct GitStatus: Sendable, Hashable {
             case "Modified": "pencil.circle.fill"
             case "Added": "plus.circle.fill"
             case "Deleted": "minus.circle.fill"
-            case "Renamed": "arrow.right.circle.fill"
+            case "Renamed", "Copied": "arrow.right.circle.fill"
+            case "Type Changed": "arrow.triangle.2.circlepath.circle.fill"
             case "Untracked": "questionmark.circle.fill"
             case "Conflict": "exclamationmark.triangle.fill"
             default: "circle.fill"
             }
+        }
+
+        /// How the change reads to a person: a rename names both ends, anything
+        /// else just names itself.
+        var displayPath: String {
+            if let originalPath, originalPath != path { return "\(originalPath) → \(path)" }
+            return path
+        }
+
+        /// Every path a git command has to be handed for this change. A rename
+        /// is two index entries — the old name gone, the new name added — so
+        /// naming only one of them stages or unstages half of it.
+        var gitPaths: [String] {
+            if let originalPath, originalPath != path { return [originalPath, path] }
+            return [path]
         }
     }
 
@@ -51,8 +84,14 @@ struct GitStatus: Sendable, Hashable {
     /// Runs `git status`; nil when the folder is not a repository.
     static func load(for directory: URL) async -> GitStatus? {
         async let ignoredTask = loadIgnored(in: directory)
+        // `-z` because the plain form is not a format paths survive: git
+        // C-quotes anything with a space or a non-ASCII character in it, and
+        // writes a rename as the single field "old -> new". Neither string is
+        // a pathspec git will take back, so `git add` and `git restore` failed
+        // on exactly those files. With `-z` each path is its own NUL-terminated
+        // field, verbatim, and a rename simply adds a second one.
         let result = await Shell.run(
-            ["git", "status", "--porcelain=v1", "--branch"],
+            ["git", "status", "--porcelain=v1", "--branch", "-z"],
             in: directory,
             timeout: 30
         )
@@ -66,10 +105,14 @@ struct GitStatus: Sendable, Hashable {
         var behind = 0
         var changes: [Change] = []
 
-        for line in result.stdout.split(separator: "\n", omittingEmptySubsequences: true) {
-            if line.hasPrefix("##") {
+        let fields = result.stdout.components(separatedBy: "\0")
+        var index = 0
+        while index < fields.count {
+            let field = fields[index]
+            index += 1
+            if field.hasPrefix("##") {
                 // "## main...origin/main [ahead 1, behind 2]"
-                var rest = line.dropFirst(2).trimmingCharacters(in: .whitespaces)
+                var rest = field.dropFirst(2).trimmingCharacters(in: .whitespaces)
                 if let bracket = rest.firstIndex(of: "[") {
                     let tracking = rest[rest.index(after: bracket)...].dropLast()
                     for part in tracking.split(separator: ",") {
@@ -83,8 +126,19 @@ struct GitStatus: Sendable, Hashable {
                     rest = String(rest[rest.startIndex..<bracket]).trimmingCharacters(in: .whitespaces)
                 }
                 branch = rest.components(separatedBy: "...").first ?? rest
-            } else if line.count > 3 {
-                changes.append(Change(code: String(line.prefix(2)), path: String(line.dropFirst(3))))
+            } else if field.count > 3 {
+                let code = String(field.prefix(2))
+                var originalPath: String?
+                // A rename or a copy spends the very next field on the name the
+                // file used to have. The letter can sit on either side of the
+                // code, so both are worth checking.
+                if code.contains("R") || code.contains("C"), index < fields.count {
+                    originalPath = fields[index]
+                    index += 1
+                }
+                changes.append(
+                    Change(code: code, path: String(field.dropFirst(3)), originalPath: originalPath)
+                )
             }
         }
 
@@ -116,18 +170,21 @@ struct GitStatus: Sendable, Hashable {
         )
     }
 
-    /// Unified diff for one path (working tree, including staged changes).
-    static func diff(path: String, in directory: URL, isUntracked: Bool) async -> String {
+    /// Unified diff for one change (working tree, including staged changes).
+    /// Takes every path the change covers, so a rename is shown as the one move
+    /// it is rather than as a new file with no history.
+    static func diff(paths: [String], in directory: URL, isUntracked: Bool) async -> String {
+        guard let first = paths.first else { return "" }
         if isUntracked {
             // Untracked files have no diff; synthesise one against /dev/null.
             let result = await Shell.run(
-                ["git", "diff", "--no-index", "--", "/dev/null", path],
+                ["git", "diff", "--no-index", "--", "/dev/null", first],
                 in: directory,
                 timeout: 30
             )
             return result.stdout
         }
-        let result = await Shell.run(["git", "diff", "HEAD", "--", path], in: directory, timeout: 30)
+        let result = await Shell.run(["git", "diff", "HEAD", "--"] + paths, in: directory, timeout: 30)
         return result.stdout
     }
 

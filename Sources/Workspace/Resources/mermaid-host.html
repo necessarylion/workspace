@@ -1,0 +1,76 @@
+<!doctype html>
+<!--
+  The page behind every ```mermaid fence. Loaded from the app bundle as a file
+  URL so `mermaid.min.js` — which sits next to it — is a normal same-directory
+  script: WebKit then caches it across the diagrams on a page instead of each
+  one parsing 3.4 MB of its own copy.
+
+  Swift never templates this file. It loads once and `renderDiagram` is called
+  with the fence's text, so re-rendering an edited diagram is one JS call
+  rather than a fresh page.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      /* No page scrolling: the view is sized to the diagram from measure(),
+         so anything that scrolled here would just be hidden. */
+      html, body { margin: 0; padding: 0; overflow: hidden; }
+      #diagram { display: flex; justify-content: center; }
+      /* Shrink a wide diagram to the pane instead of clipping it. */
+      #diagram svg { max-width: 100%; height: auto; }
+    </style>
+    <script src="mermaid.min.js"></script>
+  </head>
+  <body>
+    <div id="diagram"></div>
+    <script>
+      let sequence = 0;
+
+      function post(payload) {
+        window.webkit.messageHandlers.mermaid.postMessage(payload);
+      }
+
+      function measure() {
+        return Math.ceil(document.getElementById("diagram").getBoundingClientRect().height);
+      }
+
+      async function renderDiagram(code, background, fontFamily, fontSize) {
+        // The colours come from Swift so the diagram sits on the same shade as
+        // the pane around it and nothing has to be kept in step by hand.
+        document.body.style.background = background;
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: "dark",
+          darkMode: true,
+          securityLevel: "strict",
+          fontFamily: fontFamily,
+          themeVariables: { background: background, fontSize: fontSize }
+        });
+
+        const target = document.getElementById("diagram");
+        sequence += 1;
+        const id = "mermaid-" + sequence;
+        try {
+          const { svg } = await mermaid.render(id, code);
+          target.innerHTML = svg;
+          post({ status: "ok", height: measure() });
+        } catch (error) {
+          target.innerHTML = "";
+          post({ status: "error", message: String((error && error.message) || error) });
+        } finally {
+          // mermaid.render() measures in a scratch element it appends to the
+          // body; a failed render leaves it behind.
+          document.querySelectorAll("#d" + id).forEach((node) => node.remove());
+        }
+      }
+
+      // The pane can be resized after a diagram is drawn, and an SVG that
+      // scales to the width changes height as it goes.
+      new ResizeObserver(() => {
+        const height = measure();
+        if (height > 0) post({ status: "resize", height: height });
+      }).observe(document.getElementById("diagram"));
+    </script>
+  </body>
+</html>

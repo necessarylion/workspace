@@ -13,6 +13,9 @@ struct CodeEditorView: NSViewControllerRepresentable {
     /// The font and colours from Settings, passed in rather than read here: a
     /// representable is not a view body, so nothing it reads is observed.
     var theme: SyntaxTheme
+    /// False when the file was opened from the file tree, which keeps the
+    /// keyboard for its own shortcuts until the text is clicked.
+    var takesFocusOnAppear = true
     var onOpenLocation: ((URL, Int) -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -23,6 +26,9 @@ struct CodeEditorView: NSViewControllerRepresentable {
         let controller = CodeEditorController()
         let coordinator = context.coordinator
         coordinator.controller = controller
+        // Read once, here: the only thing it decides is `viewDidAppear`, which
+        // happens moments after this and never again for this controller.
+        controller.takesFocusOnAppear = takesFocusOnAppear
         // Before the view loads, so the file is laid out in the right font once.
         controller.applyAppearance(theme)
 

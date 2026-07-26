@@ -96,6 +96,9 @@ final class WorkspaceStore {
 
     /// Render Markdown files instead of editing them.
     var markdownPreview = false
+    /// Draw `.drawio` files instead of editing them. On by default, the other
+    /// way round from Markdown: nobody opens a diagram to read its XML.
+    var drawioPreview = true
     var wrapsLines = false
     /// Show the file index beside a diff that touches more than one file. A
     /// window-wide preference rather than a per-diff one: it is a way of
@@ -453,6 +456,14 @@ final class WorkspaceStore {
         return items[viewer.history[viewer.index]]
     }
 
+    /// The document the viewer is actually showing. The open item survives a
+    /// trip to the dashboard — that is what Forward goes back to — so anything
+    /// that acts on what is *on screen* (the preview toggle, Save as PDF) has
+    /// to ask for this rather than `current`, or it stays up over the board.
+    var visibleDocument: OpenDocument? {
+        showsDashboard ? nil : current?.document
+    }
+
     // The dashboard is the root of the history: Back from the oldest open item
     // lands there, the way a browser's home page would, and Forward returns.
     var canGoBack: Bool {
@@ -599,7 +610,15 @@ final class WorkspaceStore {
 
     // MARK: - Opening things
 
-    func openFile(_ url: URL, revealLine: Int? = nil) {
+    /// Whether the editor takes the keyboard as it appears. Set by `openFile`
+    /// and read by the viewer: opening from the file tree leaves the keys there,
+    /// so ⏎, ⌘⌫ and the arrows keep working on the tree until the editor itself
+    /// is clicked — the way VS Code's explorer behaves. Everything else (a
+    /// search result, go-to-definition, a diff) opens ready to type in.
+    private(set) var editorTakesFocus = true
+
+    func openFile(_ url: URL, revealLine: Int? = nil, takingFocus: Bool = true) {
+        editorTakesFocus = takingFocus
         let key = ViewerItem.Kind.file(url).key
         if let existing = items[key] {
             if let revealLine { existing.document?.revealLine = revealLine }
@@ -631,18 +650,25 @@ final class WorkspaceStore {
             subtitle: "Changes · \(project.name)"
         )
         present(item)
-        Task { await loadWorkingDiff(item, project: project, path: change.path, isUntracked: isUntracked) }
+        Task {
+            await loadWorkingDiff(
+                item,
+                project: project,
+                paths: change.gitPaths,
+                isUntracked: isUntracked
+            )
+        }
     }
 
     private func loadWorkingDiff(
         _ item: ViewerItem,
         project: Project,
-        path: String,
+        paths: [String],
         isUntracked: Bool
     ) async {
         item.isLoading = true
         item.errorMessage = nil
-        let text = await GitStatus.diff(path: path, in: project.url, isUntracked: isUntracked)
+        let text = await GitStatus.diff(paths: paths, in: project.url, isUntracked: isUntracked)
         item.diff = DiffHighlighter.highlight(DiffParser.parse(text))
         if item.diff?.isEmpty == true {
             item.errorMessage = "No textual changes to show for this file."
@@ -1362,6 +1388,21 @@ final class WorkspaceStore {
         }
     }
 
+    /// Writes the open Markdown file out as a PDF — the rendered document, not
+    /// the source, diagrams and all. Nothing happens for any other file.
+    func saveCurrentDocumentAsPDF() {
+        guard let document = visibleDocument, document.isMarkdown else { return }
+        let name = document.url.deletingPathExtension().lastPathComponent
+        MarkdownPDF.save(markdown: document.text, suggestedName: name) { [weak self] result in
+            switch result {
+            case .success(let url):
+                self?.showStatus("Saved \(url.lastPathComponent)")
+            case .failure(let error):
+                self?.showError("Could not save the PDF: \(error.localizedDescription)")
+            }
+        }
+    }
+
     // MARK: - External tools
 
     /// The Claude desktop app, only used to borrow its icon.
@@ -1385,6 +1426,249 @@ final class WorkspaceStore {
             } else {
                 showError("\(tool.title) is not installed (\(tool.executable) not on PATH).")
             }
+        }
+    }
+
+    // MARK: - File tree selection
+
+    /// The rows picked in the Files tab. Every action there — drag, duplicate,
+    /// trash — works on this whole set when the row it started from is in it,
+    /// and on that row alone when it is not, which is how a Finder window and
+    /// every file tree behave.
+    var selectedFiles: Set<URL> = []
+    /// The row a ⇧-click measures its range from: the last one clicked without
+    /// ⇧, not the nearest end of the selection.
+    private var fileSelectionAnchor: URL?
+    /// The row whose name is being edited in place, if any.
+    var renamingFile: URL?
+    /// What is being dragged out of the tree right now. A drag carries one row's
+    /// URL even when several are picked — one SwiftUI view can only offer one
+    /// item — so the rest of the selection is remembered here and picked back up
+    /// when the drop lands inside the tree.
+    private var draggingFiles: Set<URL>?
+
+    /// A click on a row, with whatever modifier was held. `visible` is the rows
+    /// in the order they are on screen, which is what a ⇧-range is measured in.
+    func selectFile(_ url: URL, modifiers: NSEvent.ModifierFlags, visible: [URL]) {
+        if modifiers.contains(.command) {
+            if selectedFiles.contains(url) {
+                selectedFiles.remove(url)
+            } else {
+                selectedFiles.insert(url)
+            }
+            fileSelectionAnchor = url
+        } else if modifiers.contains(.shift),
+                  let anchor = fileSelectionAnchor,
+                  let from = visible.firstIndex(of: anchor),
+                  let to = visible.firstIndex(of: url) {
+            // The anchor stays put, so dragging the shift-click up and down
+            // grows and shrinks one range instead of leaving a trail.
+            selectedFiles = Set(visible[min(from, to)...max(from, to)])
+        } else {
+            selectedFiles = [url]
+            fileSelectionAnchor = url
+        }
+    }
+
+    /// ↑ and ↓ in the tree. With ⇧ the range grows from the anchor, without it
+    /// the selection becomes the one row moved to.
+    func moveFileSelection(by delta: Int, extending: Bool, visible: [URL]) {
+        guard !visible.isEmpty else { return }
+        let current = fileSelectionAnchor.flatMap { visible.firstIndex(of: $0) }
+            ?? selectedFiles.compactMap { visible.firstIndex(of: $0) }.min()
+        let next = min(max((current ?? -1) + delta, 0), visible.count - 1)
+        let url = visible[next]
+        if extending, let anchor = fileSelectionAnchor, let from = visible.firstIndex(of: anchor) {
+            selectedFiles = Set(visible[min(from, next)...max(from, next)])
+        } else {
+            selectedFiles = [url]
+            fileSelectionAnchor = url
+        }
+    }
+
+    func selectFiles(_ urls: [URL]) {
+        selectedFiles = Set(urls)
+        fileSelectionAnchor = urls.last
+    }
+
+    func clearFileSelection() {
+        selectedFiles = []
+        fileSelectionAnchor = nil
+    }
+
+    /// What a menu item, a key or a drag started on `url` applies to.
+    func fileActionTargets(_ url: URL) -> [URL] {
+        guard selectedFiles.contains(url), selectedFiles.count > 1 else { return [url] }
+        // Sorted only so the toast and any error name them in a stable order.
+        return selectedFiles.sorted { $0.path < $1.path }
+    }
+
+    /// Called as a drag leaves a row, so a drop back inside the tree can move
+    /// everything that was picked rather than the one row under the pointer.
+    func beginFileDrag(_ urls: [URL]) {
+        draggingFiles = Set(urls)
+    }
+
+    // MARK: - File actions
+
+    /// Files dropped on a folder in the Files tab. A file already inside this
+    /// repository moves, anything else is copied in — see `FileOperations`.
+    ///
+    /// The work runs off the main actor, because a dropped folder can be large.
+    func importFiles(_ urls: [URL], into folder: URL, project: Project) {
+        var dropped = urls.filter(\.isFileURL).map(\.standardizedFileURL)
+        // One of our own rows, dragged while several were picked: the drag only
+        // carried that row, the selection is what the user meant.
+        if dropped.count == 1, let dragged = draggingFiles, dragged.contains(dropped[0]) {
+            dropped = dragged.sorted { $0.path < $1.path }
+        }
+        draggingFiles = nil
+        // `let` so the copy below can leave the main actor with it.
+        let sources = dropped
+        guard !sources.isEmpty else { return }
+        let root = project.url.standardizedFileURL.path + "/"
+
+        // Mixed drags are rare enough not to split into two passes: as soon as
+        // one file comes from outside, the whole drop is a copy, which is the
+        // safe half of the pair.
+        let kind: FileOperations.Transfer =
+            sources.allSatisfy { $0.path.hasPrefix(root) } ? .move : .copy
+
+        Task {
+            let result = await Task.detached {
+                FileOperations.transfer(kind, sources, into: folder)
+            }.value
+
+            // A move empties the folders the files came from as well.
+            for parent in Set(sources.map { $0.deletingLastPathComponent() }) {
+                project.refreshFileTree(at: parent)
+            }
+            project.refreshFileTree(at: folder)
+            if kind == .move {
+                // Dragging the open file into another folder keeps it open, at
+                // its new path — the same as renaming it. Only for a single
+                // file: with several moving at once there is no telling which
+                // destination belongs to which source.
+                let showAgain = sources.count == 1 && result.finished.count == 1
+                    ? openPath(under: sources[0], movedTo: result.finished[0])
+                    : nil
+                for source in sources { closeItems(under: source) }
+                if let showAgain { openFile(showAgain, takingFocus: false) }
+            }
+            await project.refreshGitStatus()
+            // Leave what landed picked, so the next action carries on with the
+            // files just dropped rather than with where they came from.
+            if !result.finished.isEmpty { selectFiles(result.finished) }
+
+            report(result, action: kind.pastTense, verb: kind.verb, place: "to \(folder.lastPathComponent)")
+        }
+    }
+
+    /// Renames one file or folder from the Files tab. What was open under the
+    /// old name is closed — the editor is holding a path that no longer exists.
+    func renameFile(_ url: URL, to name: String, project: Project) {
+        Task {
+            let outcome = await Task.detached { FileOperations.rename(url, to: name) }.value
+            switch outcome {
+            case .renamed(let renamed):
+                // The file itself has not changed, only its name — so what was
+                // on screen comes back under the new one instead of the viewer
+                // dropping to the dashboard. The keyboard stays in the tree,
+                // which is where the rename was typed.
+                let showAgain = openPath(under: url, movedTo: renamed)
+                closeItems(under: url)
+                // The whole loaded tree, not just the folder: renaming a folder
+                // moves everything under it too.
+                project.refreshFileTree()
+                await project.refreshGitStatus()
+                selectFiles([renamed])
+                if let showAgain { openFile(showAgain, takingFocus: false) }
+                showStatus("Renamed to \(renamed.lastPathComponent)")
+            case .unchanged:
+                break
+            case .failed(let message):
+                showError("Could not rename \(url.lastPathComponent) — \(message)")
+            }
+        }
+    }
+
+    /// Copies each file beside itself, as "name 2".
+    func duplicateFiles(_ urls: [URL], project: Project) {
+        guard !urls.isEmpty else { return }
+        Task {
+            let result = await Task.detached { FileOperations.duplicate(urls) }.value
+
+            for parent in Set(urls.map { $0.deletingLastPathComponent() }) {
+                project.refreshFileTree(at: parent)
+            }
+            await project.refreshGitStatus()
+            if !result.finished.isEmpty { selectFiles(result.finished) }
+            // Named after the copies, not the originals: "Created foo 2.swift"
+            // is the answer to "where did it go".
+            report(result, action: "Created", verb: "duplicate", place: "")
+        }
+    }
+
+    /// Moves files to the Trash from the Files tab, and closes whatever they had
+    /// open. Recoverable in Finder, which is why it does not ask first.
+    func deleteFiles(_ urls: [URL], project: Project) {
+        guard !urls.isEmpty else { return }
+        Task {
+            let result = await Task.detached { FileOperations.trash(urls) }.value
+
+            for url in result.finished { closeItems(under: url) }
+            for parent in Set(urls.map { $0.deletingLastPathComponent() }) {
+                project.refreshFileTree(at: parent)
+            }
+            await project.refreshGitStatus()
+            selectedFiles.subtract(result.finished)
+
+            report(result, action: "Moved", verb: "delete", place: "to the Trash")
+        }
+    }
+
+    /// Where the file on screen has just moved to, if it is `url` or sits under
+    /// it — the answer to "what should the viewer show once this rename is
+    /// done". Nothing when the viewer is showing something else entirely.
+    private func openPath(under url: URL, movedTo destination: URL) -> URL? {
+        guard case .file(let open)? = current?.kind, !showsDashboard else { return nil }
+        let from = url.standardizedFileURL.path
+        let path = open.standardizedFileURL.path
+        if path == from { return destination }
+        guard path.hasPrefix(from + "/") else { return nil }
+        return destination.appendingPathComponent(String(path.dropFirst(from.count + 1)))
+    }
+
+    /// Closes every open file at `url` or under it — used when it has just been
+    /// renamed, moved or deleted, so the viewer never shows a path that is gone.
+    private func closeItems(under url: URL) {
+        let path = url.standardizedFileURL.path
+        // Over a copy: `close` takes items out of the dictionary as we go.
+        for item in Array(items.values) {
+            guard case .file(let open) = item.kind else { continue }
+            let openPath = open.standardizedFileURL.path
+            guard openPath == path || openPath.hasPrefix(path + "/") else { continue }
+            close(item)
+        }
+    }
+
+    /// One toast for a batch: the first error if anything failed, otherwise what
+    /// went through. A run that only skipped says nothing — it means the files
+    /// were dropped where they already were, and nothing happened.
+    private func report(
+        _ result: FileOperations.Result,
+        action: String,
+        verb: String,
+        place: String
+    ) {
+        if let error = result.errors.first {
+            showError(result.errors.count == 1
+                ? "Could not \(verb) \(error)"
+                : "Could not \(verb) \(result.errors.count) items — \(error)")
+        } else if result.finished.count == 1, let only = result.finished.first {
+            showStatus("\(action) \(only.lastPathComponent) \(place)".trimmingCharacters(in: .whitespaces))
+        } else if result.finished.count > 1 {
+            showStatus("\(action) \(result.finished.count) items \(place)".trimmingCharacters(in: .whitespaces))
         }
     }
 

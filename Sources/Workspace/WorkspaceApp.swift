@@ -132,6 +132,20 @@ struct WorkspaceApp: App {
                     get: { store.markdownPreview },
                     set: { store.markdownPreview = $0 }
                 ))
+                // A draw.io file is drawn rather than edited by default, so
+                // this one starts on: it is the way back to the XML.
+                Toggle("Draw Diagrams", isOn: Binding(
+                    get: { store.drawioPreview },
+                    set: { store.drawioPreview = $0 }
+                ))
+
+                // The rendered document, not the file — so it only makes sense
+                // for Markdown, and only Markdown offers it.
+                Button("Save as PDF…") {
+                    store.saveCurrentDocumentAsPDF()
+                }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(store.visibleDocument?.isMarkdown != true)
             }
         }
 

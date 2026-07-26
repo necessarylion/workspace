@@ -113,8 +113,14 @@ final class CodeEditorController: NSViewController {
         view = scrollView
     }
 
+    /// Whether to take the keyboard as the editor appears. Off when the file was
+    /// opened from the file tree, which keeps the keys for its own ⏎ and ⌘⌫ —
+    /// clicking the text still focuses it, as any text view does.
+    var takesFocusOnAppear = true
+
     override func viewDidAppear() {
         super.viewDidAppear()
+        guard takesFocusOnAppear else { return }
         view.window?.makeFirstResponder(textView)
     }
 
@@ -130,7 +136,7 @@ final class CodeEditorController: NSViewController {
 
         fileURL = url
         self.projectRoot = projectRoot
-        language = CodeLanguage.detectLanguageFrom(url: url)
+        language = CodeLanguage.forFile(url: url)
 
         isApplyingExternalText = true
         textView.string = text

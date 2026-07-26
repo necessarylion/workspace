@@ -1,0 +1,184 @@
+<!doctype html>
+<!--
+  The page a `.drawio` file is drawn in, by draw.io's own viewer bundle
+  (`drawio-viewer.min.js`, Apache 2.0). Loaded from the app bundle as a file
+  URL, so the library beside it is a plain same-directory script.
+
+  Swift calls `showDiagram` with the file's XML. Shapes are drawn by the
+  library itself; only the extra stencil libraries (AWS, Azure and the like)
+  live on draw.io's servers, and those cannot be reached from a file URL — a
+  diagram built out of them draws its other shapes and leaves those blank.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <!-- The viewer's own chrome is styled with `light-dark()`, so the page has
+         to say which one it is or the toolbar comes out light on our dark pane. -->
+    <meta name="color-scheme" content="dark" />
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+      /* The diagram's own box fills the pane; the viewer's container inside it
+         is sized in `showDiagram`, which has to set it inline. */
+      #diagram { width: 100%; height: 100%; }
+    </style>
+    <script src="drawio-viewer.min.js"></script>
+  </head>
+  <body>
+    <div id="diagram"></div>
+    <script>
+      // The viewer that drew what is on screen, kept for the zoom below. On
+      // `window` rather than a plain `let`: a top-level binding is invisible to
+      // the JS Swift evaluates, and that is how everything here is driven.
+      window.diagramViewer = null;
+
+      function post(payload) {
+        window.webkit.messageHandlers.drawio.postMessage(payload);
+      }
+
+      // The margin left between the diagram and the pane's edges when fitted.
+      const fitMargin = 24;
+
+      // The view that puts the whole diagram in the pane, centred. The library
+      // never works this out again after the first draw — see `showDiagram` —
+      // so everything that fits goes through here.
+      function fittedViewState(graph) {
+        const view = graph.view;
+        const container = graph.container;
+        const bounds = graph.getGraphBounds();
+        // Nothing to fit, or nothing to fit it into — a pane with no size yet
+        // is left exactly as it is, so the resize that gives it one still sees
+        // a diagram sitting where it was fitted and fits it properly then.
+        if (!(bounds.width > 0) || !(bounds.height > 0) ||
+            container.clientWidth <= 0 || container.clientHeight <= 0) {
+          return { scale: view.scale, translate: new mxPoint(view.translate.x, view.translate.y) };
+        }
+
+        // `getGraphBounds` is in screen pixels: back the current view out of it
+        // to get the diagram's own size and where its corner sits.
+        const width = bounds.width / view.scale;
+        const height = bounds.height / view.scale;
+        const x = bounds.x / view.scale - view.translate.x;
+        const y = bounds.y / view.scale - view.translate.y;
+
+        // Never blown up past its own size — the same as the viewer's own
+        // `allow-zoom-in: false`, and a small diagram reads better centred in
+        // the pane than stretched across it.
+        const scale = Math.min(
+          Math.max(1, container.clientWidth - 2 * fitMargin) / width,
+          Math.max(1, container.clientHeight - 2 * fitMargin) / height,
+          1
+        );
+        // The translate is in the diagram's own coordinates, so a point p is
+        // drawn at (p + translate) * scale. Centring is solving that for the
+        // translate that leaves equal space on both sides.
+        return {
+          scale: scale,
+          translate: new mxPoint(
+            container.clientWidth / (2 * scale) - width / 2 - x,
+            container.clientHeight / (2 * scale) - height / 2 - y
+          )
+        };
+      }
+
+      // The view a fit last put on screen, so a resize can tell a diagram still
+      // sitting where it was fitted from one the reader has zoomed or dragged.
+      let fitted = null;
+
+      function fitDiagram(graph) {
+        fitted = fittedViewState(graph);
+        graph.view.scaleAndTranslate(fitted.scale, fitted.translate.x, fitted.translate.y);
+      }
+
+      function showDiagram(xml, background) {
+        document.body.style.background = background;
+        const container = document.getElementById("diagram");
+        container.innerHTML = "";
+
+        const element = document.createElement("div");
+        element.className = "mxgraph";
+        // The library reads the container's *inline* height and width, not the
+        // stylesheet's: left empty, it takes the diagram's own height for the
+        // pane's and every fit below is measured against the wrong box.
+        element.style.width = "100%";
+        element.style.height = "100%";
+        element.setAttribute("data-mxgraph", JSON.stringify({
+          xml: xml,
+          // Drawn dark, like every other surface in the app.
+          "dark-mode": "dark",
+          // Fit what was drawn into the pane rather than growing the page to
+          // the diagram, which is what `resize` would do. The fit itself is
+          // redone below; this is what has the library measure the pane at all.
+          "auto-fit": true,
+          resize: false,
+          // Pages of a multi-page file, zoom and layers, floating over the
+          // diagram's top-left corner and solid on hover.
+          //
+          // `toolbar-nohide` is deliberately *not* set: it pins the toolbar,
+          // but it does so by holding the diagram at `overflow: visible`, and
+          // then a zoomed-in diagram can neither be scrolled nor dragged.
+          toolbar: "pages zoom layers",
+          "toolbar-position": "inline",
+          // A click would otherwise open the diagram on draw.io's website.
+          lightbox: false,
+          highlight: "#4d90fe"
+        }));
+        container.appendChild(element);
+
+        try {
+          GraphViewer.createViewerForElement(element, function (created) {
+            window.diagramViewer = created;
+            const graph = created.graph;
+
+            // The toolbar's fit button does not fit anything: it restores
+            // `graph.initialViewState`, which the library fills in once, while
+            // the diagram is first drawn. A window resized since then, or a
+            // page of a multi-page file that is not the one it opened on,
+            // leaves it restoring a stale corner. Working the property out on
+            // every read is what makes the button fit the pane it is clicked
+            // in; the setter swallows the library's own writes to it.
+            Object.defineProperty(graph, "initialViewState", {
+              configurable: true,
+              get: function () {
+                fitted = fittedViewState(graph);
+                return fitted;
+              },
+              set: function () {}
+            });
+
+            fitDiagram(graph);
+            // Each page of a multi-page file is drawn where the library left
+            // it, which for a page larger than the first is off the pane.
+            created.addListener("graphChanged", function () { fitDiagram(graph); });
+            // A pane resized while the diagram is still as it was fitted
+            // re-fits; one the reader has zoomed or dragged is left alone.
+            new ResizeObserver(function () {
+              if (fitted == null || graph.view.scale !== fitted.scale) return;
+              if (graph.view.translate.x !== fitted.translate.x) return;
+              if (graph.view.translate.y !== fitted.translate.y) return;
+              fitDiagram(graph);
+            }).observe(graph.container);
+
+            post({ status: "ok" });
+          });
+        } catch (error) {
+          post({ status: "error", message: String((error && error.message) || error) });
+        }
+      }
+
+      // ⌘-scroll and trackpad pinch (which WebKit reports as a ctrl-wheel)
+      // zoom, the way every other Mac canvas behaves. A plain wheel is left
+      // alone: once the diagram is bigger than the pane it scrolls.
+      let zoomed = 0;
+      const zoomStep = 30;
+
+      document.addEventListener("wheel", function (event) {
+        const viewer = window.diagramViewer;
+        if (viewer == null || !(event.metaKey || event.ctrlKey)) return;
+        event.preventDefault();
+        zoomed += event.deltaY;
+        while (zoomed <= -zoomStep) { viewer.graph.zoomIn(); zoomed += zoomStep; }
+        while (zoomed >= zoomStep) { viewer.graph.zoomOut(); zoomed -= zoomStep; }
+      }, { passive: false });
+    </script>
+  </body>
+</html>

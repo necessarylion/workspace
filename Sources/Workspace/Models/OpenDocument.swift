@@ -8,6 +8,7 @@ final class OpenDocument: Identifiable {
     enum Content {
         case text(String)
         case image
+        case pdf
         case unsupported(reason: String)
     }
 
@@ -53,7 +54,7 @@ final class OpenDocument: Identifiable {
     }
 
     var language: CodeLanguage {
-        CodeLanguage.detectLanguageFrom(url: url)
+        CodeLanguage.forFile(url: url)
     }
 
     var languageName: String {
@@ -62,9 +63,25 @@ final class OpenDocument: Identifiable {
 
     nonisolated var isMarkdown: Bool { ["md", "markdown", "mdx"].contains(fileExtension) }
 
+    nonisolated var isPDF: Bool { fileExtension == "pdf" }
+
+    /// A draw.io diagram. `.drawio` and `.dio` say so themselves; for the other
+    /// shapes draw.io writes — plain `.xml`, and the `.svg` / `.html` it exports
+    /// with the model kept inside — the `<mxfile>` near the top of the text is
+    /// what tells them apart from an ordinary file of that kind.
+    var isDrawio: Bool {
+        if ["drawio", "dio"].contains(fileExtension) { return true }
+        guard ["xml", "svg", "html"].contains(fileExtension),
+              case .text(let value) = content
+        else { return false }
+        return value.prefix(4096).contains("mxfile")
+    }
+
     var isPreviewable: Bool {
-        if case .image = content { return true }
-        return isMarkdown
+        switch content {
+        case .image, .pdf: true
+        default: isMarkdown || isDrawio
+        }
     }
 
     var errorCount: Int { diagnostics.filter { $0.level == .error }.count }
@@ -76,6 +93,15 @@ final class OpenDocument: Identifiable {
         let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "tiff", "webp", "bmp", "icns"]
         if imageExtensions.contains(url.pathExtension.lowercased()) {
             self.content = .image
+            self.savedText = ""
+            return
+        }
+
+        // Ahead of the size check below: PDFKit reads a document page by page,
+        // so a big PDF costs no more to open than a small one — and a PDF worth
+        // reading is routinely past the limit that guards the text editor.
+        if url.pathExtension.lowercased() == "pdf" {
+            self.content = .pdf
             self.savedText = ""
             return
         }

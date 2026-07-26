@@ -64,6 +64,49 @@ final class FileNode: Identifiable {
             }
     }
 
+    /// Re-reads this folder after something changed inside it, reusing the nodes
+    /// that are still there. `reloadChildren` builds every node again, which
+    /// collapses each expanded folder under it — fine for the reload button,
+    /// wrong after a drop, where the tree should look exactly as it did plus the
+    /// new files.
+    func refreshChildren() {
+        guard isDirectory, let current = children else { return }
+        let existing = Dictionary(current.map { ($0.url, $0) }, uniquingKeysWith: { first, _ in first })
+        reloadChildren()
+        children = children?.map { fresh in
+            guard let old = existing[fresh.url], old.isDirectory == fresh.isDirectory else { return fresh }
+            return old
+        }
+    }
+
+    /// Re-reads every folder the tree has already read, top to bottom. Used
+    /// after something outside the tree changed the files — a git command, a
+    /// rename — where the folder that changed is not known, only that something
+    /// did. Costs one directory listing per expanded folder and keeps every one
+    /// of them open.
+    func refreshLoadedTree() {
+        guard isDirectory, children != nil else { return }
+        refreshChildren()
+        for child in children ?? [] where child.isDirectory && child.children != nil {
+            child.refreshLoadedTree()
+        }
+    }
+
+    /// The node for `url`, if the tree has read that far. Nothing is loaded from
+    /// disk on the way — an unexpanded folder simply has no node to find.
+    func loadedNode(at url: URL) -> FileNode? {
+        let target = url.standardizedFileURL
+        if self.url.standardizedFileURL == target { return self }
+        guard isDirectory,
+              target.path.hasPrefix(self.url.standardizedFileURL.path + "/"),
+              let children
+        else { return nil }
+        for child in children {
+            if let match = child.loadedNode(at: target) { return match }
+        }
+        return nil
+    }
+
     /// Every currently loaded descendant, used for the sidebar search filter.
     func flattenedLoadedDescendants() -> [FileNode] {
         guard let children else { return [] }

@@ -57,7 +57,14 @@ Nothing appears in the app until you add a repository folder yourself.
 | Diffs | `git diff` for working-tree changes (per file or **all changes at once**) and `gh/bkt pr diff` for PRs, rendered **side by side** (default) or unified, with **tree-sitter syntax colours**. A changed line is coloured in **two tiers** — a wash over the whole line, and a stronger block behind the **words that actually differ**, matched token by token, so an edited argument stands out from the rest of the line it sits in. |
 | Diff file list | A diff of more than one file gets an **index down its left side**: every file with its icon, folder and `+`/`−` counts. Picking one shows **that file alone** — only its rows are built — and **All Files** at the top of the list goes back to the whole diff. The sidebar button in the diff bar hides the index; the choice of file is remembered per pull request, so leaving the Diff tab and coming back returns to the file being reviewed. |
 | File tree | Every file, **dotfiles included** (`.env`, `.mcp.json`, `.github`) — only `.git`, `.build`, `.swiftpm`, `node_modules` and `DerivedData` are hidden. Anything `.gitignore` covers is **hidden by default** — build output and caches bury the rest — and the **eye button** in the pane's bottom bar brings those rows back, **faded** but there to open. Each row carries the **real logo** of what it is (TypeScript, React, Docker, Postgres, …) in that ecosystem's colour, and repositories show the **GitHub or Bitbucket mark**. |
+| Managing files | The tree is not read-only. **Drop files on a folder row** and they land in it — from Finder, from another app, or from elsewhere in the tree; **a dropped folder brings everything inside it**, the empty space below the rows drops into the repository root, and holding a drag over a closed folder **springs it open** so you can go further in. A file dragged **from inside the repo moves**, anything from outside is **copied**, and a name already taken is numbered around (`notes 2.md`) so a drop never overwrites. A row's context menu **renames**, **duplicates** and **moves to Trash** — deleting is recoverable in Finder, which is why it does not stop to ask — and a row can be **dragged out** to Finder or any app that takes files. Whatever the change was, the folder re-reads itself with every other folder left open as it was, and git status refreshes so the Changes tab keeps up. **A file that was open stays open**: renaming or moving it puts it back in the viewer at its new path, picked in the tree, and only deleting it closes it. The tree also re-reads itself after **any git command** — staging, unstaging, committing, discarding, checking out a branch — so a file the working tree gained or lost is never left on screen. |
+| Picking several files | **⌘-click** adds a row, **⇧-click** takes the range from the last one clicked, and clicking below the rows lets the lot go. Every action then works on the whole selection — the menu says how many (*Duplicate 3 Items*, *Move 3 Items to Trash*) — and **dragging any selected row drags them all** into the folder you drop on. A selected row is filled in the accent colour; the file **open in the viewer** keeps a paler tint of it, so "what I am about to act on" and "what I am looking at" never look the same. |
+| Files by keyboard | With the tree focused: **↑ ↓** walk the rows, **⇧↑ ⇧↓** stretch the selection, **⏎ renames in place** — the box opens over the name with the extension left out of the selection, ⏎ again commits it, ⎋ or clicking away leaves it alone — and **⌘⌫** moves what is picked to the Trash. A rename that collides is refused with the reason in a toast rather than quietly numbered, since you typed that name on purpose. |
 | Editor | Our own: `NSTextView` + **tree-sitter** highlighting + **LSP**. Gutter with line numbers and diagnostic markers, caret-line highlight, auto-indent, bracket matching, soft wrap toggle. |
+| Markdown preview | A `.md` file opens as **rendered Markdown** rather than source: headings, lists, task lists, quotes, tables and inline code chips. A fenced code block is **coloured by the editor's own tree-sitter highlighter** in the theme you picked in Settings — the fence's language word (` ```swift `, ` ```ts `, ` ```sh `) stands in for the file name the editor would have detected it from, and a fence naming nothing we have a grammar for stays plain. A ` ```mermaid ` fence is **drawn as a diagram** — flowcharts, sequence and the rest — by mermaid itself, which ships **inside the app**, so a diagram draws the same offline and on every Mac. It takes the pane's own colours, scales to the width, and a fence mermaid cannot parse falls back to its text with the complaint above it. |
+| Markdown as PDF | While the preview is up, the **⤓ in the header row** (or *Editor ▸ Save as PDF…*, ⇧⌘E) writes the document out as a **PDF**: the rendered page, not the source, with the **mermaid diagrams drawn into it**. It is a light document — made to be printed and mailed rather than read in a dark viewer — laid out on your own paper size, and links stay clickable. Pages are cut where nothing is crossing: between blocks, and between the lines of a paragraph or code block too long to fit a sheet, so a line of text is never sliced in half. Nothing is fetched to do it and no other tool has to be installed. |
+| draw.io preview | A `.drawio` file opens **as the diagram**, not as its XML — drawn by draw.io's own viewer, which ships **inside the app**, so it works offline and needs nothing installed. The diagram is fitted to the pane and drawn dark like everything else; **⌘-scroll or pinch** zooms, a **drag** pans once it is bigger than the pane, and a toolbar fades in over it with the **pages of a multi-page file**, zoom and layers. The **eye** in the header row (or *Editor ▸ Draw Diagrams*) switches to the XML behind it, which is the ordinary editor. `.dio` files count, as do the `.xml`, `.svg` and `.html` files draw.io exports with the model kept inside — those are recognised by the `<mxfile>` in them, not by their name. Diagrams built from the extra stencil libraries (AWS, Azure and the like) draw everything but those shapes: they live on draw.io's servers and nothing here goes to the network. |
+| PDF preview | A `.pdf` file opens **as the document**, drawn by PDFKit: continuous scrolling, pinch to zoom and text selection you can copy out of, without leaving the window. A floating bar at the bottom edge steps through the pages, shows **which page of how many** is on screen, and zooms in, out, or back to fitting the window. The 4 MB limit that guards the text editor does not apply, because a PDF is read page by page rather than loaded whole. |
 | Language servers | Started lazily per language and project root: diagnostics (squiggles + gutter dots + hover), completions (⌃Space), hover help, and ⌘-click go-to-definition. See the table below. |
 | Info tab | Folder path, remote, GitHub account, branch, head commit, **listening ports** for processes started inside the folder (right-click one to open it, copy its URL, or **stop the process** holding it), running language servers, and one-click **Open in** VS Code / Cursor / Sublime / Zed / Finder / Terminal. |
 | Terminal | Embedded **libghostty** (the [Ghostty](https://github.com/ghostty-org/ghostty) engine) rooted at the repo, **any number of shells** per repo, switched from the Terminals tab rather than a tab bar in the viewer. Your own Ghostty theme/font config applies. Used for Claude Code runs. **Drop a file on it** and its path is typed at the prompt — several files land side by side, spaces and brackets escaped — which is how a screenshot or a log reaches `claude`. An image dragged straight out of a browser or Preview carries no file, so it is saved as a PNG in the temporary folder and *that* path is typed. |
@@ -137,6 +144,7 @@ A bare clone builds with nothing installed beyond Xcode — that is what CI
 | ⌘, | Settings — code font, required tools and language servers, install and sign-in |
 | ⇧⌘O | Add repository |
 | ⌘S | Save file |
+| ⇧⌘E | Save the Markdown preview as a PDF |
 | ⇧⌘W | Close what is open (a terminal only goes back to the dashboard) |
 | ⎋ | The same, the editor and the terminal included — except with a completion list up, or while writing in a comment box, which keep ⎋ |
 | ⌘[ / ⌘] | Back / forward through history |
@@ -149,8 +157,12 @@ A bare clone builds with nothing installed beyond Xcode — that is what CI
 | ⇧⌘T | New terminal in your home folder (no repo needed) |
 | ⌃⌘P | Create PR with Claude Code |
 | ⌃Space | Completions |
-| ⌘-click | Go to definition |
+| ⌘-click | Go to definition · in the file tree, add a row to the selection |
 | ⌘↩ | Post the PR comment you typed · commit the staged files |
+| ↑ ↓ / ⇧↑ ⇧↓ | File tree: walk the rows · stretch the selection |
+| ⏎ | File tree: rename the picked row in place (⏎ again to keep it, ⎋ to drop it) |
+| ⌘⌫ | File tree: move what is picked to the Trash |
+| ⇧-click | File tree: take everything from the last row clicked to this one |
 
 ## Layout of the source
 
@@ -163,6 +175,9 @@ Sources/Workspace/
   Support/AuthorAvatar.swift  author pictures: where to find one, cache, disc view
   Support/WindowKeyMonitor.swift  keys the terminal would otherwise eat (⌃⇥, ⎋)
   Support/EscapeKey.swift     ⎋ = close, and who keeps ⎋ for themselves
+  Support/FileOperations.swift  what the Files tab does to disk: copy, move, rename, trash
+  Support/MarkdownPDF.swift   the preview as a PDF: measure, render, cut into sheets
+  Support/MarkdownHTML.swift  the same document as a printable page, diagrams and all
   Models/
     RemoteInfo.swift          origin URL → GitHub/Bitbucket + owner/slug
     Project.swift             one repository: remote, status, PRs, ports, tree
@@ -174,6 +189,7 @@ Sources/Workspace/
     GitStatus.swift           porcelain status + per-file diff
     RepositoryCommit.swift    the branch's own git log, grouped by day
     DiffModel.swift           unified diff → side-by-side rows
+    MarkdownCodeHighlighter.swift  tree-sitter colours for a ``` fence
     InlineDiff.swift          which words in a changed line actually changed
     ProjectPorts.swift        lsof → ports owned by this folder
     FileNode.swift            lazy file tree
@@ -189,6 +205,7 @@ Sources/Workspace/
     CodeTextView.swift          NSTextView with code-editing habits
     LineNumberRuler.swift       gutter: numbers + diagnostic markers
     TreeSitterHighlighter.swift incremental parsing and capture ranges
+    LanguageDetection.swift     file name → grammar, incl. the `.env` family
     SyntaxTheme.swift           fonts + the palette in use
     HoverInfoWindow.swift       floating hover / diagnostic panel
     CodeEditorView.swift        SwiftUI bridge
@@ -204,7 +221,17 @@ Sources/Workspace/
     GitHubDark.swift          github.com's own dark
     AtomOneDark.swift         the One Dark everyone ported
     DarkPlus.swift            VS Code's default dark, and ours
+  Resources/                  checked in, so nothing is fetched at runtime
+    mermaid.min.js            mermaid, and the page it draws a fence in
+    mermaid-host.html
+    drawio-viewer.min.js      draw.io's viewer, and the page it draws a file in
+    drawio-host.html
   Views/                      projects sidebar, navigator, viewer, diff, PR, info
+    MarkdownPreview.swift     the Markdown renderer: blocks, tables, code chips
+    DiagramWebView.swift      the web view both diagram renderers are driven in
+    MermaidDiagramView.swift  a ```mermaid fence, drawn in the Markdown column
+    DrawioPreview.swift       a .drawio file, drawn in the whole pane
+    PDFPreviewView.swift      a .pdf file, drawn by PDFKit, with a page bar
     ProjectSwitcherOverlay.swift  ⌃⇥ — the repositories in a row, on glass
     SettingsView.swift        ⌘, — Appearance, Requirements and Language Servers
     ToolConsoleSheet.swift    runs one install or sign-in in a real terminal
