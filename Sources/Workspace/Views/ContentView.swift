@@ -47,7 +47,13 @@ struct ContentView: View {
                 ProjectSwitcherOverlay()
             }
         }
+        .overlay {
+            if store.isFindingFiles {
+                FileFinderOverlay()
+            }
+        }
         .animation(.easeOut(duration: 0.12), value: store.isSwitchingProjects)
+        .animation(.easeOut(duration: 0.1), value: store.isFindingFiles)
         .onWindowKeyEvent(matching: [.keyDown, .flagsChanged]) { event, window in
             handleSwitcherKey(event, in: window)
         }

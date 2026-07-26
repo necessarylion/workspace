@@ -66,11 +66,13 @@ struct ClaudeChatView: View {
         else { return nil }
 
         // `#L42`, and also the `#L42-L51` a range gets written as — the first
-        // number in the fragment is the line to scroll to either way.
+        // number in the fragment is the line to scroll to either way. It is
+        // written the way the gutter shows it, counted from 1, and `revealLine`
+        // counts from 0.
         let line = url.fragment.flatMap {
             Int($0.drop { !$0.isNumber }.prefix { $0.isNumber })
         }
-        return (file, line)
+        return (file, line.map { max($0 - 1, 0) })
     }
 
     private var transcript: some View {
@@ -81,9 +83,16 @@ struct ClaudeChatView: View {
                         ClaudeChatWelcome(session: session, project: project)
                     }
                     ForEach(session.messages) { message in
-                        ClaudeMessageView(message: message) { path in
-                            store.openFile(URL(fileURLWithPath: path))
-                        }
+                        ClaudeMessageView(
+                            message: message,
+                            // Only the reply at the bottom, and only once it has
+                            // finished being written: the options belong to the
+                            // question actually waiting to be answered.
+                            offersQuickReplies: message.id == session.messages.last?.id
+                                && !session.isResponding,
+                            openFile: { path in store.openFile(URL(fileURLWithPath: path)) },
+                            answer: answer
+                        )
                     }
                     if session.isStarting {
                         statusLine("Starting Claude Code…")
@@ -113,6 +122,19 @@ struct ClaudeChatView: View {
 
     private func scrollDown(_ proxy: ScrollViewProxy) {
         proxy.scrollTo(bottomAnchor, anchor: .bottom)
+    }
+
+    /// A clicked option. It goes straight off when there is nothing half
+    /// written — that is the whole point of a one-click answer — but a box that
+    /// has something in it is never overwritten: the choice joins what is there
+    /// and waits for ⏎, so a click can't lose a sentence you were typing.
+    private func answer(_ reply: ClaudeQuickReply) {
+        if session.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            session.draft = reply.text
+            Task { await session.send() }
+        } else {
+            session.draft += (session.draft.hasSuffix(" ") ? "" : " ") + reply.text
+        }
     }
 
     /// How much has been written into the last message so far. Only the tail is
@@ -291,8 +313,18 @@ struct ClaudeMark: View {
 
 private struct ClaudeMessageView: View {
     @Bindable var message: ClaudeMessage
+    /// Whether this is the reply whose options are worth drawing as buttons.
+    var offersQuickReplies = false
     /// Opens a file a tool touched, in the editor next door.
     let openFile: (String) -> Void
+    let answer: (ClaudeQuickReply) -> Void
+
+    /// The choices this reply ends with, when it ends with a question that has
+    /// any — see ``ClaudeQuickReplies``, which is deliberately hard to trigger.
+    private var quickReplies: [ClaudeQuickReply] {
+        guard offersQuickReplies, !message.isStreaming else { return [] }
+        return ClaudeQuickReplies.read(from: message.plainText)
+    }
 
     var body: some View {
         switch message.role {
@@ -352,6 +384,10 @@ private struct ClaudeMessageView: View {
                     ClaudeToolRow(call: call, openFile: openFile)
                 }
             }
+            if !quickReplies.isEmpty {
+                ClaudeQuickReplyRow(replies: quickReplies, answer: answer)
+                    .padding(.top, 2)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -365,6 +401,62 @@ private struct ClaudeMessageView: View {
             Spacer(minLength: 0)
         }
         .foregroundStyle(.tertiary)
+    }
+}
+
+/// The options a question ended with, as buttons.
+///
+/// Full-width rows rather than a line of pills: an option is a phrase, not a
+/// word, and the row keeps its number so the list still reads against the one
+/// written above it — clicking row 2 and typing "2" are the same answer.
+private struct ClaudeQuickReplyRow: View {
+    let replies: [ClaudeQuickReply]
+    let answer: (ClaudeQuickReply) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(replies) { reply in
+                ClaudeQuickReplyButton(reply: reply) { answer(reply) }
+            }
+        }
+    }
+}
+
+private struct ClaudeQuickReplyButton: View {
+    let reply: ClaudeQuickReply
+    let answer: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: answer) {
+            HStack(spacing: 8) {
+                Text("\(reply.number)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14)
+                Text(reply.text)
+                    .font(.callout)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .background(
+                .quaternary.opacity(isHovering ? 0.4 : 0.22),
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(.tint.opacity(isHovering ? 0.5 : 0), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .pointerCursor()
+        .help("Answer with “\(reply.text)”")
     }
 }
 

@@ -101,13 +101,27 @@ struct FileListView: View {
     /// Raised whenever the tree should take the keyboard — see
     /// `FileTreeKeyCatcher`, which does the taking.
     @State private var keyboardClaims = 0
+    /// What the running query found, grouped by file.
+    @State private var searchResults: [FileSearchFileResult] = []
+    /// True from the keystroke until its results land, so the box can say so
+    /// rather than leaving the last query's hits on screen looking current.
+    @State private var isSearching = false
+
+    /// The query, trimmed — an empty one means the tree, not a search.
+    private var query: String {
+        store.fileSearchText.trimmingCharacters(in: .whitespaces)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             searchField
-            Divider()
             fileList
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        // One task per (repository, query): typing another letter cancels the
+        // one in flight, so only the last query's results ever land.
+        .task(id: SearchRequest(project: project.id, query: query, ignored: store.showsIgnoredFiles)) {
+            await runSearch()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(
@@ -146,11 +160,47 @@ struct FileListView: View {
     }
 
     /// The rows on screen, in order — what ⇧-click and the arrow keys count in.
+    /// A search lists one row per file, whatever the number of hits inside it.
     private var rowURLs: [URL] {
-        let query = store.fileSearchText.trimmingCharacters(in: .whitespaces)
-        return query.isEmpty
-            ? visibleRows.map(\.node.url)
-            : store.fileSearchResults(in: project).map(\.url)
+        query.isEmpty ? visibleRows.map(\.node.url) : searchResults.map(\.url)
+    }
+
+    /// Runs the query a short pause after the last keystroke. The wait is what
+    /// keeps a typed word from starting a search per letter — the results of the
+    /// first five would be thrown away the moment the sixth arrived.
+    private func runSearch() async {
+        guard !query.isEmpty else {
+            searchResults = []
+            isSearching = false
+            return
+        }
+        isSearching = true
+        do {
+            try await Task.sleep(for: .milliseconds(120))
+        } catch {
+            return  // Another keystroke cancelled this one.
+        }
+        let found = await FileSearcher.search(
+            query,
+            in: project.url,
+            includingIgnored: store.showsIgnoredFiles
+        )
+        guard !Task.isCancelled else { return }
+        searchResults = found
+        isSearching = false
+    }
+
+    /// Opens the file at the line that matched, the way clicking a search result
+    /// does everywhere. The keyboard stays with the list, as it does for a click
+    /// in the tree.
+    ///
+    /// `line` is the number the search tools print and the gutter shows, counted
+    /// from 1; `revealLine` counts from 0, the way LSP does.
+    private func openMatch(_ file: FileSearchFileResult, line: Int?) {
+        keyboardClaims += 1
+        store.renamingFile = nil
+        store.selectFile(file.url, modifiers: [], visible: rowURLs)
+        store.openFile(file.url, revealLine: line.map { max($0 - 1, 0) }, takingFocus: false)
     }
 
     /// ⏎ renames, ⌘⌫ trashes, ↑↓ walk the rows and ⇧↑↓ extend the selection —
@@ -181,7 +231,7 @@ struct FileListView: View {
                 .foregroundStyle(.secondary)
                 .font(.caption)
             TextField(
-                "Filter files",
+                "Search",
                 text: Binding(
                     get: { store.fileSearchText },
                     set: { store.fileSearchText = $0 }
@@ -196,14 +246,15 @@ struct FileListView: View {
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
-                .help("Clear the filter")
+                .help("Clear the search")
                 .pointerCursor()
             }
         }
         .padding(.horizontal, 10)
         // Shorter than the tab bar above it — it is a second row, not a header,
-        // and this is the height the repositories filter box uses.
-        .frame(height: 34)
+        // and this is the height the repositories filter box uses. With no rule
+        // under it, the row is kept tight so it does not read as a gap.
+        .frame(height: 28)
     }
 
     /// One row per visible (expanded) node, depth first. With the ignored files
@@ -223,6 +274,16 @@ struct FileListView: View {
         return result
     }
 
+    /// The line under the list: what the tree holds, or what the query found.
+    private var summary: String {
+        guard !query.isEmpty else { return "\(children(of: project.root).count) items" }
+        if searchResults.isEmpty { return isSearching ? "Searching…" : "No results" }
+        let matches = searchResults.reduce(0) { $0 + $1.matches.count }
+        let files = searchResults.count
+        return "\(matches) result\(matches == 1 ? "" : "s") in "
+            + "\(files) file\(files == 1 ? "" : "s")"
+    }
+
     private func children(of node: FileNode) -> [FileNode] {
         let children = node.children ?? []
         guard !store.showsIgnoredFiles else { return children }
@@ -234,7 +295,6 @@ struct FileListView: View {
     private var fileList: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                let query = store.fileSearchText.trimmingCharacters(in: .whitespaces)
                 if query.isEmpty {
                     ForEach(visibleRows) { entry in
                         CompactFileRow(
@@ -245,27 +305,28 @@ struct FileListView: View {
                             activate: { activate(entry.node, modifiers: $0) }
                         )
                     }
+                } else if searchResults.isEmpty {
+                    Text(isSearching ? "Searching…" : "No results")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 12)
                 } else {
-                    let results = store.fileSearchResults(in: project)
-                    if results.isEmpty {
-                        Text("No loaded files match")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 12)
-                    } else {
-                        ForEach(results) { node in
-                            CompactFileRow(
-                                project: project,
-                                node: node,
-                                depth: 0,
-                                isIgnored: project.isIgnored(node.url),
-                                activate: { activate(node, modifiers: $0) }
+                    ForEach(searchResults) { file in
+                        SearchResultFileRow(
+                            file: file,
+                            open: { openMatch(file, line: file.matches.first?.line) }
+                        )
+                        ForEach(file.matches) { match in
+                            SearchMatchRow(
+                                text: match.text,
+                                query: query,
+                                open: { openMatch(file, line: match.line) }
                             )
                         }
                     }
                 }
             }
-            .padding(.vertical, 3)
+            .padding(.bottom, 3)
             .padding(.horizontal, 6)
         }
         // The empty space below the rows is still the repository folder, so a
@@ -291,9 +352,10 @@ struct FileListView: View {
         }
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 12) {
-                Text("\(children(of: project.root).count) items")
+                Text(summary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 Spacer()
                 Button {
                     store.showsIgnoredFiles.toggle()
@@ -321,6 +383,106 @@ struct FileListView: View {
             .padding(.vertical, 6)
             .background(.bar)
         }
+    }
+}
+
+/// What one search run is for. Changing any part of it starts another run and
+/// cancels the one before.
+private struct SearchRequest: Equatable {
+    let project: URL
+    let query: String
+    let ignored: Bool
+}
+
+/// The header of one file's hits: icon, name, the folder it sits in, and how
+/// many lines inside it matched.
+struct SearchResultFileRow: View {
+    let file: FileSearchFileResult
+    let open: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let brand = FileIcon.brand(for: file.url) {
+                BrandMark(name: brand.name, size: 11, color: brand.color)
+                    .frame(width: 15)
+            } else {
+                Image(systemName: FileIcon.symbol(for: file.url, isDirectory: false))
+                    .foregroundStyle(FileIcon.tint(for: file.url, isDirectory: false))
+                    .font(.system(size: 10))
+                    .frame(width: 15)
+            }
+            Text(file.url.lastPathComponent)
+                .font(.system(size: 11.5, weight: .medium))
+                .lineLimit(1)
+            if !file.folder.isEmpty {
+                Text(file.folder)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+            }
+            Spacer(minLength: 4)
+            Text("\(file.matches.count)")
+                .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+                .background(Capsule().fill(.quaternary))
+        }
+        .padding(.horizontal, 4)
+        .frame(height: 19)
+        .background(
+            isHovering ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear),
+            in: RoundedRectangle(cornerRadius: 4)
+        )
+        .contentShape(Rectangle())
+        .pointerCursor()
+        .onHover { isHovering = $0 }
+        .onTapGesture(perform: open)
+    }
+}
+
+/// One matching line. The part that matched is picked out of the rest, which is
+/// the whole reason to show the line instead of just its number.
+struct SearchMatchRow: View {
+    let text: String
+    let query: String
+    let open: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Text(highlighted)
+            .font(.system(size: 11))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 21)
+            .padding(.trailing, 4)
+            .frame(height: 18)
+            .background(
+                isHovering ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear),
+                in: RoundedRectangle(cornerRadius: 4)
+            )
+            .contentShape(Rectangle())
+            .pointerCursor()
+            .onHover { isHovering = $0 }
+            .onTapGesture(perform: open)
+    }
+
+    /// The line dimmed, with every occurrence of the query left bright and
+    /// tinted. Case-insensitive, because the search itself is.
+    private var highlighted: AttributedString {
+        var result = AttributedString(text)
+        result.foregroundColor = .secondary
+        guard !query.isEmpty else { return result }
+        var searched = result.startIndex..<result.endIndex
+        while let found = result[searched].range(of: query, options: .caseInsensitive) {
+            result[found].foregroundColor = .primary
+            result[found].backgroundColor = .accentColor.opacity(0.28)
+            guard found.upperBound < result.endIndex else { break }
+            searched = found.upperBound..<result.endIndex
+        }
+        return result
     }
 }
 

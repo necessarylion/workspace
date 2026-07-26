@@ -56,6 +56,16 @@ struct WorkspaceApp: App {
             }
 
             CommandMenu("Go") {
+                // A menu item rather than a shortcut on the palette itself: a
+                // key equivalent is dispatched before the responder chain, so
+                // ⌘P works even while the terminal — which answers every key
+                // itself and passes none on — has the keyboard.
+                Button("Go to File…") { store.toggleFileFinder() }
+                    .keyboardShortcut("p", modifiers: .command)
+                    .disabled(store.selectedProject == nil)
+
+                Divider()
+
                 Button("Back") { store.goBack() }
                     .keyboardShortcut("[", modifiers: .command)
                     .disabled(!store.canGoBack)

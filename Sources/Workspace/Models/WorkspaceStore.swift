@@ -1780,14 +1780,168 @@ final class WorkspaceStore {
         }
     }
 
-    // MARK: - Sidebar search
+    // MARK: - Go to file (⌘P)
 
-    func fileSearchResults(in project: Project) -> [FileNode] {
-        let query = fileSearchText.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return [] }
-        return project.root.flattenedLoadedDescendants()
-            .filter { !$0.isDirectory && $0.name.localizedCaseInsensitiveContains(query) }
-            .filter { showsIgnoredFiles || !project.isIgnored($0.url) }
+    // The palette searches the *whole* selected repository, which is what makes
+    // it worth having next to the navigator's filter: the tree reads a folder no
+    // sooner than it is expanded, so a filter over it only ever sees the part of
+    // the repository you already walked into.
+
+    /// Whether the palette is up.
+    private(set) var isFindingFiles = false
+
+    /// What has been typed into it. Every change re-ranks and lands the
+    /// selection back on the first row — the old row means nothing in a new list.
+    var fileFinderQuery = "" {
+        didSet {
+            guard fileFinderQuery != oldValue else { return }
+            fileFinderSelection = 0
+            searchFiles()
+        }
+    }
+
+    private(set) var fileFinderMatches: [FileFinder.Match] = []
+    /// Which row ⏎ opens.
+    private(set) var fileFinderSelection = 0
+    /// Set only while a repository's list is being read for the very first time,
+    /// so a huge repository can say so rather than look broken.
+    private(set) var isListingFiles = false
+
+    /// One path list per repository, read when the palette opens on it and read
+    /// again on every open after that: a file added since is the one you are
+    /// most likely reaching for, and the list already there stays usable while
+    /// the new one is being read.
+    @ObservationIgnored private var fileFinderPaths: [URL: [String]] = [:]
+    @ObservationIgnored private var fileListTask: Task<Void, Never>?
+    @ObservationIgnored private var fileSearchTask: Task<Void, Never>?
+
+    /// ⌘P both opens and closes it, the way a shortcut for a panel should.
+    func toggleFileFinder() {
+        if isFindingFiles {
+            closeFileFinder()
+        } else {
+            openFileFinder()
+        }
+    }
+
+    func openFileFinder() {
+        guard let project = selectedProject else { return }
+        isFindingFiles = true
+        fileFinderQuery = ""
+        fileFinderSelection = 0
+        fileFinderMatches = recentFiles(in: project)
+        listFiles(in: project)
+    }
+
+    func closeFileFinder() {
+        // Closed first, so emptying the query below does not start a search on
+        // the way out.
+        isFindingFiles = false
+        fileListTask?.cancel()
+        fileSearchTask?.cancel()
+        fileFinderQuery = ""
+        fileFinderMatches = []
+        fileFinderSelection = 0
+    }
+
+    /// Wraps at both ends: with ten rows on screen, ↑ from the first is a
+    /// shorter way to the last than ↓ nine times.
+    func moveFileFinderSelection(by delta: Int) {
+        let count = fileFinderMatches.count
+        guard count > 0 else { return }
+        fileFinderSelection = (fileFinderSelection + delta % count + count) % count
+    }
+
+    func openSelectedFile() {
+        guard fileFinderMatches.indices.contains(fileFinderSelection) else { return }
+        open(fileFinderMatches[fileFinderSelection])
+    }
+
+    /// Opens a row. Unlike the file tree this hands the keyboard to the editor:
+    /// the palette is a way of *getting* to a file, so you arrive ready to type
+    /// in it rather than back where you started.
+    func open(_ match: FileFinder.Match) {
+        guard let project = selectedProject else { return }
+        let url = project.url.appendingPathComponent(match.path)
+        closeFileFinder()
+        openFile(url)
+    }
+
+    /// How many files the palette is searching, for its footer.
+    var fileFinderCount: Int {
+        guard let project = selectedProject else { return 0 }
+        return fileFinderPaths[project.url]?.count ?? 0
+    }
+
+    private func listFiles(in project: Project) {
+        fileListTask?.cancel()
+        let root = project.url
+        isListingFiles = fileFinderPaths[root] == nil
+        fileListTask = Task { [weak self] in
+            let paths = await ClaudeCompletions.files(in: root)
+            guard !Task.isCancelled else { return }
+            self?.apply(paths, for: root)
+        }
+    }
+
+    private func apply(_ paths: [String], for root: URL) {
+        fileFinderPaths[root] = paths
+        isListingFiles = false
+        // Anything typed while the list was still being read has had nothing to
+        // search until now.
+        guard isFindingFiles, selectedProject?.url == root else { return }
+        searchFiles()
+    }
+
+    private func searchFiles() {
+        fileSearchTask?.cancel()
+        guard isFindingFiles, let project = selectedProject else { return }
+        let query = fileFinderQuery.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else {
+            fileFinderMatches = recentFiles(in: project)
+            return
+        }
+        // Nothing to rank yet: what is on screen stays rather than blinking
+        // empty, and `apply` runs this again the moment the list lands.
+        guard let paths = fileFinderPaths[project.url] else { return }
+
+        fileSearchTask = Task { [weak self] in
+            let matches = await FileFinder.search(query, in: paths)
+            guard !Task.isCancelled else { return }
+            self?.show(matches, for: query)
+        }
+    }
+
+    /// Only if the query is still the one that was searched for: a slow ranking
+    /// must never overwrite the results of a later, faster one.
+    private func show(_ matches: [FileFinder.Match], for query: String) {
+        guard isFindingFiles,
+              fileFinderQuery.trimmingCharacters(in: .whitespaces) == query
+        else { return }
+        fileFinderMatches = matches
+        fileFinderSelection = min(fileFinderSelection, max(matches.count - 1, 0))
+    }
+
+    /// What the palette lists before anything is typed: the files of this
+    /// repository that have been open, newest first. The one on screen is left
+    /// out — it is the row you would never pick — which makes ⌘P⏎ the way back
+    /// to the file you were just in.
+    private func recentFiles(in project: Project, limit: Int = 20) -> [FileFinder.Match] {
+        let root = project.url.standardizedFileURL.path + "/"
+        let onScreen = showsDashboard ? nil : current?.id
+        var seen = Set<String>()
+        var recent: [FileFinder.Match] = []
+
+        for key in viewer.history.reversed() where key != onScreen {
+            guard let item = items[key], case .file(let url) = item.kind else { continue }
+            let path = url.standardizedFileURL.path
+            guard path.hasPrefix(root) else { continue }
+            let relative = String(path.dropFirst(root.count))
+            guard seen.insert(relative).inserted else { continue }
+            recent.append(FileFinder.Match(path: relative, highlighted: []))
+            if recent.count >= limit { break }
+        }
+        return recent
     }
 }
 

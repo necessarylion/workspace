@@ -26,9 +26,17 @@ struct ClaudeSessionListView: View {
             footer
         }
         .task(id: project.id) { await load() }
-        // A conversation gets its file the moment it is given an id, so the
-        // list catches up as soon as the first answer lands.
+        // The id arrives with the `init` at the *top* of the first turn, before
+        // the CLI has written a word of the transcript — so this catches the
+        // new conversation existing, but not yet what it is called.
         .task(id: session?.claudeSessionID) { await load() }
+        // …which is what this is for. By the time a turn ends the prompt is on
+        // disk, so the row that was missing (or sitting there untitled) turns
+        // into the real thing without anyone reaching for refresh.
+        .onChange(of: session?.isResponding) { _, isResponding in
+            guard isResponding == false else { return }
+            Task { await load() }
+        }
     }
 
     private var list: some View {

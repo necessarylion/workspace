@@ -2,12 +2,12 @@ import Foundation
 
 /// A command line tool the app drives.
 ///
-/// Nothing is bundled: `git`, `gh`, `bkt` and `claude` have to be on the user's
-/// PATH, and half of them have to be logged in before a pull request loads.
-/// Settings is where that is checked and fixed, so a missing tool is something
-/// you see once in a list rather than as a failed request later.
+/// Nothing is bundled: `git`, `gh`, `bkt`, `claude` and `rg` have to be on the
+/// user's PATH, and half of them have to be logged in before a pull request
+/// loads. Settings is where that is checked and fixed, so a missing tool is
+/// something you see once in a list rather than as a failed request later.
 enum RequiredTool: String, CaseIterable, Identifiable, Sendable {
-    case git, gh, bkt, claude
+    case git, gh, bkt, claude, rg
 
     var id: String { rawValue }
     var executable: String { rawValue }
@@ -18,6 +18,7 @@ enum RequiredTool: String, CaseIterable, Identifiable, Sendable {
         case .gh: "GitHub CLI"
         case .bkt: "Bitbucket CLI"
         case .claude: "Claude Code"
+        case .rg: "ripgrep"
         }
     }
 
@@ -27,6 +28,7 @@ enum RequiredTool: String, CaseIterable, Identifiable, Sendable {
         case .gh: "GitHub pull requests, comments and reviews."
         case .bkt: "Bitbucket pull requests, comments and reviews."
         case .claude: "The Ask Claude chat, and the Claude actions in the terminal."
+        case .rg: "Searching inside files from the Files tab. Without it `git grep` stands in, which is slower on a large repository."
         }
     }
 
@@ -41,6 +43,7 @@ enum RequiredTool: String, CaseIterable, Identifiable, Sendable {
         case .gh: "github"
         case .bkt: "bitbucket"
         case .claude: nil
+        case .rg: nil
         }
     }
 
@@ -48,6 +51,7 @@ enum RequiredTool: String, CaseIterable, Identifiable, Sendable {
     var symbol: String {
         switch self {
         case .claude: "sparkles"
+        case .rg: "magnifyingglass"
         default: "terminal"
         }
     }
@@ -60,6 +64,7 @@ enum RequiredTool: String, CaseIterable, Identifiable, Sendable {
         case .gh: "brew install gh"
         case .bkt: "brew install avivsinai/tap/bitbucket-cli"
         case .claude: "curl -fsSL https://claude.ai/install.sh | bash"
+        case .rg: "brew install ripgrep"
         }
     }
 
@@ -73,9 +78,9 @@ enum RequiredTool: String, CaseIterable, Identifiable, Sendable {
     /// for them to correct before pressing Return.
     var signIn: (command: String, autoRun: Bool)? {
         switch self {
-        // git authenticates over ssh/https itself, and `claude` asks for a login
-        // the first time it runs.
-        case .git, .claude: nil
+        // git authenticates over ssh/https itself, `claude` asks for a login the
+        // first time it runs, and `rg` has nothing to sign in to.
+        case .git, .claude, .rg: nil
         case .gh: ("gh auth login", true)
         case .bkt: ("bkt auth login https://bitbucket.org --kind cloud --web", false)
         }
@@ -87,6 +92,7 @@ enum RequiredTool: String, CaseIterable, Identifiable, Sendable {
         case .gh: URL(string: "https://cli.github.com")!
         case .bkt: URL(string: "https://github.com/avivsinai/bitbucket-cli")!
         case .claude: URL(string: "https://docs.claude.com/en/docs/claude-code/overview")!
+        case .rg: URL(string: "https://github.com/BurntSushi/ripgrep")!
         }
     }
 
@@ -109,7 +115,7 @@ enum RequiredTool: String, CaseIterable, Identifiable, Sendable {
 
     private func account() async -> ToolState.Account {
         switch self {
-        case .git, .claude:
+        case .git, .claude, .rg:
             return .notNeeded
         case .gh:
             // The same list the per-repository account picker uses, reloaded so
@@ -217,6 +223,9 @@ final class ToolInventory {
     /// Re-checks a single tool, after an install or a sign-in.
     func refresh(_ tool: RequiredTool) async {
         states[tool] = await tool.probe()
+        // The file search remembers whether ripgrep was there; an install just
+        // made that answer wrong.
+        if tool == .rg { FileSearcher.forgetRipgrep() }
         if tool.needsHomebrew {
             hasHomebrew = await Shell.isAvailable("brew")
         }

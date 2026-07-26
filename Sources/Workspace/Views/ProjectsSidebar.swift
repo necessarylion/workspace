@@ -25,7 +25,6 @@ struct ProjectsSidebar: View {
                 }
             } else {
                 searchField
-                Divider()
                 list
             }
 
@@ -59,7 +58,8 @@ struct ProjectsSidebar: View {
                         card(project)
                     }
                 }
-                .padding(10)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
                 .animation(.easeInOut(duration: 0.15), value: store.projects.map(\.id))
             }
         }
@@ -168,7 +168,7 @@ struct ProjectsSidebar: View {
             }
         }
         .padding(.horizontal, 10)
-        .frame(height: 34)
+        .frame(height: 28)
     }
 
     private var footer: some View {
@@ -217,15 +217,16 @@ struct ProjectsSidebar: View {
         .pointerCursor()
     }
 
-    /// `claude` is left out: its actions are optional, and a missing `bkt` only
-    /// matters once a Bitbucket repository is here.
+    /// `claude` and `rg` are left out: their actions are optional — the file
+    /// search falls back to `git grep` — and a missing `bkt` only matters once a
+    /// Bitbucket repository is here.
     private var needsAttention: Bool {
         tools.unresolved.contains { tool in
             switch tool {
             case .git: true
             case .gh: store.projects.contains { $0.host == .github }
             case .bkt: store.projects.contains { $0.host == .bitbucket }
-            case .claude: false
+            case .claude, .rg: false
             }
         }
     }
