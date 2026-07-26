@@ -25,6 +25,10 @@ final class TreeSitterHighlighter {
     /// instead: a row is a binary search, and an edit shifts the offsets after
     /// it rather than recounting them.
     private var lineStarts: [Int] = [0]
+    /// One parser per embedded language, and the last block each one coloured —
+    /// see ``embeddedHighlights(in:storage:)``.
+    private var embeddedHighlighters: [String: TreeSitterHighlighter] = [:]
+    private var embeddedCaptures: [String: (text: String, captures: [(range: NSRange, capture: String)])] = [:]
     /// Length of `text` in UTF-16, kept alongside so a point can be clamped to
     /// it without measuring the string again.
     private var textLength = 0
@@ -226,7 +230,150 @@ final class TreeSitterHighlighter {
                 result.append((capture.range, refined))
             }
         }
-        return resolveOverlaps(in: result)
+
+        // Embedded blocks last, so that where the host grammar has already said
+        // something about the same span — `raw_text` is one flat token to HTML —
+        // the inner language has the final word. Callers apply these in order.
+        return resolveOverlaps(in: result) + embeddedHighlights(in: range, storage: storage)
+    }
+
+    // MARK: - Embedded languages
+
+    /// Captures from the blocks of *another* language inside this file.
+    ///
+    /// A grammar stops at the boundary of its own language: to HTML the body of
+    /// a `<script>` is one undifferentiated `raw_text` token, which is why a Vue
+    /// single-file component came out with its whole script in the plain text
+    /// colour. tree-sitter answers this with injections, which this highlighter
+    /// does not implement; what it does instead is parse each block with a
+    /// highlighter of its own and shift the ranges into this file.
+    ///
+    /// The result is cached against the block's text, so scrolling costs
+    /// nothing and only an edit inside a block re-parses it.
+    private func embeddedHighlights(
+        in range: NSRange,
+        storage: NSString
+    ) -> [(range: NSRange, capture: String)] {
+        guard language.id == .html, let tree, let root = tree.rootNode else { return [] }
+
+        var result: [(range: NSRange, capture: String)] = []
+        for block in embeddedBlocks(under: root, storage: storage) {
+            // Only what is on screen, but whole blocks: a block is parsed as a
+            // unit, and a half-parsed one would colour nothing.
+            guard NSIntersectionRange(block.content, range).length > 0 else { continue }
+            let text = storage.substring(with: block.content)
+            for capture in captures(of: text, in: block.language) {
+                let shifted = NSRange(
+                    location: capture.range.location + block.content.location,
+                    length: capture.range.length
+                )
+                result.append((shifted, capture.capture))
+            }
+        }
+        return result
+    }
+
+    /// One `<script>` or `<style>` body, and what it is written in.
+    private struct EmbeddedBlock {
+        let language: CodeLanguage
+        /// The text between the tags, not the element.
+        let content: NSRange
+    }
+
+    /// Walks the element tree for `<script>` and `<style>` bodies.
+    ///
+    /// Descends through elements rather than reading only the top level, since a
+    /// Vue component keeps its blocks at the root but an ordinary HTML page
+    /// buries them in `<head>` or at the end of `<body>`.
+    private func embeddedBlocks(under root: Node, storage: NSString) -> [EmbeddedBlock] {
+        var blocks: [EmbeddedBlock] = []
+
+        func walk(_ node: Node, depth: Int) {
+            guard depth < 32 else { return }
+            if let type = node.nodeType, type == "script_element" || type == "style_element" {
+                if let block = block(for: node, isScript: type == "script_element", storage: storage) {
+                    blocks.append(block)
+                }
+                return
+            }
+            for index in 0..<node.namedChildCount {
+                guard let child = node.namedChild(at: index) else { continue }
+                walk(child, depth: depth + 1)
+            }
+        }
+
+        walk(root, depth: 0)
+        return blocks
+    }
+
+    private func block(for element: Node, isScript: Bool, storage: NSString) -> EmbeddedBlock? {
+        var content: NSRange?
+        var startTag: NSRange?
+        for index in 0..<element.childCount {
+            guard let child = element.child(at: index), let type = child.nodeType else { continue }
+            if type == "start_tag" { startTag = child.range }
+            if type == "raw_text" { content = child.range }
+        }
+        guard let content, content.length > 0, NSMaxRange(content) <= storage.length else { return nil }
+
+        var attribute: String?
+        if let startTag, NSMaxRange(startTag) <= storage.length {
+            attribute = Self.langAttribute(in: storage.substring(with: startTag))
+        }
+        guard let language = Self.embeddedLanguage(lang: attribute, isScript: isScript) else { return nil }
+        return EmbeddedBlock(language: language, content: content)
+    }
+
+    /// The value of `lang="…"` in a start tag, which is how a single-file
+    /// component says its `<script>` is TypeScript rather than JavaScript.
+    private static func langAttribute(in tag: String) -> String? {
+        guard let match = tag.range(
+            of: #"\blang\s*=\s*["']?([A-Za-z0-9_+-]+)"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) else { return nil }
+        let text = String(tag[match])
+        guard let value = text.range(of: #"[A-Za-z0-9_+-]+$"#, options: .regularExpression) else { return nil }
+        return String(text[value]).lowercased()
+    }
+
+    /// A `lang` word (or its absence) to a grammar we actually have.
+    ///
+    /// The pre-processor dialects have no grammar of their own and are given the
+    /// plain one instead: SCSS and Less are near enough to CSS that all it costs
+    /// is the odd uncoloured token, which still reads better than one flat wall
+    /// of text.
+    private static func embeddedLanguage(lang: String?, isScript: Bool) -> CodeLanguage? {
+        guard isScript else {
+            switch lang {
+            case nil, "css", "scss", "sass", "less", "postcss", "stylus": return .css
+            default: return nil
+            }
+        }
+        switch lang {
+        case nil, "js", "javascript", "mjs", "cjs": return .javascript
+        case "ts", "typescript", "mts", "cts": return .typescript
+        case "tsx": return .tsx
+        case "jsx": return .jsx
+        default: return nil
+        }
+    }
+
+    /// Parses one block, reusing both the parser and the last answer it gave.
+    private func captures(
+        of text: String,
+        in language: CodeLanguage
+    ) -> [(range: NSRange, capture: String)] {
+        let id = language.id.rawValue
+        if let cached = embeddedCaptures[id], cached.text == text { return cached.captures }
+
+        let highlighter = embeddedHighlighters[id] ?? TreeSitterHighlighter(language: language)
+        embeddedHighlighters[id] = highlighter
+        highlighter.setText(text)
+        guard highlighter.isReady else { return [] }
+
+        let captures = highlighter.highlights(in: NSRange(location: 0, length: (text as NSString).length))
+        embeddedCaptures[id] = (text: text, captures: captures)
+        return captures
     }
 
     /// Where several captures land on exactly the same token, keeps the one

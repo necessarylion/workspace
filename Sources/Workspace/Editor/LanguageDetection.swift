@@ -12,8 +12,15 @@ extension CodeLanguage {
     /// whose extension is `example`. Every variant holds the same shell-style
     /// `KEY=value` list, so they all get the bash grammar — it colours the
     /// keys, the comments and the quoted values.
+    ///
+    /// A Vue single-file component has no grammar of its own — the grammars
+    /// arrive as a prebuilt binary we cannot add to — so it is coloured as
+    /// HTML, which is what its `<template>`, `<script>` and `<style>` blocks
+    /// read as. Its *language server* is still the Vue one; that is found by
+    /// file name, not by this, in ``LanguageServerCatalog``.
     static func forFile(url: URL) -> CodeLanguage {
         if isEnvironmentFile(named: url.lastPathComponent) { return .bash }
+        if url.pathExtension.lowercased() == "vue" { return .html }
         return detectLanguageFrom(url: url)
     }
 

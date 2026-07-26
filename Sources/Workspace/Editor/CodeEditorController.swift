@@ -278,7 +278,7 @@ final class CodeEditorController: NSViewController {
 
     private func attachService(text: String) {
         guard let fileURL, let projectRoot,
-              let service = LanguageServerRegistry.shared.service(for: language, root: projectRoot) else {
+              let service = LanguageServerRegistry.shared.service(for: fileURL, language: language, root: projectRoot) else {
             onStatusChange?("no language server")
             return
         }

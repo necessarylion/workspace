@@ -64,6 +64,16 @@ final class LanguageService {
                 return false
             }
 
+            // Settled before the process is spawned: a server that cannot be
+            // configured is one there is no point in running.
+            let options: LSP.Value?
+            do {
+                options = try await LanguageServerOptions.initializationOptions(for: definition, root: root)
+            } catch {
+                status = .failed(error.localizedDescription)
+                return false
+            }
+
             do {
                 try await connection.start { [weak self] method, params in
                     Task { @MainActor in self?.handle(notification: method, params: params) }
@@ -76,7 +86,11 @@ final class LanguageService {
             do {
                 _ = try await connection.request(
                     "initialize",
-                    params: InitializeParams(rootURI: root.absoluteString, rootPath: root.path),
+                    params: InitializeParams(
+                        rootURI: root.absoluteString,
+                        rootPath: root.path,
+                        initializationOptions: options
+                    ),
                     timeout: 30
                 )
                 await connection.notify("initialized", params: EmptyParams())
@@ -247,11 +261,14 @@ final class LanguageService {
         let rootPath: String
         let capabilities = ClientCapabilities()
         let workspaceFolders: [WorkspaceFolder]
+        /// Whatever this particular server wants — see ``LanguageServerOptions``.
+        let initializationOptions: LSP.Value?
 
-        init(rootURI: String, rootPath: String) {
+        init(rootURI: String, rootPath: String, initializationOptions: LSP.Value?) {
             self.rootUri = rootURI
             self.rootPath = rootPath
             self.workspaceFolders = [WorkspaceFolder(uri: rootURI, name: (rootPath as NSString).lastPathComponent)]
+            self.initializationOptions = initializationOptions
         }
     }
 

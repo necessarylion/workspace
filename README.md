@@ -87,7 +87,8 @@ Nothing is bundled — a server is used if it is on your `PATH`.
 | Language | Server |
 | --- | --- |
 | Swift | `sourcekit-lsp` (ships with Xcode) |
-| TypeScript / JS / TSX / JSX | `typescript-language-server` |
+| TypeScript / JS / TSX / JSX (React) | `typescript-language-server` |
+| Vue | `vue-language-server` (`@vue/language-server@2`, **not 3** — see below), plus a TypeScript 5.x in the project |
 | Python | `pyright-langserver` |
 | Go | `gopls` |
 | Rust | `rust-analyzer` |
@@ -98,6 +99,29 @@ Nothing is bundled — a server is used if it is on your `PATH`.
 That table is only the default list: **Settings → Language Servers** installs the
 missing ones, corrects a command, and adds a server for any language that is not
 here. The Info tab shows which ones are running.
+
+A **Vue single-file component** has no grammar of its own — the tree-sitter
+grammars arrive as a prebuilt binary that has no Vue in it — so it is parsed as
+HTML, and its `<script>` and `<style>` bodies are then coloured by the grammar
+they are actually written in: `lang="ts"` gets TypeScript, a bare `<script>`
+JavaScript, `<style lang="scss">` the CSS grammar. A grammar normally stops at
+its own boundary and hands HTML one flat `raw_text` token, which is what left a
+whole script in the plain text colour; each block is parsed separately instead
+and its colours shifted into place, cached against the block's text so only
+editing inside one re-parses it. Ordinary `.html` files get the same treatment.
+
+**Vue is pinned to `@vue/language-server@2` deliberately.** From 3.0 the server
+answers nothing by itself: every request — hover, completion, even the first
+lookup of which project a file belongs to — is forwarded to a `tsserver` that the
+*editor* is expected to be running alongside it with `@vue/typescript-plugin`
+loaded, over `tsserver/request` notifications outside the protocol. There is no
+switch to turn that off, so under an editor that runs no such process the server
+simply never replies. 2.x still has the switch, and the app throws it
+(`vue.hybridMode: false`), which puts the server back in charge of its own
+TypeScript project. That project needs a TypeScript to load: the app looks for
+`node_modules/typescript` beside the repo and up from it, then for a global one,
+and says so in the status bar when there is none. It has to be **5.x** — the 7.x
+package is the Go rewrite and ships none of the API the server calls.
 
 ## Requirements
 
@@ -262,6 +286,7 @@ Sources/Workspace/
     LSPConnection.swift         JSON-RPC over stdio
     LanguageService.swift       one server: handshake, sync, requests
     LanguageServerRegistry.swift  catalog → running server, one per project root
+    LanguageServerOptions.swift   initializationOptions, for the servers needing them
   Themes/
     SyntaxPalette.swift       capture name → colour, and the lookup behind it
     Themes.swift              the list Settings shows; first one is the default

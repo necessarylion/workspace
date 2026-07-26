@@ -3,6 +3,10 @@ import Foundation
 
 /// How to launch a language server for one language.
 struct LanguageServerDefinition: Sendable, Hashable {
+    /// The catalog entry's key — usually a `TreeSitterLanguage`, but see
+    /// ``LanguageServerCatalog/vue``. ``LanguageServerOptions`` reads it to tell
+    /// which server it is being asked to configure.
+    let language: String
     /// Binary we check for on `$PATH`.
     let executable: String
     /// Full command line, run through a login shell.
@@ -26,23 +30,28 @@ final class LanguageServerRegistry {
 
     private init() {}
 
-    /// Every language we know how to serve, as Settings currently has it —
+    /// How to start a catalog entry, as Settings currently has it —
     /// ``LanguageServerCatalog`` holds the defaults and the user's changes.
-    static func definition(for language: CodeLanguage) -> LanguageServerDefinition? {
-        guard let entry = LanguageServerCatalog.shared.entry(for: language) else { return nil }
-        return LanguageServerDefinition(
+    static func definition(for entry: LanguageServerEntry) -> LanguageServerDefinition {
+        LanguageServerDefinition(
+            language: entry.language,
             executable: entry.executable,
             command: entry.command,
             languageID: entry.languageID
         )
     }
 
-    /// The service for a file, or nil when no server is defined for its language.
-    func service(for language: CodeLanguage, root: URL) -> LanguageService? {
-        guard let definition = Self.definition(for: language) else { return nil }
-        let key = Self.key(root: root, language: language.id.rawValue)
+    /// The service for a file, or nil when no server is defined for it.
+    ///
+    /// The file name is asked first, since a language with no grammar is
+    /// highlighted as the nearest one there is and so cannot be recognised by
+    /// `language` alone — a `.vue` file arrives here as HTML.
+    func service(for url: URL, language: CodeLanguage, root: URL) -> LanguageService? {
+        let catalog = LanguageServerCatalog.shared
+        guard let entry = catalog.entry(forFile: url) ?? catalog.entry(for: language) else { return nil }
+        let key = Self.key(root: root, language: entry.language)
         if let existing = services[key] { return existing }
-        let service = LanguageService(definition: definition, root: root)
+        let service = LanguageService(definition: Self.definition(for: entry), root: root)
         services[key] = service
         return service
     }

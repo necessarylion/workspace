@@ -61,6 +61,16 @@ final class LanguageServerCatalog {
         entries.first { $0.language == language.id.rawValue }
     }
 
+    /// The server for a file whose language has no grammar, found by extension.
+    ///
+    /// Tried before ``entry(for:)``, because such a file is coloured with the
+    /// nearest grammar there is — a `.vue` file as HTML — and that stand-in is
+    /// not the language whose server it wants.
+    func entry(forFile url: URL) -> LanguageServerEntry? {
+        guard let language = Self.languagesByExtension[url.pathExtension.lowercased()] else { return nil }
+        return entries.first { $0.language == language }
+    }
+
     func isBuiltIn(_ entry: LanguageServerEntry) -> Bool {
         Self.builtIn.contains { $0.language == entry.language }
     }
@@ -232,6 +242,15 @@ final class LanguageServerCatalog {
 
     // MARK: - Defaults
 
+    /// Vue, as an entry key. Not a `TreeSitterLanguage`: the grammars live in a
+    /// prebuilt binary (`CodeLanguagesContainer`) that has no Vue in it and that
+    /// we cannot add a case to. An entry may be keyed on any name, so Vue is
+    /// keyed on this one and reached through ``languagesByExtension``.
+    nonisolated static let vue = "vue"
+
+    /// File extension → the entry key of a language with no grammar.
+    private nonisolated static let languagesByExtension: [String: String] = ["vue": vue]
+
     /// The servers that ship with the app. `sourcekit-lsp` and `dart` come with
     /// their toolchains; everything else is one package manager line away.
     static let builtIn: [LanguageServerEntry] = [
@@ -289,6 +308,22 @@ final class LanguageServerCatalog {
             command: "typescript-language-server --stdio",
             languageID: "javascriptreact",
             installCommand: "npm install -g typescript typescript-language-server"
+        ),
+        // Pinned to 2.x on purpose. From 3.0 the server answers nothing on its
+        // own: every request is forwarded to a `tsserver` the editor is expected
+        // to run alongside it with `@vue/typescript-plugin` loaded, and there is
+        // no switch to turn that off. 2.x still has one, and
+        // ``LanguageServerOptions`` throws it — see there.
+        .init(
+            language: vue,
+            executable: "vue-language-server",
+            command: "vue-language-server --stdio",
+            languageID: "vue",
+            // The server only, no TypeScript: it loads the project's own, and
+            // pulling a global `typescript` in here would quietly change the
+            // `tsc` on the user's PATH as a side effect of pressing Install.
+            // ``LanguageServerOptions`` says what to do when a project has none.
+            installCommand: "npm install -g @vue/language-server@2"
         ),
         .init(
             language: TreeSitterLanguage.python.rawValue,

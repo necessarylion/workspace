@@ -213,6 +213,28 @@ enum LSP {
     }
 }
 
+// MARK: - Server-defined values
+
+extension LSP {
+    /// A plain JSON value, for the corners of the protocol whose shape belongs
+    /// to the server rather than to the protocol — `initializationOptions`
+    /// above all, which every server spells its own way.
+    indirect enum Value: Encodable, Hashable, Sendable {
+        case string(String)
+        case bool(Bool)
+        case object([String: Value])
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            switch self {
+            case .string(let value): try container.encode(value)
+            case .bool(let value): try container.encode(value)
+            case .object(let value): try container.encode(value)
+            }
+        }
+    }
+}
+
 // MARK: - Loose decoding helpers
 
 extension LSP {
