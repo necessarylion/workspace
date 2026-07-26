@@ -1,10 +1,14 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Right sidebar: every repository the user added, as a card.
 struct ProjectsSidebar: View {
     @Environment(WorkspaceStore.self) private var store
     @Environment(ToolInventory.self) private var tools
+
+    /// The repository being dragged, while a reorder is in progress.
+    @State private var draggingID: URL?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,17 +24,9 @@ struct ProjectsSidebar: View {
                         .pointerCursor()
                 }
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 7) {
-                        ForEach(store.projects) { project in
-                            ProjectCard(project: project, isSelected: project.id == store.selectedProjectID)
-                                .pointerCursor()
-                                .onTapGesture { store.selectedProjectID = project.id }
-                                .contextMenu { menu(project) }
-                        }
-                    }
-                    .padding(10)
-                }
+                searchField
+                Divider()
+                list
             }
 
             Divider()
@@ -39,22 +35,140 @@ struct ProjectsSidebar: View {
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
+    private var isFiltering: Bool {
+        !store.projectSearchText.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    @ViewBuilder
+    private var list: some View {
+        let projects = store.visibleProjects
+        if projects.isEmpty {
+            VStack(spacing: 6) {
+                Text("No repositories match")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Button("Clear filter") { store.projectSearchText = "" }
+                    .buttonStyle(.link)
+                    .pointerCursor()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 7) {
+                    ForEach(projects) { project in
+                        card(project)
+                    }
+                }
+                .padding(10)
+                .animation(.easeInOut(duration: 0.15), value: store.projects.map(\.id))
+            }
+        }
+    }
+
+    /// Reordering is off while the list is filtered: the cards on screen are
+    /// only part of the order, so dropping between them means nothing. Pinned
+    /// cards are out of it too — their block is sorted by name.
+    @ViewBuilder
+    private func card(_ project: Project) -> some View {
+        ProjectCard(project: project, isSelected: project.id == store.selectedProjectID)
+            .pointerCursor()
+            .onTapGesture { store.selectedProjectID = project.id }
+            .contextMenu { menu(project) }
+            .ifReorderable(!isFiltering && !project.isPinned) { card in
+                card
+                    .onDrag {
+                        draggingID = project.id
+                        return NSItemProvider(object: project.url.path as NSString)
+                    }
+                    .onDrop(
+                        of: [.plainText],
+                        delegate: ProjectReorderDropDelegate(
+                            target: project.id,
+                            store: store,
+                            draggingID: $draggingID
+                        )
+                    )
+            }
+    }
+
     /// Lines up with the viewer's header row, and leaves the left end free:
-    /// with the window's title bar hidden the traffic lights sit there.
+    /// with the window's title bar hidden the traffic lights sit there. It
+    /// carries no title or count — only the home terminal button, at the far
+    /// end.
     private var header: some View {
         HStack {
-            Text("Repositories")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
             Spacer()
-            Text("\(store.projects.count)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.tertiary)
+            homeTerminalButton
         }
+        .buttonStyle(.borderless)
         .padding(.leading, 78)
         .padding(.trailing, 12)
         .frame(height: 38)
         .background(.bar)
+    }
+
+    /// One press, one prompt in the home folder — no repository needed and no
+    /// menu in the way. It returns to the home shell you already have; ⌘T from
+    /// inside it opens another. The shells themselves are listed in the
+    /// navigator's Terminals tab.
+    ///
+    /// The badge counts the home shells that are open, so the ones no repository
+    /// lists are still visible from anywhere in the app.
+    private var homeTerminalButton: some View {
+        let count = store.terminals(in: .home).count
+
+        return Button {
+            store.openGlobalTerminal()
+        } label: {
+            Image(systemName: "terminal")
+                .overlay(alignment: .topTrailing) {
+                    if count > 0 {
+                        Text("\(count)")
+                            .font(.system(size: 8, weight: .bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 3)
+                            .frame(minWidth: 12, minHeight: 12)
+                            .background(Capsule().fill(.tint))
+                            .offset(x: 8, y: -6)
+                    }
+                }
+                // Room for the badge, so it never runs past the pane's edge.
+                .padding(.trailing, count > 0 ? 8 : 0)
+        }
+        .help(count == 0
+            ? "Open a terminal in your home folder (⇧⌘T)"
+            : "\(count) terminal\(count == 1 ? "" : "s") in your home folder (⇧⌘T)")
+        .pointerCursor()
+    }
+
+    /// Matches the files pane's filter row, so both sidebars behave the same.
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+            TextField(
+                "Filter repositories",
+                text: Binding(
+                    get: { store.projectSearchText },
+                    set: { store.projectSearchText = $0 }
+                )
+            )
+            .textFieldStyle(.plain)
+            if isFiltering {
+                Button {
+                    store.projectSearchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear the filter")
+                .pointerCursor()
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 34)
     }
 
     private var footer: some View {
@@ -118,6 +232,10 @@ struct ProjectsSidebar: View {
 
     @ViewBuilder
     private func menu(_ project: Project) -> some View {
+        Button(project.isPinned ? "Unpin from Top" : "Pin to Top") {
+            store.togglePin(project)
+        }
+        Divider()
         Button("Refresh") { Task { await project.refresh() } }
         Button("Open Terminal") { store.openTerminal(in: project) }
         Divider()
@@ -136,10 +254,56 @@ struct ProjectsSidebar: View {
     }
 }
 
+/// Reordering the sidebar by dragging a card onto another one. `LazyVStack` has
+/// no `onMove` of its own — the list is rearranged as the drag passes over each
+/// card, and the arrangement is saved when the drag is let go.
+private struct ProjectReorderDropDelegate: DropDelegate {
+    /// The card being hovered over — where the dragged repository should land.
+    let target: URL
+    let store: WorkspaceStore
+    @Binding var draggingID: URL?
+
+    func dropEntered(info: DropInfo) {
+        guard let draggingID else { return }
+        store.moveProject(withID: draggingID, toPositionOf: target)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggingID = nil
+        return true
+    }
+}
+
+private extension View {
+    /// `onDrag` has no disabled state, so the reorder modifiers are attached
+    /// only when they apply.
+    @ViewBuilder
+    func ifReorderable<Modified: View>(
+        _ enabled: Bool,
+        _ transform: (Self) -> Modified
+    ) -> some View {
+        if enabled {
+            transform(self)
+        } else {
+            self
+        }
+    }
+}
+
 /// One repository, summarised.
 struct ProjectCard: View {
+    @Environment(WorkspaceStore.self) private var store
+
     let project: Project
     let isSelected: Bool
+
+    /// The star only sits on the card while it is pinned — otherwise it appears
+    /// under the pointer, so an unpinned list stays quiet.
+    @State private var isHovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -151,6 +315,9 @@ struct ProjectCard: View {
                 Spacer()
                 if project.isLoadingPullRequests {
                     ProgressView().controlSize(.mini)
+                }
+                if project.isPinned || isHovering {
+                    starButton
                 }
             }
 
@@ -196,6 +363,20 @@ struct ProjectCard: View {
                 .stroke(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 1.2)
         )
         .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+    }
+
+    private var starButton: some View {
+        Button {
+            store.togglePin(project)
+        } label: {
+            Image(systemName: project.isPinned ? "star.fill" : "star")
+                .font(.caption)
+                .foregroundStyle(project.isPinned ? AnyShapeStyle(.yellow) : AnyShapeStyle(.tertiary))
+        }
+        .buttonStyle(.plain)
+        .help(project.isPinned ? "Unpin from the top" : "Pin to the top")
+        .pointerCursor()
     }
 }
 

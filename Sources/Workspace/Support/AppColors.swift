@@ -14,7 +14,7 @@ enum AppColors {
     static let terminalBackgroundHex = "1e1e1e"
 }
 
-private extension NSColor {
+extension NSColor {
     /// 0xRRGGBB, opaque.
     convenience init(hex: Int) {
         self.init(

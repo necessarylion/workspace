@@ -12,6 +12,14 @@ struct PullRequestDetailView: View {
     let pr: PullRequest
     let project: Project
 
+    /// The button that was pressed, waiting to be confirmed. Nothing in the
+    /// action bar reaches the host until this has been through the sheet — and
+    /// one piece of state for all of them keeps it that way, where four separate
+    /// presentations would leave SwiftUI to drop one of them on macOS.
+    @State private var pendingAction: PullRequestAction?
+    /// Kept out here so the sheet reopens on the way that was picked last.
+    @State private var mergeStrategy: PullRequestMergeStrategy = .squash
+
     /// Thread roots that hang off a line of the diff, keyed by that line. A
     /// thread whose line is no longer in the diff simply does not appear here;
     /// it is still listed in the conversation, so nothing is lost.
@@ -29,11 +37,62 @@ struct PullRequestDetailView: View {
             summaryBar
                 .background(.bar)
             Divider()
+            actionBar
+                .background(.bar)
+            Divider()
 
             switch item.pullRequestTab {
             case .details: detailsTab
             case .diff: diffTab
+            case .commits: commitsTab
             case .builds: buildsTab
+            }
+        }
+        // Every button in the action bar ends up here first: one sheet, one
+        // shape, and nothing sent to the host until it is confirmed.
+        .sheet(item: $pendingAction) { action in
+            PullRequestActionSheet(
+                action: action,
+                pr: pr,
+                syncState: item.syncState,
+                strategy: $mergeStrategy,
+                onCancel: { pendingAction = nil },
+                onConfirm: { comment in
+                    pendingAction = nil
+                    perform(action, comment: comment)
+                }
+            )
+        }
+    }
+
+    /// Runs what the sheet confirmed.
+    private func perform(_ action: PullRequestAction, comment: String) {
+        Task {
+            switch action {
+            case .merge:
+                await store.mergePullRequest(
+                    item,
+                    project: project,
+                    pr: pr,
+                    using: mergeStrategy
+                )
+            case .review(let decision):
+                await store.reviewPullRequest(
+                    item,
+                    project: project,
+                    pr: pr,
+                    decision: decision,
+                    comment: comment
+                )
+            case .reject:
+                await store.rejectPullRequest(
+                    item,
+                    project: project,
+                    pr: pr,
+                    reason: comment
+                )
+            case .updateBranch:
+                await store.updateBranchFromBase(item, project: project, pr: pr)
             }
         }
     }
@@ -58,11 +117,20 @@ struct PullRequestDetailView: View {
             if let review = pr.reviewLabel {
                 badge(review, color: review == "Approved" ? .green : .orange)
             }
+            syncBadge
 
             Spacer(minLength: 8)
 
             if item.pullRequestTab == .details, !item.comments.isEmpty {
                 Text("\(item.comments.count) comments")
+                    .foregroundStyle(.secondary)
+            }
+            if item.pullRequestTab == .commits, !item.commits.isEmpty {
+                Text("\(item.commits.count) commits")
+                    .foregroundStyle(.secondary)
+            }
+            if item.pullRequestTab == .builds, !item.builds.isEmpty {
+                Text("\(item.builds.count) builds")
                     .foregroundStyle(.secondary)
             }
             tabPicker
@@ -96,6 +164,120 @@ struct PullRequestDetailView: View {
         }
     }
 
+    // MARK: - Action bar
+
+    /// What one does to a pull request, on a row of its own under the summary:
+    /// the review verdicts on the left, and what ends it on the right. They are
+    /// buttons rather than menu items because they are the point of the window,
+    /// and each of them asks before anything goes out to the host.
+    private var actionBar: some View {
+        HStack(spacing: 7) {
+            actionButton(
+                "Approve",
+                symbol: "checkmark.seal",
+                tint: .green,
+                help: "Approve #\(pr.number) on \(pr.host.displayName)"
+            ) {
+                pendingAction = .review(.approve)
+            }
+            actionButton(
+                "Request Changes",
+                symbol: "exclamationmark.bubble",
+                tint: .orange,
+                help: "Ask for changes on #\(pr.number)"
+            ) {
+                pendingAction = .review(.requestChanges)
+            }
+
+            Spacer(minLength: 8)
+
+            // A merge or a sync takes a moment on the host; the bar says so
+            // rather than looking as if the button did nothing.
+            if item.isRunningPullRequestAction {
+                ProgressView().controlSize(.small)
+            }
+            if item.syncState?.isBehind == true {
+                actionButton(
+                    "Update from \(pr.targetBranch)",
+                    symbol: "arrow.down.to.line",
+                    tint: .orange,
+                    help: "Bring \(pr.targetBranch) into \(pr.sourceBranch)"
+                ) {
+                    pendingAction = .updateBranch
+                }
+            }
+            actionButton(
+                "Reject",
+                symbol: "xmark.circle",
+                tint: .red,
+                help: "Close #\(pr.number) without merging"
+            ) {
+                pendingAction = .reject
+            }
+            actionButton(
+                "Merge",
+                symbol: "arrow.triangle.merge",
+                tint: .accentColor,
+                isProminent: true,
+                help: "Merge #\(pr.number) into \(pr.targetBranch)"
+            ) {
+                pendingAction = .merge
+            }
+        }
+        .padding(.horizontal, AppMetrics.barHorizontalPadding)
+        .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private func actionButton(
+        _ title: String,
+        symbol: String,
+        tint: Color,
+        isProminent: Bool = false,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        let button = Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(.caption.weight(.medium))
+        }
+        .controlSize(.small)
+        .buttonBorderShape(.capsule)
+        .tint(tint)
+        .disabled(item.isRunningPullRequestAction)
+        .help(help)
+        .pointerCursor(!item.isRunningPullRequestAction)
+
+        // Filled for the one that ends the review the way it is meant to end;
+        // the rest stay outlined until they are wanted.
+        if isProminent {
+            button.buttonStyle(.borderedProminent)
+        } else {
+            button.buttonStyle(.bordered)
+        }
+    }
+
+    /// Whether the branch still has the target branch's latest work under it.
+    /// Silent while it is up to date — there is nothing to say then — and a
+    /// count once it is behind. Acting on it is the bar below's business.
+    @ViewBuilder
+    private var syncBadge: some View {
+        if let state = item.syncState, state.isBehind {
+            badge("\(state.behind) behind \(pr.targetBranch)", color: .orange)
+        }
+    }
+
+    /// The menu entry that re-counts the drift, which doubles as the place the
+    /// count is spelled out when the branch is up to date and the badge is
+    /// keeping quiet.
+    private var syncStatusTitle: String {
+        if item.isCheckingSync { return "Checking \(pr.targetBranch)…" }
+        guard let state = item.syncState else {
+            return "Check Sync with \(pr.targetBranch)"
+        }
+        return "\(state.summary(target: pr.targetBranch)) Check Again"
+    }
+
     private func barButton(
         _ symbol: String,
         help: String,
@@ -120,11 +302,17 @@ struct PullRequestDetailView: View {
             set: { item.pullRequestTab = $0 }
         )) {
             ForEach(ViewerItem.PullRequestTab.allCases) { tab in
-                Label(tab.title, systemImage: tab.symbol).tag(tab)
+                // Symbols alone: four words at this end of the bar crowd out the
+                // branch names at the other. The title stays on the label, so
+                // VoiceOver still reads "Details" rather than a symbol name.
+                Label(tab.title, systemImage: tab.symbol)
+                    .labelStyle(.iconOnly)
+                    .tag(tab)
             }
         }
         .pickerStyle(.segmented)
         .labelsHidden()
+        .help("Details, diff, commits and builds")
         // A segmented control centres itself in whatever width it is given
         // rather than filling it, so ask for its own width and let the
         // branches at the other end give way instead.
@@ -137,6 +325,23 @@ struct PullRequestDetailView: View {
     /// menu so the bar stays one line tall.
     private var actionsMenu: some View {
         Menu {
+            // Merging, rejecting and updating the branch have buttons of their
+            // own in the bar below; what is left here is what has none.
+            Button {
+                pendingAction = .updateBranch
+            } label: {
+                Label("Update Branch from \(pr.targetBranch)", systemImage: "arrow.down.to.line")
+            }
+            Button {
+                Task {
+                    await store.refreshSyncState(item, project: project, pr: pr, fetching: true)
+                }
+            } label: {
+                Label(syncStatusTitle, systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(item.isCheckingSync)
+            Divider()
+
             if let url = pr.url {
                 Button {
                     NSWorkspace.shared.open(url)
@@ -155,10 +360,23 @@ struct PullRequestDetailView: View {
             } label: {
                 Label("Reload Diff", systemImage: "arrow.clockwise")
             }
+            Button {
+                Task { await store.loadCommits(item, project: project, pr: pr) }
+            } label: {
+                Label("Reload Commits", systemImage: "arrow.clockwise")
+            }
+            Button {
+                Task { await store.loadBuilds(item, project: project, pr: pr) }
+            } label: {
+                Label("Reload Builds", systemImage: "arrow.clockwise")
+            }
         } label: {
             Image(systemName: "ellipsis.circle")
                 .font(.body)
         }
+        // One command at a time: a merge, a rejection or a sync in flight
+        // closes the menu to the rest of them.
+        .disabled(item.isRunningPullRequestAction)
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
@@ -202,13 +420,51 @@ struct PullRequestDetailView: View {
         }
     }
 
-    /// Placeholder until build status is read from the host.
+    /// The CI runs on the pull request's head commit. Failures sort to the top:
+    /// this tab is opened because something went red, and a long green list
+    /// should not bury it.
+    @ViewBuilder
     private var buildsTab: some View {
+        Group {
+            if item.isLoadingBuilds && item.builds.isEmpty {
+                ProgressView("Loading builds…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if item.builds.isEmpty {
+                noBuilds
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(item.builds) { BuildRow(build: $0) }
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .background(Color(nsColor: AppColors.viewerBackground))
+            }
+        }
+        // Fetched the first time the tab is opened, like the commits; the
+        // reload lives in the actions menu and in the empty state.
+        .task {
+            guard item.builds.isEmpty, !item.isLoadingBuilds, item.buildsError == nil else {
+                return
+            }
+            await store.loadBuilds(item, project: project, pr: pr)
+        }
+    }
+
+    private var noBuilds: some View {
         ContentUnavailableView {
-            Label("Pipeline builds", systemImage: "hammer")
+            Label("No builds", systemImage: "hammer")
         } description: {
-            Text("Build status for this pull request is not here yet. For now the pipeline lives on \(pr.host.displayName).")
+            Text(item.buildsError
+                ?? "Nothing has run against this pull request's head commit on \(pr.host.displayName).")
         } actions: {
+            Button("Try Again") {
+                Task { await store.loadBuilds(item, project: project, pr: pr) }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .pointerCursor()
             if let url = pr.url {
                 Button {
                     NSWorkspace.shared.open(url)
@@ -232,6 +488,7 @@ struct PullRequestDetailView: View {
             DiffView(
                 diff: diff,
                 layout: Binding(get: { item.diffLayout }, set: { item.diffLayout = $0 }),
+                selectedFile: Binding(get: { item.diffFile }, set: { item.diffFile = $0 }),
                 comments: DiffComments(
                     threads: inlineThreads,
                     isPosting: item.isPostingComment,
@@ -262,6 +519,156 @@ struct PullRequestDetailView: View {
                 description: Text(item.errorMessage ?? "This pull request has no textual changes.")
             )
         }
+    }
+
+    // MARK: - Commits
+
+    /// The list of commits, or — once one is picked — what that commit changed.
+    /// One thing at a time, as everywhere else in the viewer: a diff wants the
+    /// whole window rather than what is left beside a list.
+    @ViewBuilder
+    private var commitsTab: some View {
+        Group {
+            if let commit = item.selectedCommit {
+                commitDetail(commit)
+            } else {
+                commitList
+            }
+        }
+        // Fetched the first time the tab is opened; a failure is not retried on
+        // its own, which is what the reload button in the list is for.
+        .task {
+            guard item.commits.isEmpty, !item.isLoadingCommits, item.commitsError == nil else {
+                return
+            }
+            await store.loadCommits(item, project: project, pr: pr)
+        }
+    }
+
+    @ViewBuilder
+    private var commitList: some View {
+        if item.isLoadingCommits && item.commits.isEmpty {
+            ProgressView("Loading commits…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if item.commits.isEmpty {
+            ContentUnavailableView {
+                Label("No commits", systemImage: "clock.arrow.circlepath")
+            } description: {
+                Text(item.commitsError ?? "This pull request has no commits.")
+            } actions: {
+                Button("Try Again") {
+                    Task { await store.loadCommits(item, project: project, pr: pr) }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .pointerCursor()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(item.commits) { commit in
+                        CommitRow(commit: commit) {
+                            Task {
+                                await store.showCommit(commit, on: item, project: project, pr: pr)
+                            }
+                        }
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(Color(nsColor: AppColors.viewerBackground))
+        }
+    }
+
+    /// One commit: its message and who wrote it, above the patch itself.
+    private func commitDetail(_ commit: PullRequestCommit) -> some View {
+        VStack(spacing: 0) {
+            commitDetailBar(commit)
+                .background(.bar)
+            Divider()
+
+            if let diff = item.commitDiffs[commit.sha], !diff.isEmpty {
+                DiffView(
+                    diff: diff,
+                    layout: Binding(get: { item.diffLayout }, set: { item.diffLayout = $0 }),
+                    selectedFile: Binding(
+                        get: { item.commitDiffFile },
+                        set: { item.commitDiffFile = $0 }
+                    )
+                )
+            } else if item.isLoadingCommitDiff {
+                ProgressView("Loading changes…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ContentUnavailableView(
+                    "No changes",
+                    systemImage: "plusminus",
+                    description: Text(
+                        item.commitDiffError ?? "This commit has no textual changes."
+                    )
+                )
+            }
+        }
+    }
+
+    private func commitDetailBar(_ commit: PullRequestCommit) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Button {
+                    item.selectedCommit = nil
+                } label: {
+                    Label("Commits", systemImage: "chevron.left")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Back to the list of commits")
+                .pointerCursor()
+
+                Text(commit.shortSHA)
+                    .font(.caption.monospaced())
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+
+                barButton("doc.on.doc", help: "Copy “\(commit.shortSHA)”") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(commit.sha, forType: .string)
+                    store.showStatus("Commit hash copied")
+                }
+                if let url = commit.url {
+                    barButton("safari", help: "Open this commit on \(pr.host.displayName)") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                Text(commit.author)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let date = commit.date {
+                    Text(date.formatted(.relative(presentation: .named)))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            Text(commit.headline)
+                .font(.callout.weight(.medium))
+                .lineLimit(2)
+            if !commit.body.isEmpty {
+                Text(commit.body)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(4)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, AppMetrics.barHorizontalPadding)
+        .padding(.vertical, 7)
     }
 
     private func branchChip(_ name: String) -> some View {
@@ -522,6 +929,384 @@ struct CommentThread: View {
     private var totalReplies: Int {
         node.replies.reduce(node.replies.count) { total, reply in
             total + reply.replies.reduce(0) { $0 + 1 + $1.replies.count }
+        }
+    }
+}
+
+// MARK: - Confirming an action
+
+/// One of the things the action bar can do, on its way to being confirmed.
+enum PullRequestAction: Identifiable, Hashable {
+    case merge
+    case review(PullRequestReviewDecision)
+    case reject
+    case updateBranch
+
+    var id: String {
+        switch self {
+        case .merge: "merge"
+        case .review(let decision): "review-\(decision.rawValue)"
+        case .reject: "reject"
+        case .updateBranch: "update-branch"
+        }
+    }
+}
+
+/// The one modal every button in the action bar goes through: what is about to
+/// happen, room to say why, and the last chance to change one's mind.
+///
+/// A single sheet for all of them rather than an alert here and a dialog there,
+/// so nothing reaches the host unconfirmed and every confirmation reads alike.
+struct PullRequestActionSheet: View {
+    let action: PullRequestAction
+    let pr: PullRequest
+    /// Warns on a merge when the branch is behind the one it targets — the host
+    /// may refuse it, and what lands was not reviewed against where the target
+    /// branch is now.
+    let syncState: PullRequestSyncState?
+    @Binding var strategy: PullRequestMergeStrategy
+    let onCancel: () -> Void
+    /// The comment goes with the review or the rejection; a merge and a branch
+    /// update ignore it.
+    let onConfirm: (String) -> Void
+
+    /// Local to the sheet, so every confirmation starts on an empty box.
+    @State private var comment = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+
+            if case .merge = action {
+                VStack(spacing: 7) {
+                    ForEach(PullRequestMergeStrategy.allCases) { option in
+                        choice(option)
+                    }
+                }
+            }
+
+            Text(explanation)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let prompt = commentPrompt {
+                commentBox(prompt)
+            }
+
+            if case .merge = action, let syncState, syncState.isBehind {
+                Label(
+                    syncState.summary(target: pr.targetBranch)
+                        + " Update the branch first if the host refuses.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                    .pointerCursor()
+                Button(confirmTitle) { onConfirm(comment) }
+                    .buttonStyle(.borderedProminent)
+                    .tint(tint)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canConfirm)
+                    .pointerCursor(canConfirm)
+            }
+        }
+        .padding(18)
+        .frame(width: 440)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(title, systemImage: symbol)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(tint == .accentColor ? .primary : tint)
+            HStack(spacing: 5) {
+                Text(pr.sourceBranch)
+                Image(systemName: "arrow.right")
+                Text(pr.targetBranch)
+            }
+            .font(.caption.monospaced())
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func commentBox(_ prompt: String) -> some View {
+        TextEditor(text: $comment)
+            .font(.body)
+            .frame(height: 72)
+            .scrollContentBackground(.hidden)
+            .padding(6)
+            .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(alignment: .topLeading) {
+                if comment.isEmpty {
+                    Text(prompt)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 12)
+                        .allowsHitTesting(false)
+                }
+            }
+    }
+
+    /// One way to merge, as a row that reads like what it does.
+    private func choice(_ option: PullRequestMergeStrategy) -> some View {
+        let isSelected = option == strategy
+        return Button {
+            strategy = option
+        } label: {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Label(option.title, systemImage: option.symbol)
+                        .font(.callout.weight(.medium))
+                    Text(option.detail(target: pr.targetBranch))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .background(
+                .quaternary.opacity(isSelected ? 0.4 : 0.18),
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    // MARK: - What this sheet is asking
+
+    private var title: String {
+        switch action {
+        case .merge: "Merge #\(pr.number)"
+        case .review(let decision): "\(decision.title) on #\(pr.number)"
+        case .reject: "Reject #\(pr.number)"
+        case .updateBranch: "Update \(pr.sourceBranch)"
+        }
+    }
+
+    private var symbol: String {
+        switch action {
+        case .merge: "arrow.triangle.merge"
+        case .review(let decision): decision.symbol
+        case .reject: "xmark.circle"
+        case .updateBranch: "arrow.down.to.line"
+        }
+    }
+
+    private var tint: Color {
+        switch action {
+        case .merge: .accentColor
+        case .review(let decision): decision == .approve ? .green : .orange
+        case .reject: .red
+        case .updateBranch: .orange
+        }
+    }
+
+    private var explanation: String {
+        switch action {
+        case .merge:
+            "The source branch is left alone; nothing is deleted."
+        case .review(.approve):
+            "Your approval is posted on \(pr.host.displayName), with the comment if you write one."
+        case .review(.requestChanges):
+            "Posted on \(pr.host.displayName) as a review asking for changes. It needs a comment saying what."
+        case .reject:
+            pr.host == .github
+                ? "Closed without merging. It can be reopened on GitHub, and the source branch is left alone."
+                : "Declined without merging. It can be reopened on Bitbucket, and the source branch is left alone."
+        case .updateBranch:
+            pr.host == .github
+                ? "GitHub merges \(pr.targetBranch) into the pull request's branch. Your checkout is not touched."
+                : "Bitbucket cannot do this on the server, so it runs in your checkout: fetch \(pr.targetBranch), merge it into \(pr.sourceBranch), and push. The branch must be checked out with nothing uncommitted."
+        }
+    }
+
+    /// The placeholder in the comment box, or nil when this action takes none.
+    private var commentPrompt: String? {
+        switch action {
+        case .review(let decision):
+            decision.needsComment ? "What needs changing" : "Comment (optional)"
+        case .reject:
+            "Reason (optional)"
+        case .merge, .updateBranch:
+            nil
+        }
+    }
+
+    private var confirmTitle: String {
+        switch action {
+        case .merge: strategy.title
+        case .review(let decision): decision.title
+        case .reject: "Reject Pull Request"
+        case .updateBranch: "Update Branch"
+        }
+    }
+
+    /// Only "request changes" insists on something being written first.
+    private var canConfirm: Bool {
+        guard case .review(let decision) = action, decision.needsComment else { return true }
+        return !comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+// MARK: - Commits
+
+/// One line of the commit list: hash, message, and who wrote it when. Clicking
+/// anywhere on it opens that commit's own diff.
+struct CommitRow: View {
+    let commit: PullRequestCommit
+    let onOpen: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(alignment: .top, spacing: 9) {
+                Text(commit.shortSHA)
+                    .font(.caption.monospaced())
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(commit.headline)
+                        .font(.callout)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    HStack(spacing: 6) {
+                        Text(commit.author)
+                        if let date = commit.date {
+                            Text(date.formatted(.relative(presentation: .named)))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 6)
+
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .background(
+                .quaternary.opacity(isHovering ? 0.34 : 0.22),
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .pointerCursor()
+        .help("Show what \(commit.shortSHA) changed")
+    }
+}
+
+/// One CI run: how it ended, what it is called, and the way to its log.
+///
+/// The whole row opens the log on the host — the arrow at its end is a sign of
+/// where it goes, not the only thing that goes there. A build the host gave no
+/// page for stays a plain row, since there would be nothing to open.
+struct BuildRow: View {
+    let build: PullRequestBuild
+
+    @State private var isHovering = false
+
+    var body: some View {
+        if let url = build.url {
+            Button {
+                NSWorkspace.shared.open(url)
+            } label: {
+                content
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovering = $0 }
+            .pointerCursor()
+            .help("Open \(build.name) on \(build.url?.host() ?? "the host")")
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: build.state.symbol)
+                .foregroundStyle(color)
+                .font(.callout)
+                // Steady width, so the names line up down a mixed list rather
+                // than shifting with each glyph.
+                .frame(width: 16)
+                // A running job says so by moving; the rest are still.
+                .symbolEffect(.pulse, isActive: build.state == .running)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(build.name)
+                    .font(.callout)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                HStack(spacing: 6) {
+                    Text(build.state.title)
+                        .foregroundStyle(color)
+                    if let detail = build.detail {
+                        Text(detail).lineLimit(1)
+                    }
+                    if let duration = build.durationLabel {
+                        Text(duration).foregroundStyle(.tertiary)
+                    }
+                    if let started = build.startedAt {
+                        Text(started.formatted(.relative(presentation: .named)))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 6)
+
+            if build.url != nil {
+                Image(systemName: "arrow.up.forward.app")
+                    .font(.callout)
+                    .foregroundStyle(isHovering ? .secondary : .tertiary)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            .quaternary.opacity(isHovering ? 0.34 : 0.22),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+    }
+
+    private var color: Color {
+        switch build.state {
+        case .passed: .green
+        case .failed: .red
+        case .running: .blue
+        case .pending: .orange
+        case .cancelled, .skipped, .unknown: .secondary
         }
     }
 }

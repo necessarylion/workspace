@@ -64,6 +64,12 @@ struct DiffRow: Sendable, Hashable, Identifiable {
     var newNumber: Int?
     var newText: String?
 
+    /// The parts of a `changed` row that actually differ, as character offsets
+    /// into `oldText` / `newText`. Empty for every other kind of row, and for a
+    /// pair too dissimilar for the distinction to mean anything.
+    var oldWordRanges: [Range<Int>] = []
+    var newWordRanges: [Range<Int>] = []
+
     // Syntax-coloured versions, filled in by DiffHighlighter after parsing.
     var oldHighlighted: AttributedString?
     var newHighlighted: AttributedString?
@@ -98,6 +104,10 @@ enum DiffParser {
                     if removed != nil && added != nil { return .changed }
                     return removed != nil ? .removed : .added
                 }()
+                // Only a paired line has a counterpart to be compared against.
+                let words: (old: [Range<Int>], new: [Range<Int>]) = kind == .changed
+                    ? InlineDiff.ranges(old: removed?.1 ?? "", new: added?.1 ?? "")
+                    : ([], [])
                 currentHunk?.rows.append(
                     DiffRow(
                         id: rowID(),
@@ -105,7 +115,9 @@ enum DiffParser {
                         oldNumber: removed?.0,
                         oldText: removed?.1,
                         newNumber: added?.0,
-                        newText: added?.1
+                        newText: added?.1,
+                        oldWordRanges: words.old,
+                        newWordRanges: words.new
                     )
                 )
             }

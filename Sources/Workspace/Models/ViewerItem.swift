@@ -10,15 +10,19 @@ final class ViewerItem: Identifiable {
     enum Kind: Hashable {
         case file(URL)
         case workingDiff(projectID: URL, path: String, isUntracked: Bool)
+        case commit(projectID: URL, sha: String)
         case pullRequest(projectID: URL, number: Int)
-        case terminal(projectID: URL)
+        /// Shells. A `nil` project is the window-wide terminal — shells that
+        /// belong to no repository, rooted in the home folder.
+        case terminal(projectID: URL?)
 
         var key: String {
             switch self {
             case .file(let url): "file:\(url.path)"
             case .workingDiff(let project, let path, _): "diff:\(project.path):\(path)"
+            case .commit(let project, let sha): "commit:\(project.path):\(sha)"
             case .pullRequest(let project, let number): "pr:\(project.path):\(number)"
-            case .terminal(let project): "term:\(project.path)"
+            case .terminal(let project): "term:\(project?.path ?? "~")"
             }
         }
     }
@@ -27,13 +31,14 @@ final class ViewerItem: Identifiable {
     /// than in the view because the picker sits up in the window header, next to
     /// back and forward, and each pull request remembers where you left it.
     enum PullRequestTab: String, CaseIterable, Identifiable {
-        case details, diff, builds
+        case details, diff, commits, builds
         var id: String { rawValue }
 
         var title: String {
             switch self {
             case .details: "Details"
             case .diff: "Diff"
+            case .commits: "Commits"
             case .builds: "Builds"
             }
         }
@@ -42,6 +47,7 @@ final class ViewerItem: Identifiable {
             switch self {
             case .details: "bubble.left.and.bubble.right"
             case .diff: "plusminus"
+            case .commits: "clock.arrow.circlepath"
             case .builds: "hammer"
             }
         }
@@ -77,9 +83,45 @@ final class ViewerItem: Identifiable {
     var isPostingComment = false
     var commentError: String?
 
+    // Pull request commits. The tab shows the list until a commit is picked,
+    // and that commit's own diff afterwards.
+    var commits: [PullRequestCommit] = []
+    var isLoadingCommits = false
+    var commitsError: String?
+    var selectedCommit: PullRequestCommit? {
+        // A commit's patch is its own diff, so the file being read there is not
+        // the file being read in the Diff tab — and it means nothing once a
+        // different commit is open.
+        didSet { commitDiffFile = nil }
+    }
+
+    /// The file picked in a commit's own diff. Separate from `diffFile`: the
+    /// pull request's diff and one commit's are different sets of files.
+    var commitDiffFile: DiffFile.ID?
+
+    // Pull request builds: the CI runs on its head commit.
+    var builds: [PullRequestBuild] = []
+    var isLoadingBuilds = false
+    var buildsError: String?
+    /// Patches already fetched, keyed by hash: a commit does not change, so
+    /// stepping back and forth through the list costs one load each.
+    var commitDiffs: [String: Diff] = [:]
+    var isLoadingCommitDiff = false
+    var commitDiffError: String?
+
+    // How far the pull request's branch has drifted from the branch it targets,
+    // and whether a merge, a rejection or a sync is running right now.
+    var syncState: PullRequestSyncState?
+    var isCheckingSync = false
+    var isRunningPullRequestAction = false
+
     var isLoading = false
     var errorMessage: String?
     var diffLayout: DiffLayout = .split
+    /// Which file of a multi-file diff is on screen; nil shows every file. It
+    /// belongs to the item rather than to the view so that leaving the Diff tab
+    /// of a pull request and coming back returns to the file being reviewed.
+    var diffFile: DiffFile.ID?
     var pullRequestTab: PullRequestTab = .details
 
     nonisolated var id: String { kind.key }
@@ -88,6 +130,7 @@ final class ViewerItem: Identifiable {
         switch kind {
         case .file(let url): url
         case .workingDiff(let project, _, _): project
+        case .commit(let project, _): project
         case .pullRequest(let project, _): project
         case .terminal(let project): project
         }
@@ -97,6 +140,7 @@ final class ViewerItem: Identifiable {
         switch kind {
         case .file(let url): FileIcon.symbol(for: url)
         case .workingDiff: "plusminus"
+        case .commit: "clock.arrow.circlepath"
         case .pullRequest: "arrow.triangle.pull"
         case .terminal: "terminal"
         }
@@ -106,6 +150,13 @@ final class ViewerItem: Identifiable {
 
     nonisolated var isPullRequest: Bool {
         if case .pullRequest = kind { true } else { false }
+    }
+
+    /// The full hash of the commit on screen, for the header's copy button. The
+    /// breadcrumb only shows the short form, which is not what a `git` command
+    /// or a ticket wants pasted into it.
+    nonisolated var commitSHA: String? {
+        if case .commit(_, let sha) = kind { sha } else { nil }
     }
 
     /// Terminals are the one item the store never throws away on its own.

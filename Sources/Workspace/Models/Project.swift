@@ -16,7 +16,27 @@ final class Project: Identifiable {
     let root: FileNode
     var remote: RemoteInfo?
     var gitStatus: GitStatus?
-    var headCommit: Commit?
+
+    /// The newest commits on the checked-out branch, newest first. The dashboard
+    /// lists them by day; the Info panel only wants the first one.
+    var recentCommits: [RepositoryCommit] = []
+    var isLoadingCommits = false
+    /// Whether git has older commits than the ones read so far.
+    var hasMoreCommits = false
+    /// Set only while “Load older commits” is running, so that button alone goes
+    /// quiet — a plain refresh should not blank the list that is on screen.
+    var isLoadingMoreCommits = false
+
+    /// How deep into the history the dashboard is reading. It grows a page at a
+    /// time and stays there, so a refresh keeps whatever the user loaded.
+    private var commitLimit = RepositoryCommit.pageSize
+
+    /// What the branch is sitting on right now.
+    var headCommit: Commit? {
+        recentCommits.first.map {
+            Commit(hash: $0.shortSHA, subject: $0.headline, author: $0.author, date: $0.date)
+        }
+    }
 
     var pullRequests: [PullRequest] = []
     var pullRequestError: String?
@@ -32,6 +52,10 @@ final class Project: Identifiable {
     /// user has not chosen, so `gh` uses its own active account. Set through
     /// `WorkspaceStore`, which persists it and tells `GitHubAccounts`.
     var gitHubAccount: String?
+
+    /// Starred: the sidebar keeps pinned repositories above the rest, sorted by
+    /// name. Set through `WorkspaceStore`, which persists it and reorders.
+    var isPinned = false
 
     nonisolated var id: URL { url }
     nonisolated var name: String { url.lastPathComponent }
@@ -69,10 +93,10 @@ final class Project: Identifiable {
     func refresh(loadPullRequests: Bool = true) async {
         async let remoteTask = RemoteInfo.load(for: url)
         async let statusTask = GitStatus.load(for: url)
-        async let commitTask = Self.loadHeadCommit(in: url)
+        async let commitTask = RepositoryCommit.load(in: url, limit: commitLimit)
         remote = await remoteTask
         gitStatus = await statusTask
-        headCommit = await commitTask
+        apply(await commitTask)
 
         if loadPullRequests {
             await refreshPullRequests()
@@ -81,7 +105,38 @@ final class Project: Identifiable {
 
     func refreshGitStatus() async {
         gitStatus = await GitStatus.load(for: url)
-        headCommit = await Self.loadHeadCommit(in: url)
+        await refreshCommits()
+    }
+
+    /// Re-reads the history, as deep as it has been read so far. Cheap — it is
+    /// one local `git log` — so the dashboard does it every time it comes back
+    /// on screen, and every git command below does it after running.
+    func refreshCommits() async {
+        isLoadingCommits = true
+        defer { isLoadingCommits = false }
+        apply(await RepositoryCommit.load(in: url, limit: commitLimit))
+    }
+
+    /// Reads one page further back. The whole range is re-read rather than the
+    /// new page alone: a single `git log` is cheap, and it cannot leave a gap in
+    /// the list if the branch moved in between.
+    func loadMoreCommits() async {
+        guard hasMoreCommits, !isLoadingMoreCommits else { return }
+        isLoadingMoreCommits = true
+        defer { isLoadingMoreCommits = false }
+
+        let deeper = commitLimit + RepositoryCommit.pageSize
+        let page = await RepositoryCommit.load(in: url, limit: deeper)
+        // Only keep the deeper limit if the read worked, so a failure does not
+        // leave every later refresh asking for history it never got.
+        guard !page.commits.isEmpty else { return }
+        commitLimit = deeper
+        apply(page)
+    }
+
+    private func apply(_ page: RepositoryCommit.Page) {
+        recentCommits = page.commits
+        hasMoreCommits = page.hasMore
     }
 
     func refreshPullRequests() async {
@@ -234,25 +289,5 @@ final class Project: Identifiable {
         }
         await refreshGitStatus()
         return result.isSuccess
-    }
-
-    private static func loadHeadCommit(in directory: URL) async -> Commit? {
-        // Unit separators keep the fields apart even when a subject has commas.
-        let result = await Shell.run(
-            ["git", "log", "-1", "--format=%h%x1f%s%x1f%an%x1f%aI"],
-            in: directory,
-            timeout: 15
-        )
-        guard result.isSuccess else { return nil }
-        let fields = result.stdout
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .components(separatedBy: "\u{1f}")
-        guard fields.count == 4 else { return nil }
-        return Commit(
-            hash: fields[0],
-            subject: fields[1],
-            author: fields[2],
-            date: ISO8601DateFormatter().date(from: fields[3])
-        )
     }
 }

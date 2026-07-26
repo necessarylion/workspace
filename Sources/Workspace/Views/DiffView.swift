@@ -5,8 +5,11 @@ import SwiftUI
 /// The layout switch belongs to the diff itself, not to the window toolbar —
 /// it only makes sense while a diff is on screen.
 struct DiffView: View {
+    @Environment(WorkspaceStore.self) private var store
     let diff: Diff
     @Binding var layout: ViewerItem.DiffLayout
+    /// The file on screen, or nil for all of them.
+    @Binding var selectedFile: DiffFile.ID?
     /// The pull request view puts the switch in its own bar instead.
     var showsControls = true
     /// What a pull request adds to a diff: the comments already anchored to a
@@ -39,10 +42,39 @@ struct DiffView: View {
 
     private let cornerRadius: CGFloat = 8
 
+    /// The file index is only worth its width when there is more than one file
+    /// to choose between.
+    private var showsFileList: Bool { diff.files.count > 1 && store.showsDiffFiles }
+
+    /// The selection, ignored once the file it named is gone — a diff reloads
+    /// while it is on screen, and a pull request can lose a file between two
+    /// pushes.
+    private var currentFile: DiffFile.ID? {
+        guard let selectedFile, diff.files.contains(where: { $0.id == selectedFile }) else {
+            return nil
+        }
+        return selectedFile
+    }
+
     var body: some View {
+        HStack(spacing: 0) {
+            if showsFileList {
+                DiffFileList(diff: diff, selection: $selectedFile)
+                Divider()
+            }
+            diffBody
+        }
+        .onChange(of: diff.revision, initial: true) { rebuild() }
+        .onChange(of: collapsedFiles) { rebuild() }
+        .onChange(of: composing) { rebuild() }
+        .onChange(of: currentFile) { rebuild() }
+        .onChange(of: comments?.threads ?? [:]) { rebuild() }
+    }
+
+    private var diffBody: some View {
         VStack(spacing: 0) {
             if showsControls {
-                DiffLayoutBar(diff: diff, layout: $layout)
+                DiffLayoutBar(diff: diff, layout: $layout, selectedFile: $selectedFile)
                 Divider()
             }
             // Vertical scrolling only: the diff always fits the window width,
@@ -51,22 +83,27 @@ struct DiffView: View {
                 // Whole points only: a fractional width makes the split
                 // columns land off the pixel grid.
                 let width = max(proxy.size.width - 24, 320).rounded(.down)
-                ScrollView(.vertical) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(flattened.revision == diff.revision ? flattened.elements : []) {
-                            card($0, width: width)
+                ScrollViewReader { scroll in
+                    ScrollView(.vertical) {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(flattened.revision == diff.revision ? flattened.elements : []) {
+                                card($0, width: width)
+                            }
                         }
+                        .padding(12)
+                        .frame(minHeight: proxy.size.height, alignment: .topLeading)
                     }
-                    .padding(12)
-                    .frame(minHeight: proxy.size.height, alignment: .topLeading)
+                    // Picking a file puts a different diff under an unchanged
+                    // scroll offset; without this the new file opens partway
+                    // down, or past its end entirely.
+                    .onChange(of: currentFile) {
+                        guard let first = flattened.elements.first else { return }
+                        scroll.scrollTo(first.id, anchor: .top)
+                    }
                 }
                 .background(Color(nsColor: AppColors.viewerBackground))
             }
         }
-        .onChange(of: diff.revision, initial: true) { rebuild() }
-        .onChange(of: collapsedFiles) { rebuild() }
-        .onChange(of: composing) { rebuild() }
-        .onChange(of: comments?.threads ?? [:]) { rebuild() }
     }
 
     private func rebuild() {
@@ -74,6 +111,7 @@ struct DiffView: View {
             revision: diff.revision,
             elements: DiffElement.flatten(
                 diff,
+                only: currentFile,
                 collapsed: collapsedFiles,
                 anchored: Set((comments?.threads ?? [:]).keys),
                 composing: composing
@@ -274,11 +312,14 @@ private struct DiffElement: Identifiable {
         ID(kind: kind.rawValue, file: Int32(file), hunk: Int32(hunk), row: Int32(row))
     }
 
-    /// `anchored` are the lines that already carry a thread, `composing` the one
-    /// line whose new-comment box is open. Both get an extra element under the
-    /// row they belong to, so the lazy stack can still skip them one by one.
+    /// `only` limits the result to a single file, which is how the file index
+    /// beside the diff narrows it. `anchored` are the lines that already carry a
+    /// thread, `composing` the one line whose new-comment box is open. Both get
+    /// an extra element under the row they belong to, so the lazy stack can
+    /// still skip them one by one.
     static func flatten(
         _ diff: Diff,
+        only: DiffFile.ID? = nil,
         collapsed: Set<DiffFile.ID>,
         anchored: Set<DiffLineAnchor> = [],
         composing: DiffLineAnchor? = nil
@@ -287,6 +328,9 @@ private struct DiffElement: Identifiable {
         elements.reserveCapacity(diff.files.count + diff.addedLines + diff.removedLines)
 
         for (fileIndex, file) in diff.files.enumerated() {
+            // The indices still address `diff.files`, so skipping a file here
+            // costs nothing but the rows it would have built.
+            if let only, file.id != only { continue }
             elements.append(DiffElement(kind: .fileHeader, file: fileIndex, opensCard: true))
             if !collapsed.contains(file.id) {
                 if file.isBinary {
@@ -344,14 +388,39 @@ struct DiffLayoutBar: View {
     @Environment(WorkspaceStore.self) private var store
     let diff: Diff
     @Binding var layout: ViewerItem.DiffLayout
+    @Binding var selectedFile: DiffFile.ID?
 
     var body: some View {
+        @Bindable var store = store
         HStack(spacing: 10) {
+            if diff.files.count > 1 {
+                Toggle(isOn: $store.showsDiffFiles) {
+                    Image(systemName: "sidebar.left")
+                }
+                .toggleStyle(.button)
+                .controlSize(.small)
+                .help(store.showsDiffFiles ? "Hide the file list" : "Show the file list")
+                .pointerCursor()
+            }
+
             DiffLayoutPicker(layout: $layout)
 
-            Text("\(diff.files.count) \(diff.files.count == 1 ? "file" : "files")")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            // While one file is on screen, its name says more than the total.
+            if let file = diff.files.first(where: { $0.id == selectedFile }) {
+                Text("1 of \(diff.files.count) files")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Show All") { selectedFile = nil }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                    .help("Show every file in this diff again")
+                    .pointerCursor()
+                    .accessibilityLabel("Show all files, currently showing \(file.displayPath)")
+            } else {
+                Text("\(diff.files.count) \(diff.files.count == 1 ? "file" : "files")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             if let project = projectOfSingleFileDiff {
                 Button {
@@ -409,6 +478,116 @@ struct DiffLayoutPicker: View {
     }
 }
 
+/// The index down the side of a diff: every file it touches, and which one is
+/// being read.
+///
+/// Selecting a file renders that file alone. A pull request that touches
+/// seventeen files is seventeen files of rows in one scroll otherwise, and
+/// there is no way back to the top of a file once past it.
+struct DiffFileList: View {
+    let diff: Diff
+    @Binding var selection: DiffFile.ID?
+
+    var body: some View {
+        List(selection: $selection) {
+            Section {
+                ForEach(diff.files) { file in
+                    row(file).tag(file.id)
+                }
+            } header: {
+                allFiles
+            }
+        }
+        .listStyle(.sidebar)
+        .frame(width: 232)
+        .environment(\.defaultMinListRowHeight, 24)
+    }
+
+    /// The way back to the whole diff, kept at the top of the list rather than
+    /// hidden in the bar — it is the state the list starts in.
+    private var allFiles: some View {
+        Button {
+            selection = nil
+        } label: {
+            HStack(spacing: 6) {
+                Text("All Files")
+                Spacer(minLength: 4)
+                Text("\(diff.files.count)")
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            .font(.caption.weight(selection == nil ? .semibold : .regular))
+            .foregroundStyle(selection == nil ? Color.accentColor : .primary)
+            // A section header runs closer to the edge than the rows under it,
+            // which left the count against the divider.
+            .padding(.trailing, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    private func row(_ file: DiffFile) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: file.changeSymbol)
+                .font(.caption2)
+                .foregroundStyle(file.changeColor)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(name(of: file))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                // The folder only when there is one, and truncated from the
+                // front: the end of a path is what tells two files apart.
+                if let folder = folder(of: file) {
+                    Text(folder)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+            }
+            Spacer(minLength: 4)
+            if file.addedLines > 0 {
+                Text("+\(file.addedLines)").foregroundStyle(.green)
+            }
+            if file.removedLines > 0 {
+                Text("−\(file.removedLines)").foregroundStyle(.red)
+            }
+        }
+        .font(.caption.monospacedDigit())
+        .help(file.displayPath)
+    }
+
+    private func name(of file: DiffFile) -> String {
+        String(file.newPath.split(separator: "/").last ?? Substring(file.newPath))
+    }
+
+    private func folder(of file: DiffFile) -> String? {
+        let parts = file.newPath.split(separator: "/").dropLast()
+        return parts.isEmpty ? nil : parts.joined(separator: "/")
+    }
+}
+
+extension DiffFile {
+    var changeSymbol: String {
+        switch change {
+        case .added: "plus.square.fill"
+        case .deleted: "minus.square.fill"
+        case .renamed: "arrow.right.square.fill"
+        case .modified: "square.fill.on.square.fill"
+        }
+    }
+
+    var changeColor: Color {
+        switch change {
+        case .added: .green
+        case .deleted: .red
+        case .renamed: .blue
+        case .modified: .orange
+        }
+    }
+}
+
 /// The top line of a file's card, and the fold control for the whole file.
 struct DiffFileHeader: View {
     let file: DiffFile
@@ -427,8 +606,8 @@ struct DiffFileHeader: View {
                     // removes thousands of rows, and animating that is exactly
                     // the work the lazy stack exists to avoid.
                     .animation(.easeInOut(duration: 0.15), value: isCollapsed)
-                Image(systemName: changeSymbol)
-                    .foregroundStyle(changeColor)
+                Image(systemName: file.changeSymbol)
+                    .foregroundStyle(file.changeColor)
                 Text(file.displayPath)
                     .font(.system(.callout, design: .monospaced).weight(.medium))
                     .lineLimit(1)
@@ -450,24 +629,6 @@ struct DiffFileHeader: View {
         .buttonStyle(.plain)
         .help(isCollapsed ? "Show the changes in this file" : "Hide the changes in this file")
         .pointerCursor()
-    }
-
-    private var changeSymbol: String {
-        switch file.change {
-        case .added: "plus.square.fill"
-        case .deleted: "minus.square.fill"
-        case .renamed: "arrow.right.square.fill"
-        case .modified: "square.fill.on.square.fill"
-        }
-    }
-
-    private var changeColor: Color {
-        switch file.change {
-        case .added: .green
-        case .deleted: .red
-        case .renamed: .blue
-        case .modified: .orange
-        }
     }
 }
 
@@ -493,18 +654,8 @@ struct SplitDiffRow: View {
         // consecutive coloured bands. The unified layout has one cell per row
         // and so never showed it.
         HStack(alignment: .top, spacing: 0) {
-            cell(
-                number: row.oldNumber,
-                text: row.oldHighlighted ?? AttributedString(row.oldText ?? ""),
-                side: .old,
-                width: oldWidth
-            )
-            cell(
-                number: row.newNumber,
-                text: row.newHighlighted ?? AttributedString(row.newText ?? ""),
-                side: .new,
-                width: newWidth
-            )
+            cell(number: row.oldNumber, text: text(for: .old), side: .old, width: oldWidth)
+            cell(number: row.newNumber, text: text(for: .new), side: .new, width: newWidth)
         }
         .fixedSize(horizontal: false, vertical: true)
         // Drawn over the seam rather than stacked between the cells: a
@@ -518,6 +669,19 @@ struct SplitDiffRow: View {
     }
 
     private typealias Side = PullRequestComment.Side
+
+    /// The column's text, with the words that differ from the other column
+    /// picked out.
+    private func text(for side: Side) -> AttributedString {
+        switch side {
+        case .old:
+            (row.oldHighlighted ?? AttributedString(row.oldText ?? ""))
+                .markingWords(row.oldWordRanges, with: DiffColors.removedWord)
+        case .new:
+            (row.newHighlighted ?? AttributedString(row.newText ?? ""))
+                .markingWords(row.newWordRanges, with: DiffColors.addedWord)
+        }
+    }
 
     @ViewBuilder
     private func cell(
@@ -558,11 +722,11 @@ struct SplitDiffRow: View {
         case .context:
             .clear
         case .added:
-            side == .new ? .green.opacity(0.16) : .clear
+            side == .new ? DiffColors.addedLine : .clear
         case .removed:
-            side == .old ? .red.opacity(0.16) : .clear
+            side == .old ? DiffColors.removedLine : .clear
         case .changed:
-            side == .old ? .red.opacity(0.16) : .green.opacity(0.16)
+            side == .old ? DiffColors.removedLine : DiffColors.addedLine
         }
     }
 }
@@ -575,8 +739,15 @@ struct UnifiedDiffRows: View {
 
     @State private var hovered: PullRequestComment.Side?
 
-    private var oldText: AttributedString { row.oldHighlighted ?? AttributedString(row.oldText ?? "") }
-    private var newText: AttributedString { row.newHighlighted ?? AttributedString(row.newText ?? "") }
+    private var oldText: AttributedString {
+        (row.oldHighlighted ?? AttributedString(row.oldText ?? ""))
+            .markingWords(row.oldWordRanges, with: DiffColors.removedWord)
+    }
+
+    private var newText: AttributedString {
+        (row.newHighlighted ?? AttributedString(row.newText ?? ""))
+            .markingWords(row.newWordRanges, with: DiffColors.addedWord)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -586,12 +757,12 @@ struct UnifiedDiffRows: View {
                 // which is what the reviewer is looking at.
                 line(marker: " ", number: row.oldNumber, text: oldText, color: .clear, side: .new)
             case .removed:
-                line(marker: "−", number: row.oldNumber, text: oldText, color: .red.opacity(0.16), side: .old)
+                line(marker: "−", number: row.oldNumber, text: oldText, color: DiffColors.removedLine, side: .old)
             case .added:
-                line(marker: "+", number: row.newNumber, text: newText, color: .green.opacity(0.16), side: .new)
+                line(marker: "+", number: row.newNumber, text: newText, color: DiffColors.addedLine, side: .new)
             case .changed:
-                line(marker: "−", number: row.oldNumber, text: oldText, color: .red.opacity(0.16), side: .old)
-                line(marker: "+", number: row.newNumber, text: newText, color: .green.opacity(0.16), side: .new)
+                line(marker: "−", number: row.oldNumber, text: oldText, color: DiffColors.removedLine, side: .old)
+                line(marker: "+", number: row.newNumber, text: newText, color: DiffColors.addedLine, side: .new)
             }
         }
     }
@@ -627,6 +798,54 @@ struct UnifiedDiffRows: View {
             guard onComment != nil else { return }
             hovered = isInside ? side : (hovered == side ? nil : hovered)
         }
+    }
+}
+
+/// The two tiers of diff colour.
+///
+/// A changed line gets the wash; the words inside it that actually differ get
+/// the stronger block on top, the way GitHub and VS Code both show it. A line
+/// that was purely added or removed has no counterpart to compare against and
+/// keeps the wash alone.
+///
+/// The values are opaque and darker than the card behind them, rather than a
+/// translucent bright red or green. A translucent wash lifts the background
+/// towards the syntax colours sitting on it and leaves the code looking washed
+/// out; going deeper instead buys contrast back, which is also how both editors
+/// tint a diff on a dark theme.
+enum DiffColors {
+    static let addedLine = Color(red: 0.11, green: 0.20, blue: 0.14)
+    static let addedWord = Color(red: 0.16, green: 0.36, blue: 0.22)
+    static let removedLine = Color(red: 0.24, green: 0.12, blue: 0.13)
+    static let removedWord = Color(red: 0.44, green: 0.17, blue: 0.18)
+}
+
+extension AttributedString {
+    /// Paints `ranges` — offsets in characters — with a background colour,
+    /// leaving the syntax colouring underneath untouched.
+    func markingWords(_ ranges: [Range<Int>], with color: Color) -> AttributedString {
+        guard !ranges.isEmpty else { return self }
+        var result = self
+        for range in ranges {
+            // Re-read the view each time: the loop only changes attributes, but
+            // the ranges come from the parser and the text from the highlighter,
+            // so a mismatch has to fall through rather than trap.
+            let characters = result.characters
+            guard let lower = characters.index(
+                    characters.startIndex,
+                    offsetBy: range.lowerBound,
+                    limitedBy: characters.endIndex
+                  ),
+                  let upper = characters.index(
+                    lower,
+                    offsetBy: range.count,
+                    limitedBy: characters.endIndex
+                  ),
+                  lower < upper
+            else { continue }
+            result[lower..<upper].backgroundColor = color
+        }
+        return result
     }
 }
 

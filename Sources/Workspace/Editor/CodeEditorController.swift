@@ -63,6 +63,10 @@ final class CodeEditorController: NSViewController {
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
+        // Both axes stay enabled so the scroll view keeps handling them; the
+        // scrollers themselves are invisible, like everywhere else in the app.
+        scrollView.verticalScroller = HiddenScroller()
+        scrollView.horizontalScroller = HiddenScroller()
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = true
         scrollView.backgroundColor = theme.background

@@ -110,12 +110,13 @@ final class CodeTextView: NSTextView {
                 )
                 isHorizontallyResizable = false
                 frame.size.width = scrollView.contentSize.width
-                scrollView.hasHorizontalScroller = false
             } else {
                 textContainer.size = CGSize(width: 10_000_000, height: CGFloat.greatestFiniteMagnitude)
                 isHorizontallyResizable = true
-                scrollView.hasHorizontalScroller = true
             }
+            // The horizontal scroller stays enabled either way: it is a
+            // `HiddenScroller`, so it costs no space, and toggling it off would
+            // have AppKit replace it with a stock one when wrapping is turned off.
             needsLayout = true
         }
     }

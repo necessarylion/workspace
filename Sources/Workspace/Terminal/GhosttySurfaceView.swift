@@ -205,7 +205,8 @@ final class GhosttySurfaceView: NSView {
         key.composing = false
         key.unshifted_codepoint = 0
         if let unshifted = event.characters(byApplyingModifiers: []) ?? event.charactersIgnoringModifiers,
-           let scalar = unshifted.unicodeScalars.first {
+           let scalar = unshifted.unicodeScalars.first,
+           !Self.isFunctionKey(scalar) {
             key.unshifted_codepoint = scalar.value
         }
 
@@ -216,7 +217,9 @@ final class GhosttySurfaceView: NSView {
         let isText = action != GHOSTTY_ACTION_RELEASE
             && !event.modifierFlags.contains(.command)
             && !text.isEmpty
-            && text.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value != 0x7F }
+            && text.unicodeScalars.allSatisfy {
+                $0.value >= 0x20 && $0.value != 0x7F && !Self.isFunctionKey($0)
+            }
 
         if isText {
             // The translation consumed shift/alt to produce the character.
@@ -227,6 +230,16 @@ final class GhosttySurfaceView: NSView {
             }
         }
         return ghostty_surface_key(surface, key)
+    }
+
+    /// macOS reports the arrows, F-keys, Home/End, Page Up/Down and forward
+    /// delete as characters in the Unicode private use area
+    /// (`NSUpArrowFunctionKey` = U+F700 and its neighbours). They are not text:
+    /// ghostty builds their escape sequence from the keycode itself, and
+    /// passing the character along as well made the shell print one stray glyph
+    /// per press instead of walking the history.
+    private static func isFunctionKey(_ scalar: Unicode.Scalar) -> Bool {
+        (0xF700...0xF8FF).contains(scalar.value)
     }
 
     private static func mods(from flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {

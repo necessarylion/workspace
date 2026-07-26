@@ -15,8 +15,15 @@ final class TerminalSession: Identifiable {
     var lastUsedAt = Date()
     /// Called when the shell exits or ghostty asks to close the surface.
     @ObservationIgnored var onExit: (() -> Void)?
+    /// Called when the shell renames the tab, so the saved list can keep up.
+    @ObservationIgnored var onTitleChange: (() -> Void)?
     @ObservationIgnored let view: GhosttySurfaceView
     private var hasStarted = false
+
+    /// Whether the shell behind this tab exists yet. A tab restored from the
+    /// last run of the app is listed straight away but only starts its shell
+    /// when it is first shown.
+    var isRunning: Bool { hasStarted }
 
     init(directory: URL, title: String) {
         self.directory = directory
@@ -24,6 +31,7 @@ final class TerminalSession: Identifiable {
         self.view = GhosttySurfaceView()
         view.onTitleChange = { [weak self] title in
             self?.title = title
+            self?.onTitleChange?()
         }
         view.onClose = { [weak self] in
             self?.onExit?()
@@ -75,6 +83,17 @@ final class TerminalSession: Identifiable {
 struct RecentTerminal: Identifiable {
     let session: TerminalSession
     let item: ViewerItem
+    /// Its place among its own item's tabs, from 1. Shells in the same folder
+    /// end up with the same name once the prompt renames them, so the list needs
+    /// something to tell them apart by.
+    let position: Int
 
     nonisolated var id: UUID { session.id }
+}
+
+/// Which folder a list of shells is about. A repository's shells and the ones
+/// in the home folder are kept apart — one list, one scope.
+enum TerminalScope: Equatable {
+    case project(URL)
+    case home
 }

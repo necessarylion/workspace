@@ -26,97 +26,21 @@ final class LanguageServerRegistry {
 
     private init() {}
 
-    /// Every language we know how to serve. `swift` uses Xcode's own copy of
-    /// sourcekit-lsp, which is always present on a machine with Xcode.
+    /// Every language we know how to serve, as Settings currently has it —
+    /// ``LanguageServerCatalog`` holds the defaults and the user's changes.
     static func definition(for language: CodeLanguage) -> LanguageServerDefinition? {
-        switch language.id {
-        case .swift:
-            .init(executable: "sourcekit-lsp", command: "sourcekit-lsp", languageID: "swift")
-        case .objc:
-            .init(executable: "clangd", command: "clangd --background-index", languageID: "objective-c")
-        case .c:
-            .init(executable: "clangd", command: "clangd --background-index", languageID: "c")
-        case .cpp:
-            .init(executable: "clangd", command: "clangd --background-index", languageID: "cpp")
-        case .typescript:
-            .init(
-                executable: "typescript-language-server",
-                command: "typescript-language-server --stdio",
-                languageID: "typescript"
-            )
-        case .tsx:
-            .init(
-                executable: "typescript-language-server",
-                command: "typescript-language-server --stdio",
-                languageID: "typescriptreact"
-            )
-        case .javascript:
-            .init(
-                executable: "typescript-language-server",
-                command: "typescript-language-server --stdio",
-                languageID: "javascript"
-            )
-        case .jsx:
-            .init(
-                executable: "typescript-language-server",
-                command: "typescript-language-server --stdio",
-                languageID: "javascriptreact"
-            )
-        case .python:
-            .init(executable: "pyright-langserver", command: "pyright-langserver --stdio", languageID: "python")
-        case .go:
-            .init(executable: "gopls", command: "gopls", languageID: "go")
-        case .rust:
-            .init(executable: "rust-analyzer", command: "rust-analyzer", languageID: "rust")
-        case .ruby:
-            .init(executable: "solargraph", command: "solargraph stdio", languageID: "ruby")
-        case .php:
-            .init(executable: "intelephense", command: "intelephense --stdio", languageID: "php")
-        case .dart:
-            .init(executable: "dart", command: "dart language-server --protocol=lsp", languageID: "dart")
-        case .lua:
-            .init(executable: "lua-language-server", command: "lua-language-server", languageID: "lua")
-        case .kotlin:
-            .init(executable: "kotlin-language-server", command: "kotlin-language-server", languageID: "kotlin")
-        case .json:
-            .init(
-                executable: "vscode-json-language-server",
-                command: "vscode-json-language-server --stdio",
-                languageID: "json"
-            )
-        case .yaml:
-            .init(
-                executable: "yaml-language-server",
-                command: "yaml-language-server --stdio",
-                languageID: "yaml"
-            )
-        case .html:
-            .init(
-                executable: "vscode-html-language-server",
-                command: "vscode-html-language-server --stdio",
-                languageID: "html"
-            )
-        case .css:
-            .init(
-                executable: "vscode-css-language-server",
-                command: "vscode-css-language-server --stdio",
-                languageID: "css"
-            )
-        case .bash:
-            .init(
-                executable: "bash-language-server",
-                command: "bash-language-server start",
-                languageID: "shellscript"
-            )
-        default:
-            nil
-        }
+        guard let entry = LanguageServerCatalog.shared.entry(for: language) else { return nil }
+        return LanguageServerDefinition(
+            executable: entry.executable,
+            command: entry.command,
+            languageID: entry.languageID
+        )
     }
 
     /// The service for a file, or nil when no server is defined for its language.
     func service(for language: CodeLanguage, root: URL) -> LanguageService? {
         guard let definition = Self.definition(for: language) else { return nil }
-        let key = "\(root.path)|\(definition.languageID)"
+        let key = Self.key(root: root, language: language.id.rawValue)
         if let existing = services[key] { return existing }
         let service = LanguageService(definition: definition, root: root)
         services[key] = service
@@ -142,5 +66,22 @@ final class LanguageServerRegistry {
             service.shutdown()
             services[key] = nil
         }
+    }
+
+    /// Stops the servers for one language, in every project.
+    ///
+    /// A running server was launched from the command line as it read then, so
+    /// editing that command in Settings has to end the old process; the next
+    /// file opened starts it again from the new entry.
+    func shutdownServices(forLanguage language: String) {
+        let suffix = "|\(language)"
+        for (key, service) in services where key.hasSuffix(suffix) {
+            service.shutdown()
+            services[key] = nil
+        }
+    }
+
+    private static func key(root: URL, language: String) -> String {
+        "\(root.path)|\(language)"
     }
 }

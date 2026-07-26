@@ -39,15 +39,18 @@ final class WorkspaceStore {
     // Projects (right sidebar)
     var projects: [Project] = []
     var selectedProjectID: URL?
+    /// Filter for the repositories sidebar. Only narrows what is listed — the
+    /// stored order and the selection are left alone.
+    var projectSearchText = ""
 
     // Navigator (right sidebar)
     var navigatorTab: NavigatorTab = .files
     var fileSearchText = ""
 
-    /// Whether the file tree lists what `.gitignore` covers. On by default —
-    /// those files are still part of the folder — and the files pane has a
-    /// toggle for the times they are only noise.
-    var showsIgnoredFiles = true
+    /// Whether the file tree lists what `.gitignore` covers. Off by default —
+    /// build output and caches bury the files actually worked on — and the files
+    /// pane has a toggle for the times one of them is wanted.
+    var showsIgnoredFiles = false
 
     // Panel visibility, so the View menu can reach it too.
     var showsProjects = true
@@ -94,6 +97,10 @@ final class WorkspaceStore {
     /// Render Markdown files instead of editing them.
     var markdownPreview = false
     var wrapsLines = false
+    /// Show the file index beside a diff that touches more than one file. A
+    /// window-wide preference rather than a per-diff one: it is a way of
+    /// working, not a property of the pull request being read.
+    var showsDiffFiles = true
     /// The toast at the bottom of the window. Set it through `showStatus` or
     /// `showError` so the kind is never left over from the message before.
     var statusMessage: StatusToast?
@@ -117,11 +124,16 @@ final class WorkspaceStore {
     private var gitHubAccountQueue: [URL] = []
 
     private let projectsDefaultsKey = "workspace.projects"
+    private let pinnedProjectsDefaultsKey = "workspace.pinnedProjects"
     private let gitHubAccountsDefaultsKey = "workspace.githubAccounts"
+    private let terminalsDefaultsKey = "workspace.terminals"
     private let historyLimit = 40
+    /// Pending write of the terminal list, see `scheduleTerminalPersist`.
+    @ObservationIgnored private var terminalPersistTask: Task<Void, Never>?
 
     init() {
         restoreProjects()
+        restoreTerminals()
     }
 
     // MARK: - Projects
@@ -155,11 +167,13 @@ final class WorkspaceStore {
         projects.removeAll { $0.id == project.id }
         LanguageServerRegistry.shared.shutdownServices(inside: project.url)
 
-        // Forget anything that belonged to it.
+        // Forget anything that belonged to it, its shells included — the
+        // window-wide terminal is untouched, it belongs to no repository.
         for (key, item) in items where item.projectID == project.id {
             item.terminals.forEach { $0.terminate() }
             items[key] = nil
         }
+        persistTerminals()
         for (key, item) in items {
             guard case .file(let url) = item.kind,
                   url.path.hasPrefix(project.url.path + "/") else { continue }
@@ -194,6 +208,54 @@ final class WorkspaceStore {
         }
     }
 
+    /// What the repositories sidebar lists: every repository, or the ones
+    /// matching the filter. The folder path counts as a match too — two
+    /// repositories can share a name.
+    var visibleProjects: [Project] {
+        let query = projectSearchText.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return projects }
+        return projects.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+                || $0.url.path.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    /// Starring a repository. Pinned ones are kept at the top of the sidebar in
+    /// alphabetical order, so this reorders the list as well as saving the flag.
+    func togglePin(_ project: Project) {
+        project.isPinned.toggle()
+        applyPinOrdering()
+        persistProjects()
+    }
+
+    /// Pinned repositories first, by name; everything else keeps the order the
+    /// user dragged it into. The array itself is sorted, so every reader — the
+    /// sidebar, the counts, the drag indices — sees the same order.
+    private func applyPinOrdering() {
+        let pinned = projects
+            .filter(\.isPinned)
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        projects = pinned + projects.filter { !$0.isPinned }
+    }
+
+    /// Drag and drop in the sidebar: puts one repository where another one is,
+    /// pushing that one out of the way. Called every time the drag crosses a
+    /// card, and saved right away — the order on screen is the order kept, even
+    /// if the drag is then let go outside the window.
+    ///
+    /// Pinned repositories sit out: their order is the alphabet, not the drag.
+    func moveProject(withID id: URL, toPositionOf target: URL) {
+        guard id != target,
+              let from = projects.firstIndex(where: { $0.id == id }),
+              let to = projects.firstIndex(where: { $0.id == target }),
+              !projects[from].isPinned, !projects[to].isPinned else { return }
+        let moved = projects.remove(at: from)
+        // `to` still points at the wanted slot: indices before `from` did not
+        // move, and one past it shifted down by exactly the removed element.
+        projects.insert(moved, at: to)
+        persistProjects()
+    }
+
     func project(withID id: URL?) -> Project? {
         guard let id else { return nil }
         return projects.first { $0.id == id }
@@ -213,16 +275,23 @@ final class WorkspaceStore {
 
     private func persistProjects() {
         UserDefaults.standard.set(projects.map(\.url.path), forKey: projectsDefaultsKey)
+        UserDefaults.standard.set(
+            projects.filter(\.isPinned).map(\.url.path),
+            forKey: pinnedProjectsDefaultsKey
+        )
     }
 
     private func restoreProjects() {
         let accounts = UserDefaults.standard.dictionary(forKey: gitHubAccountsDefaultsKey) as? [String: String] ?? [:]
         let paths = UserDefaults.standard.stringArray(forKey: projectsDefaultsKey) ?? []
+        let pinned = Set(UserDefaults.standard.stringArray(forKey: pinnedProjectsDefaultsKey) ?? [])
         for path in paths where FileManager.default.fileExists(atPath: path) {
             let project = Project(url: URL(fileURLWithPath: path))
             project.gitHubAccount = accounts[path]
+            project.isPinned = pinned.contains(path)
             projects.append(project)
         }
+        applyPinOrdering()
         selectedProjectID = projects.first?.id
 
         // The accounts have to reach `GitHubAccounts` before the first `gh`
@@ -425,6 +494,7 @@ final class WorkspaceStore {
         switch item.kind {
         case .file(let url): project(containing: url)?.id
         case .workingDiff(let projectID, _, _): projectID
+        case .commit(let projectID, _): projectID
         case .pullRequest(let projectID, _): projectID
         case .terminal(let projectID): projectID
         }
@@ -542,6 +612,32 @@ final class WorkspaceStore {
         item.isLoading = false
     }
 
+    /// Opens what one commit of the repository's own history changed. The patch
+    /// never changes, so an item already loaded is simply shown again.
+    func openCommit(_ commit: RepositoryCommit, project: Project) {
+        let kind = ViewerItem.Kind.commit(projectID: project.id, sha: commit.sha)
+        let item = items[kind.key] ?? ViewerItem(
+            kind: kind,
+            title: commit.headline,
+            subtitle: "\(commit.shortSHA) · \(project.name)"
+        )
+        present(item)
+        if item.diff == nil {
+            Task { await loadCommitDiff(item, project: project, sha: commit.sha) }
+        }
+    }
+
+    private func loadCommitDiff(_ item: ViewerItem, project: Project, sha: String) async {
+        item.isLoading = true
+        item.errorMessage = nil
+        let text = await RepositoryCommit.diff(sha: sha, in: project.url)
+        item.diff = DiffHighlighter.highlight(DiffParser.parse(text))
+        if item.diff?.isEmpty == true {
+            item.errorMessage = "This commit changed no text."
+        }
+        item.isLoading = false
+    }
+
     func openPullRequest(_ pr: PullRequest, project: Project) {
         let kind = ViewerItem.Kind.pullRequest(projectID: project.id, number: pr.number)
         // The header names the pull request by its title alone — the number and
@@ -559,6 +655,9 @@ final class WorkspaceStore {
         }
         if item.comments.isEmpty {
             Task { await loadComments(item, project: project, pr: pr) }
+        }
+        if item.syncState == nil {
+            Task { await refreshSyncState(item, project: project, pr: pr) }
         }
     }
 
@@ -583,6 +682,189 @@ final class WorkspaceStore {
             item.commentError = error.localizedDescription
         }
         item.isLoadingComments = false
+    }
+
+    /// The pull request's commits. Loaded when the Commits tab is first shown
+    /// rather than alongside the diff: it is one more call to the host, and a
+    /// review that never opens the tab should not pay for it.
+    func loadCommits(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        item.isLoadingCommits = true
+        item.commitsError = nil
+        do {
+            item.commits = try await PullRequestService.commits(for: pr, in: project.url)
+        } catch {
+            item.commits = []
+            item.commitsError = error.localizedDescription
+        }
+        item.isLoadingCommits = false
+    }
+
+    func loadBuilds(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        item.isLoadingBuilds = true
+        item.buildsError = nil
+        do {
+            item.builds = try await PullRequestService.builds(for: pr, in: project.url)
+        } catch {
+            item.builds = []
+            item.buildsError = error.localizedDescription
+        }
+        item.isLoadingBuilds = false
+    }
+
+    /// Opens one commit inside the Commits tab and fetches its patch.
+    func showCommit(
+        _ commit: PullRequestCommit,
+        on item: ViewerItem,
+        project: Project,
+        pr: PullRequest
+    ) async {
+        item.selectedCommit = commit
+        item.commitDiffError = nil
+        guard item.commitDiffs[commit.sha] == nil else { return }
+
+        item.isLoadingCommitDiff = true
+        let text = await PullRequestService.diff(forCommit: commit.sha, of: pr, in: project.url)
+        // The tab may have gone back to the list, or on to another commit,
+        // while this was in flight — the patch is still worth keeping.
+        if let text {
+            item.commitDiffs[commit.sha] = DiffHighlighter.highlight(DiffParser.parse(text))
+        } else if item.selectedCommit?.sha == commit.sha {
+            item.commitDiffError = "Could not load the changes in \(commit.shortSHA)."
+        }
+        // Whoever is on screen now owns the spinner, so a load that has been
+        // overtaken leaves it alone.
+        if item.selectedCommit?.sha == commit.sha {
+            item.isLoadingCommitDiff = false
+        }
+    }
+
+    // MARK: - Merging, rejecting, syncing
+
+    /// Counts how far the pull request's branch is behind the one it targets.
+    /// `fetching` asks git for fresh refs first, which only matters on the hosts
+    /// that are counted locally — GitHub answers from the server either way.
+    func refreshSyncState(
+        _ item: ViewerItem,
+        project: Project,
+        pr: PullRequest,
+        fetching: Bool = false
+    ) async {
+        guard !item.isCheckingSync else { return }
+        item.isCheckingSync = true
+        item.syncState = await PullRequestService.syncState(
+            for: pr,
+            in: project.url,
+            fetching: fetching
+        )
+        item.isCheckingSync = false
+    }
+
+    /// Merges the pull request and closes it here: it is no longer open, and the
+    /// list in the navigator reloads to say so.
+    func mergePullRequest(
+        _ item: ViewerItem,
+        project: Project,
+        pr: PullRequest,
+        using strategy: PullRequestMergeStrategy
+    ) async {
+        await runPullRequestAction(on: item, project: project, pr: pr) {
+            try await PullRequestService.merge(pr, using: strategy, in: project.url)
+        } onSuccess: {
+            self.showStatus("#\(pr.number) merged into \(pr.targetBranch)")
+            self.close(item)
+        }
+    }
+
+    /// Closes the pull request without merging — `reason`, when given, is posted
+    /// as the closing comment.
+    func rejectPullRequest(
+        _ item: ViewerItem,
+        project: Project,
+        pr: PullRequest,
+        reason: String
+    ) async {
+        await runPullRequestAction(on: item, project: project, pr: pr) {
+            try await PullRequestService.reject(pr, reason: reason, in: project.url)
+        } onSuccess: {
+            self.showStatus("#\(pr.number) rejected")
+            self.close(item)
+        }
+    }
+
+    /// Brings the target branch's commits into the pull request's branch.
+    func updateBranchFromBase(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        await runPullRequestAction(on: item, project: project, pr: pr) {
+            try await PullRequestService.updateFromBase(pr, in: project.url)
+        } onSuccess: {
+            self.showStatus("\(pr.sourceBranch) updated from \(pr.targetBranch)")
+            Task {
+                await self.refreshSyncState(item, project: project, pr: pr, fetching: true)
+                await self.loadCommits(item, project: project, pr: pr)
+                await self.loadPullRequestDiff(item, project: project, pr: pr)
+            }
+        }
+    }
+
+    /// Approves the pull request, or asks for changes on it. Unlike a merge or a
+    /// rejection this leaves the pull request open — the review joins the
+    /// conversation, so that is reloaded too.
+    func reviewPullRequest(
+        _ item: ViewerItem,
+        project: Project,
+        pr: PullRequest,
+        decision: PullRequestReviewDecision,
+        comment: String
+    ) async {
+        await runPullRequestAction(on: item, project: project, pr: pr) {
+            try await PullRequestService.review(
+                pr,
+                decision: decision,
+                comment: comment,
+                in: project.url
+            )
+        } onSuccess: {
+            self.showStatus(decision == .approve
+                ? "#\(pr.number) approved"
+                : "Changes requested on #\(pr.number)")
+            Task { await self.loadComments(item, project: project, pr: pr) }
+        }
+    }
+
+    /// The shape every one of these shares: one command against the host, a
+    /// toast either way, and a reloaded pull request list afterwards — which is
+    /// also where the item's own copy of the pull request comes from, so the bar
+    /// shows the review state the host now has.
+    private func runPullRequestAction(
+        on item: ViewerItem,
+        project: Project,
+        pr: PullRequest,
+        _ action: () async throws -> Void,
+        onSuccess: () -> Void
+    ) async {
+        guard !item.isRunningPullRequestAction else { return }
+        item.isRunningPullRequestAction = true
+        defer { item.isRunningPullRequestAction = false }
+        do {
+            try await action()
+            onSuccess()
+        } catch {
+            showError(error.localizedDescription)
+        }
+        await project.refreshPullRequests()
+        if let fresh = project.pullRequests.first(where: { $0.number == pr.number }) {
+            item.pullRequest = fresh
+        }
+    }
+
+    /// Closes one item wherever it is, unlike `closeCurrent` which only reaches
+    /// what is on screen.
+    private func close(_ item: ViewerItem) {
+        let wasOnScreen = current?.id == item.id
+        items[item.id] = nil
+        forgetItem(item.id)
+        // Dropping it from the history would otherwise leave whichever item the
+        // index lands on next in the viewer, which is not what was asked for.
+        if wasOnScreen { showsDashboard = true }
     }
 
     func postComment(
@@ -636,6 +918,11 @@ final class WorkspaceStore {
         item.isPostingComment = false
     }
 
+    /// Where the shells that belong to no repository start.
+    static let globalTerminalDirectory = FileManager.default.homeDirectoryForCurrentUser
+    /// What those shells are called in the lists, in place of a repository name.
+    static let globalTerminalScope = "Home"
+
     /// Shows the project's terminal. Each project has one terminal viewer item
     /// that holds any number of shell tabs. A plain "Open Terminal" reuses what
     /// is already running; passing a command always starts a fresh tab for it.
@@ -645,14 +932,40 @@ final class WorkspaceStore {
         runningCommand command: String? = nil,
         title: String? = nil
     ) -> ViewerItem {
-        let kind = ViewerItem.Kind.terminal(projectID: project.id)
-        let item = items[kind.key] ?? ViewerItem(
-            kind: kind,
-            title: "Terminal",
-            subtitle: project.name
+        openTerminal(
+            projectID: project.id,
+            directory: project.url,
+            runningCommand: command,
+            title: title
         )
+    }
+
+    /// The same, for the window-wide terminal: a shell in the home folder,
+    /// belonging to no repository. It is how you get a prompt before any
+    /// repository has been added, and it survives removing them all.
+    @discardableResult
+    func openGlobalTerminal(
+        runningCommand command: String? = nil,
+        title: String? = nil
+    ) -> ViewerItem {
+        openTerminal(
+            projectID: nil,
+            directory: Self.globalTerminalDirectory,
+            runningCommand: command,
+            title: title
+        )
+    }
+
+    @discardableResult
+    private func openTerminal(
+        projectID: URL?,
+        directory: URL,
+        runningCommand command: String?,
+        title: String?
+    ) -> ViewerItem {
+        let item = terminalItem(projectID: projectID)
         if item.terminals.isEmpty || command != nil || title != nil {
-            addTerminalTab(to: item, project: project, runningCommand: command, title: title)
+            addTerminalTab(to: item, directory: directory, runningCommand: command, title: title)
         } else if let session = item.selectedTerminal {
             selectTerminal(session, in: item)
         }
@@ -663,14 +976,99 @@ final class WorkspaceStore {
         return item
     }
 
-    /// Every shell still running, most recently used first. Terminal items are
+    /// The one item that holds this scope's shell tabs, found or made.
+    private func terminalItem(projectID: URL?) -> ViewerItem {
+        let kind = ViewerItem.Kind.terminal(projectID: projectID)
+        if let existing = items[kind.key] { return existing }
+        return ViewerItem(
+            kind: kind,
+            title: "Terminal",
+            subtitle: projectID.flatMap { project(withID: $0)?.name } ?? Self.globalTerminalScope
+        )
+    }
+
+    /// Every shell still open, most recently used first. Terminal items are
     /// never dropped on their own, so this outlives closing the viewer and
-    /// switching repositories.
+    /// switching repositories — and, being saved, quitting the app.
     var recentTerminals: [RecentTerminal] {
         items.values
             .filter(\.isTerminal)
-            .flatMap { item in item.terminals.map { RecentTerminal(session: $0, item: item) } }
+            .flatMap { item in
+                item.terminals.enumerated().map {
+                    RecentTerminal(session: $0.element, item: item, position: $0.offset + 1)
+                }
+            }
             .sorted { $0.session.lastUsedAt > $1.session.lastUsedAt }
+    }
+
+    /// The shells of one folder, newest first. The navigator lists one scope at
+    /// a time: a repository's shells never sit among another repository's, and
+    /// the home ones are their own list.
+    func terminals(in scope: TerminalScope) -> [RecentTerminal] {
+        recentTerminals.filter {
+            switch scope {
+            case .project(let id): $0.item.projectID == id
+            case .home: $0.item.projectID == nil
+            }
+        }
+    }
+
+    /// Which scope the Terminals tab is about: the shell on screen belongs to
+    /// one, and with anything else open it is the selected repository's.
+    var visibleTerminalScope: TerminalScope? {
+        if !showsDashboard, let item = current, item.isTerminal {
+            return item.projectID.map { TerminalScope.project($0) } ?? .home
+        }
+        return selectedProjectID.map { TerminalScope.project($0) }
+    }
+
+    /// What that scope is called on screen: the repository's name, or "Home".
+    func name(of scope: TerminalScope) -> String {
+        switch scope {
+        case .project(let id): project(withID: id)?.name ?? id.lastPathComponent
+        case .home: Self.globalTerminalScope
+        }
+    }
+
+    /// Starts another shell in that scope.
+    func newTerminal(in scope: TerminalScope) {
+        switch scope {
+        case .project(let id):
+            guard let project = project(withID: id) else { return }
+            newTerminal(in: project)
+        case .home:
+            newGlobalTerminal()
+        }
+    }
+
+    /// How many shells one repository has running, for the dashboard's count.
+    /// The terminals list itself is window-wide — a shell outlives the
+    /// repository being switched away from — but a repository's own board
+    /// should count its own.
+    func terminalCount(in project: Project) -> Int {
+        recentTerminals.count { $0.item.projectID == project.id }
+    }
+
+    /// Opens one of the navigator's lists, unfolding the pane if it is away.
+    /// Everything that sends the user there goes through this: setting the tab
+    /// alone does nothing visible while the pane is hidden.
+    func showNavigator(_ tab: NavigatorTab) {
+        navigatorTab = tab
+        if !showsNavigator {
+            showsNavigator = true
+        }
+    }
+
+    /// The terminals list, and — when this repository already has a shell — its
+    /// most recent one back in the viewer. Opening the list without showing
+    /// anything asks for a second click to reach what the count just promised.
+    /// Nothing is started here: a repository with no shell only gets the list,
+    /// where the first card is the one that starts one.
+    func showTerminals(in project: Project) {
+        showNavigator(.terminals)
+        if let recent = recentTerminals.first(where: { $0.item.projectID == project.id }) {
+            showTerminal(recent)
+        }
     }
 
     /// Puts one shell from the terminals list back on screen.
@@ -679,10 +1077,14 @@ final class WorkspaceStore {
         present(recent.item)
     }
 
-    /// Makes a tab the visible one and marks it as the newest in the list.
+    /// Makes a tab the visible one and marks it as the newest in the list. This
+    /// is also where a tab restored from the last run of the app gets its shell:
+    /// they are listed on launch but nothing is spawned until one is looked at.
     func selectTerminal(_ session: TerminalSession, in item: ViewerItem) {
         item.selectedTerminalID = session.id
         session.lastUsedAt = Date()
+        session.startIfNeeded()
+        persistTerminals()
     }
 
     /// Whether this exact shell is what the viewer is showing.
@@ -698,44 +1100,72 @@ final class WorkspaceStore {
 
     /// Always starts a fresh shell for a repository, next to any it already has.
     func newTerminal(in project: Project) {
-        let kind = ViewerItem.Kind.terminal(projectID: project.id)
-        let item = items[kind.key] ?? ViewerItem(
-            kind: kind,
-            title: "Terminal",
-            subtitle: project.name
-        )
-        addTerminalTab(to: item, project: project)
+        newTerminal(projectID: project.id, directory: project.url)
+    }
+
+    /// Another shell in the home folder, belonging to no repository.
+    func newGlobalTerminal() {
+        newTerminal(projectID: nil, directory: Self.globalTerminalDirectory)
+    }
+
+    private func newTerminal(projectID: URL?, directory: URL) {
+        let item = terminalItem(projectID: projectID)
+        addTerminalTab(to: item, directory: directory)
         present(item)
         navigatorTab = .terminals
     }
 
-    /// ⌘T while a terminal is on screen: another shell for the same repository.
+    /// ⌘T while a terminal is on screen: another shell in the same folder.
     func newTerminalTab(in item: ViewerItem) {
-        guard case .terminal(let projectID) = item.kind,
-              let project = project(withID: projectID) else { return }
-        addTerminalTab(to: item, project: project)
+        guard case .terminal(let projectID) = item.kind else { return }
+        // A repository removed while its terminal is open leaves nowhere to
+        // start; the window-wide terminal always has the home folder.
+        let directory = projectID == nil
+            ? Self.globalTerminalDirectory
+            : projectID.flatMap { project(withID: $0)?.url }
+        guard let directory else { return }
+        addTerminalTab(to: item, directory: directory)
         navigatorTab = .terminals
     }
 
     private func addTerminalTab(
         to item: ViewerItem,
-        project: Project,
+        directory: URL,
         runningCommand command: String? = nil,
         title: String? = nil
     ) {
-        let session = TerminalSession(
-            directory: project.url,
-            title: title ?? "Shell \(item.terminals.count + 1)"
+        let session = makeSession(
+            directory: directory,
+            title: title ?? "Shell \(item.terminals.count + 1)",
+            in: item
         )
+        item.terminals.append(session)
+        item.selectedTerminalID = session.id
+        // Terminal items are the one kind kept outside the history, so a brand
+        // new one is registered here rather than waiting to be presented.
+        items[item.id] = item
+        session.startIfNeeded(runningCommand: command)
+        persistTerminals()
+    }
+
+    /// A tab wired into the store: it removes itself when its shell exits, and
+    /// keeps the saved list in step with the name the shell gives itself.
+    private func makeSession(
+        directory: URL,
+        title: String,
+        in item: ViewerItem
+    ) -> TerminalSession {
+        let session = TerminalSession(directory: directory, title: title)
         // When the shell exits (typing `exit`, or the process dies), the tab
         // goes away like in any terminal app.
         session.onExit = { [weak self, weak item, weak session] in
             guard let self, let item, let session else { return }
             self.closeTerminalTab(session, in: item)
         }
-        item.terminals.append(session)
-        item.selectedTerminalID = session.id
-        session.startIfNeeded(runningCommand: command)
+        session.onTitleChange = { [weak self] in
+            self?.scheduleTerminalPersist()
+        }
+        return session
     }
 
     /// Closes one tab; closing the last tab closes the terminal itself.
@@ -747,11 +1177,90 @@ final class WorkspaceStore {
             let neighbour = min(index, item.terminals.count - 1)
             item.selectedTerminalID = neighbour >= 0 ? item.terminals[neighbour].id : nil
         }
+        persistTerminals()
 
         guard item.terminals.isEmpty else { return }
         items[item.id] = nil
         forgetItem(item.id)
         if current == nil { showsDashboard = true }
+    }
+
+    // MARK: - Saved terminals
+
+    /// One shell tab as it is written to disk. The shell itself cannot be saved,
+    /// so what comes back is a tab in the same folder, with the same name,
+    /// waiting to be shown.
+    private struct StoredTerminal: Codable {
+        /// The repository it belongs to; `nil` is the window-wide terminal.
+        var projectPath: String?
+        var directory: String
+        var title: String
+        var lastUsedAt: Date
+        var isSelected: Bool
+    }
+
+    /// Titles arrive from the shell — a prompt can rename a tab on every
+    /// command — so those are collected up rather than written straight away.
+    private func scheduleTerminalPersist() {
+        terminalPersistTask?.cancel()
+        terminalPersistTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.persistTerminals()
+        }
+    }
+
+    private func persistTerminals() {
+        let stored: [StoredTerminal] = items.values.flatMap { item -> [StoredTerminal] in
+            guard case .terminal(let projectID) = item.kind else { return [] }
+            return item.terminals.map { session in
+                StoredTerminal(
+                    projectPath: projectID?.path,
+                    directory: session.directory.path,
+                    title: session.title,
+                    lastUsedAt: session.lastUsedAt,
+                    isSelected: session.id == item.selectedTerminalID
+                )
+            }
+        }
+        guard let data = try? JSONEncoder().encode(stored) else { return }
+        UserDefaults.standard.set(data, forKey: terminalsDefaultsKey)
+    }
+
+    /// Brings back the tabs of the last run, without starting a single shell:
+    /// they are listed in the Terminals tab, and each one starts when it is
+    /// first shown. Called after the projects, whose names these tabs borrow.
+    private func restoreTerminals() {
+        guard let data = UserDefaults.standard.data(forKey: terminalsDefaultsKey),
+              let stored = try? JSONDecoder().decode([StoredTerminal].self, from: data) else { return }
+
+        for entry in stored {
+            // A repository no longer in the workspace, or a folder that has
+            // moved, has nothing left to restore.
+            if let path = entry.projectPath, !projects.contains(where: { $0.url.path == path }) {
+                continue
+            }
+            guard FileManager.default.fileExists(atPath: entry.directory) else { continue }
+
+            let item = terminalItem(projectID: entry.projectPath.map { URL(fileURLWithPath: $0) })
+            items[item.id] = item
+            let session = makeSession(
+                directory: URL(fileURLWithPath: entry.directory),
+                title: entry.title,
+                in: item
+            )
+            session.lastUsedAt = entry.lastUsedAt
+            item.terminals.append(session)
+            if entry.isSelected { item.selectedTerminalID = session.id }
+        }
+
+        // Whatever was on screen last time may not have made it back.
+        for item in items.values where item.isTerminal && item.selectedTerminalID == nil {
+            item.selectedTerminalID = item.terminals.last?.id
+        }
+        // Deliberately no write here. Building a store must not touch what is
+        // saved: SwiftUI can build a second, throwaway one, and an empty store
+        // saving itself would wipe the list the live one is holding.
     }
 
     // MARK: - Document actions
@@ -852,4 +1361,5 @@ enum ExternalTool: String, CaseIterable, Identifiable {
         case .zed: "bolt"
         }
     }
+
 }

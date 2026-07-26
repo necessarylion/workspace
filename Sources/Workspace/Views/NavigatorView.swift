@@ -9,9 +9,11 @@ struct NavigatorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if project != nil {
+                header
+                Divider()
+            }
             if let project {
-                // Both the tab picker and the collapse button live in the
-                // window toolbar, on the same row.
                 content(project)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -27,6 +29,34 @@ struct NavigatorView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    /// The tabs, on the pane they switch. They used to sit at the right end of
+    /// the viewer's header, which put the control in one pane and everything it
+    /// changed in another; the collapse button stays over there, because when
+    /// this pane is hidden there is nothing here to press.
+    ///
+    /// Same height as the viewer's header and the repositories header, so the
+    /// three rows across the top of the window read as one band.
+    private var header: some View {
+        Picker("", selection: Binding(
+            get: { store.navigatorTab },
+            set: { store.navigatorTab = $0 }
+        )) {
+            ForEach(WorkspaceStore.NavigatorTab.allCases) { tab in
+                Label(tab.title, systemImage: tab.symbol)
+                    .labelStyle(.iconOnly)
+                    .help(tab.title)
+                    .tag(tab)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .pointerCursor()
+        .padding(.horizontal, AppMetrics.barHorizontalPadding)
+        .frame(height: 38)
+        .frame(maxWidth: .infinity)
+        .background(.bar)
     }
 
     @ViewBuilder
@@ -88,9 +118,9 @@ struct FileListView: View {
             }
         }
         .padding(.horizontal, 10)
-        // Same height as the header rows in the other two panes, so the tops
-        // of all three line up.
-        .frame(height: 38)
+        // Shorter than the tab bar above it — it is a second row, not a header,
+        // and this is the height the repositories filter box uses.
+        .frame(height: 34)
     }
 
     /// One row per visible (expanded) node, depth first. With the ignored files
@@ -663,29 +693,48 @@ struct ChangeListView: View {
 
 // MARK: - Terminals
 
-/// Every shell still running, newest first. Terminals outlive the viewer, so
-/// this list is how the user gets back to one they left — including shells
-/// belonging to the other repositories.
+/// The shells of **one** folder, newest first: the repository you are in, or the
+/// home folder while a home shell is on screen. Never both at once — a list that
+/// mixed every repository's shells was impossible to read — and the shells of
+/// the other repositories are shown when you switch to them.
+///
+/// Terminals outlive the viewer, so this list is how the user gets back to one
+/// they left.
 struct TerminalListView: View {
     @Environment(WorkspaceStore.self) private var store
+    /// The repository whose shells to list, unless a home shell is on screen.
     let project: Project
 
-    private var terminals: [RecentTerminal] { store.recentTerminals }
+    private var scope: TerminalScope {
+        store.visibleTerminalScope ?? .project(project.id)
+    }
+
+    private var terminals: [RecentTerminal] { store.terminals(in: scope) }
+
+    private var footerSummary: String {
+        let running = terminals.count { $0.session.isRunning }
+        let saved = terminals.count - running
+        let head = "\(running) running in \(store.name(of: scope))"
+        return saved == 0 ? head : "\(head) · \(saved) saved"
+    }
 
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 7) {
-                // The first card starts a shell; the rest are the running ones.
-                NewTerminalCard(repository: project.name) {
-                    store.newTerminal(in: project)
+                // The first card starts a shell here; the rest are the open ones.
+                NewTerminalCard(
+                    scope: store.name(of: scope),
+                    symbol: scope == .home ? "house" : "plus"
+                ) {
+                    store.newTerminal(in: scope)
                 }
 
                 ForEach(terminals) { terminal in
                     TerminalCard(
                         title: terminal.session.title,
-                        repository: store.project(withID: terminal.item.projectID)?.name
-                            ?? terminal.session.directory.lastPathComponent,
+                        position: terminal.position,
                         isSelected: store.isShowing(terminal),
+                        isRunning: terminal.session.isRunning,
                         close: { store.closeTerminal(terminal) }
                     )
                     .pointerCursor()
@@ -697,7 +746,7 @@ struct TerminalListView: View {
                 }
 
                 if terminals.isEmpty {
-                    Text("Shells you open keep running here until you close them.")
+                    Text("Shells you open stay here until you close them — quitting the app included.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -710,7 +759,9 @@ struct TerminalListView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .safeAreaInset(edge: .bottom) {
             HStack {
-                Text("\(terminals.count) running")
+                // Restored tabs count separately: their shell only starts when
+                // the tab is first shown.
+                Text(footerSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -722,9 +773,12 @@ struct TerminalListView: View {
     }
 }
 
-/// The card that starts another shell, at the top of the terminals list.
+/// The card that starts another shell in the folder the list is about, at the
+/// top of it.
 struct NewTerminalCard: View {
-    let repository: String
+    /// Where the shell would start — a repository name, or "Home".
+    let scope: String
+    let symbol: String
     let action: () -> Void
 
     @State private var isHovering = false
@@ -732,12 +786,12 @@ struct NewTerminalCard: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                Image(systemName: "plus")
+                Image(systemName: symbol)
                     .font(.callout.weight(.medium))
                 Text("New Terminal")
                     .font(.callout.weight(.medium))
                 Spacer(minLength: 0)
-                Text(repository)
+                Text(scope)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -758,7 +812,7 @@ struct NewTerminalCard: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
-        .help("Start another shell in \(repository) (⌘T)")
+        .help("Start another shell in \(scope)")
         .pointerCursor()
     }
 }
@@ -766,30 +820,40 @@ struct NewTerminalCard: View {
 /// One running shell, in the same card style as `PullRequestCard`.
 struct TerminalCard: View {
     let title: String
-    let repository: String
+    /// Its place among the folder's tabs: two shells in the same folder are
+    /// named the same once their prompts have renamed them.
+    let position: Int
     let isSelected: Bool
+    /// False for a tab brought back from the last run of the app, whose shell
+    /// starts the moment it is shown.
+    let isRunning: Bool
     let close: () -> Void
 
     @State private var isHovering = false
+
+    private var iconStyle: AnyShapeStyle {
+        if isSelected { return AnyShapeStyle(.tint) }
+        return AnyShapeStyle(isRunning ? .secondary : .tertiary)
+    }
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "terminal")
                 .font(.callout)
-                .foregroundStyle(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                .foregroundStyle(iconStyle)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(repository)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
+            Text(title)
+                .font(.callout.weight(.medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
 
             Spacer(minLength: 0)
+
+            // The folder is the same for every card in the list, so the tab's
+            // number is what is worth showing instead.
+            Text("\(position)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.tertiary)
 
             Button(action: close) {
                 Image(systemName: "xmark")
@@ -813,6 +877,6 @@ struct TerminalCard: View {
         )
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        .help(title)
+        .help(isRunning ? title : "\(title) — saved, opens a shell when shown")
     }
 }

@@ -12,6 +12,11 @@ struct WorkspaceApp: App {
             ContentView()
                 .environment(store)
                 .environment(tools)
+                // Every pane here is dense, and a scroller sliding in over a
+                // file tree or a diff moves the content under the pointer.
+                // Applied at the root, this reaches every scroll view and list
+                // below it; the wheel, trackpad and keyboard still scroll.
+                .scrollIndicators(.hidden)
         }
         .defaultSize(width: 1360, height: 860)
         // No title bar at all: the panes draw their own full-width header rows
@@ -92,6 +97,12 @@ struct WorkspaceApp: App {
                 .keyboardShortcut("t")
                 .disabled(store.selectedProject == nil)
 
+                // Belongs to no repository, so it needs none selected.
+                Button("New Terminal in Home") {
+                    store.newGlobalTerminal()
+                }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
+
                 Button("Open in VS Code") {
                     if let project = store.selectedProject {
                         store.openExternally(project, using: .vscode)
@@ -116,6 +127,8 @@ struct WorkspaceApp: App {
         Settings {
             SettingsView()
                 .environment(tools)
+                // Its own scene, so it needs the same root setting as the window.
+                .scrollIndicators(.hidden)
         }
     }
 }
