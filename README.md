@@ -129,15 +129,20 @@ Publishing is a version tag:
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-CI then builds the universal app and attaches `Workspace.zip` to a release of
-that name, giving it a permanent download URL. Making the release through
-GitHub's web interface instead works the same way; the workflow finds the
-release already there and only uploads the app to it.
+CI then builds the universal app and attaches `Workspace.dmg` and
+`Workspace.zip` to a release of that name, giving them a permanent download
+URL. Making the release through GitHub's web interface instead works the same
+way; the workflow finds the release already there and only uploads to it —
+though it leaves the notes alone, so the install instructions below are only
+written for a release the workflow created itself.
 
-The bundle is signed ad-hoc, not with a Developer ID, so macOS quarantines it
-on download and calls it damaged. The release notes tell people to clear that
-once with `xattr -dr com.apple.quarantine /Applications/Workspace.app`; getting
-rid of the step entirely needs a paid Apple Developer account and notarization.
+The bundle is signed ad-hoc, not with a Developer ID, so macOS refuses it on
+first launch — *Apple could not verify "Workspace" is free of malware*. The
+release notes tell people to clear the download flag once with
+`xattr -dr com.apple.quarantine /Applications/Workspace.app`, or to use **Open
+Anyway** in Privacy & Security. The disk image changes nothing here: the
+warning is about the app, not its container, and only notarization removes it,
+which needs a paid Apple Developer account.
 
 ### Note on dependencies
 

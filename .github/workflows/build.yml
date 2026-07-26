@@ -88,17 +88,31 @@ jobs:
         run: |
           ditto -c -k --keepParent "$APP" Workspace.zip
 
+          # The disk image is the familiar way to install a Mac app: mount it,
+          # drag the app onto the Applications alias sitting beside it. Both
+          # are just the contents of a staging folder hdiutil compresses.
+          STAGE="$(mktemp -d)/Workspace"
+          mkdir -p "$STAGE"
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname Workspace -srcfolder "$STAGE" -ov -format UDZO Workspace.dmg
+
           NOTES=$(cat <<'EOF'
-          Download `Workspace.zip`, unzip it, and move `Workspace.app` to
-          your Applications folder.
+          Open `Workspace.dmg` and drag Workspace onto the Applications folder
+          beside it. (`Workspace.zip` holds the same app, for anyone who would
+          rather unzip it.)
 
           The app is signed ad-hoc rather than with a Developer ID, so macOS
-          quarantines it on download and reports it as damaged. Clear the flag
-          once, after moving it:
+          refuses it on first launch — "Apple could not verify Workspace is
+          free of malware". Clear the download flag once, after installing:
 
           ```sh
           xattr -dr com.apple.quarantine /Applications/Workspace.app
           ```
+
+          Or open **System Settings → Privacy & Security** and click **Open
+          Anyway** at the bottom. Only notarization removes the warning for
+          good, and that needs a paid Apple Developer account.
 
           Requires macOS 14 or later. Universal (Apple Silicon and Intel).
           EOF
@@ -107,4 +121,4 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --title "$TAG" --generate-notes --notes "$NOTES"
           fi
-          gh release upload "$TAG" Workspace.zip --clobber
+          gh release upload "$TAG" Workspace.dmg Workspace.zip --clobber
