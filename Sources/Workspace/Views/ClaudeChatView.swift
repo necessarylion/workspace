@@ -352,6 +352,9 @@ private struct ClaudeMessageView: View {
         }
     }
 
+    /// A prompt wears the accent colour — a tinted box behind a thin border of
+    /// the same blue — so a glance down the transcript separates what you asked
+    /// from what came back without having to read either.
     private var userMessage: some View {
         VStack(alignment: .leading, spacing: 7) {
             ForEach(message.blocks) { block in
@@ -372,7 +375,11 @@ private struct ClaudeMessageView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 1)
+        }
     }
 
     /// No mark down the side of the reply: the whole pane is Claude, and one

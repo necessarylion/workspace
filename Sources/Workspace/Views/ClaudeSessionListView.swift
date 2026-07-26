@@ -228,46 +228,48 @@ private struct LiveClaudeRow: View {
     @State private var isHovering = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(session.displayTitle)
-                    .font(.callout)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                HStack(spacing: 5) {
-                    if session.isResponding {
-                        ProgressView().controlSize(.mini).scaleEffect(0.6).frame(width: 8, height: 8)
-                        Text(session.activity ?? "Working…")
-                            .foregroundStyle(.tint)
-                    } else if isCurrent {
-                        Text("on screen")
-                    } else {
-                        Text("open")
-                    }
+        VStack(alignment: .leading, spacing: 3) {
+            Text(session.displayTitle)
+                .font(.callout)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+            HStack(spacing: 5) {
+                if session.isResponding {
+                    ProgressView().controlSize(.mini).scaleEffect(0.6).frame(width: 8, height: 8)
+                    Text(session.activity ?? "Working…")
+                        .foregroundStyle(.tint)
+                } else if isCurrent {
+                    Text("on screen")
+                } else {
+                    Text("open")
                 }
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
             }
-            Spacer(minLength: 0)
-
-            if isHovering {
-                Button(action: close) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .padding(3)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("End this conversation")
-                .pointerCursor()
-            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+        // Floating, for the reason spelled out on ``ClaudeSessionRow``.
+        .overlay(alignment: .topTrailing) {
+            if isHovering {
+                Button(action: close) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 16, height: 16)
+                        .background(.regularMaterial, in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("End this conversation")
+                .pointerCursor()
+                .padding(.top, 5)
+                .padding(.trailing, 5)
+            }
+        }
         .background(
             isCurrent ? AnyShapeStyle(.tint.opacity(0.16)) : AnyShapeStyle(.quaternary.opacity(isHovering ? 0.3 : 0.16)),
             in: RoundedRectangle(cornerRadius: 7)
@@ -293,37 +295,43 @@ private struct ClaudeSessionRow: View {
     @State private var isHovering = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(past.title)
-                    .font(.callout)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                Text(past.modified.formatted(.relative(presentation: .named)))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-            Spacer(minLength: 0)
-
-            // Only under the pointer: a delete button on every row is a wall of
-            // crosses down a list you are trying to read.
-            if isHovering {
-                Button(action: delete) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .padding(3)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("Move this conversation to the Trash")
-                .pointerCursor()
-            }
+        VStack(alignment: .leading, spacing: 3) {
+            Text(past.title)
+                .font(.callout)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+            Text(past.modified.formatted(.relative(presentation: .named)))
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+        // Only under the pointer: a delete button on every row is a wall of
+        // crosses down a list you are trying to read. It floats over the row
+        // rather than sitting in it — in the flow it took width off the title
+        // as it appeared, and a title that only just fitted re-wrapped onto a
+        // second line under the pointer. Keeping a lane clear for it instead
+        // left every row visibly short of its right edge, so it rides over the
+        // text on a disc of its own.
+        .overlay(alignment: .topTrailing) {
+            if isHovering {
+                Button(action: delete) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 16, height: 16)
+                        .background(.regularMaterial, in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Move this conversation to the Trash")
+                .pointerCursor()
+                .padding(.top, 5)
+                .padding(.trailing, 5)
+            }
+        }
         .background(
             .quaternary.opacity(isHovering ? 0.3 : 0.16),
             in: RoundedRectangle(cornerRadius: 7)
