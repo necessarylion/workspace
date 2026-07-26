@@ -1,6 +1,22 @@
 import AppKit
 import SwiftUI
 
+/// How wide a conversation is allowed to get. A line of text past this is
+/// tiring to read on a wide window, and the composer is held to the same
+/// figure so the prompt lines up with the messages it joins.
+enum ClaudeChatMetrics {
+    static let columnWidth: CGFloat = 760
+
+    /// The empty stretch kept below the newest message.
+    static let tailSpace: CGFloat = 200
+
+    /// How a message, a tool row or the working line arrives: a short fade with
+    /// a few points of travel under it, so a reply settles onto the transcript
+    /// instead of snapping into place a block at a time.
+    static var appear: AnyTransition { .opacity.combined(with: .offset(y: 6)) }
+    static let appearing: Animation = .easeOut(duration: 0.18)
+}
+
 /// The Claude Code chat, in the centre pane.
 ///
 /// The transcript is above and the composer below, the way the editor
@@ -93,20 +109,34 @@ struct ClaudeChatView: View {
                             openFile: { path in store.openFile(URL(fileURLWithPath: path)) },
                             answer: answer
                         )
+                        .transition(ClaudeChatMetrics.appear)
                     }
                     if session.isStarting {
                         statusLine("Starting Claude Code…")
+                            .transition(ClaudeChatMetrics.appear)
                     } else if session.isResponding, !isWriting {
                         statusLine(session.activity.map(Self.activityTitle) ?? "Working…")
+                            .transition(ClaudeChatMetrics.appear)
                     }
                     if let error = session.lastError {
                         errorNotice(error)
+                            .transition(ClaudeChatMetrics.appear)
                     }
+                    // Room under the last message, so a reply finishes in the
+                    // middle of the pane rather than jammed against the box you
+                    // type in. The transcript parks on the bottom of *this*, so
+                    // the space is what you are left looking at.
                     Color.clear
-                        .frame(height: 1)
+                        .frame(height: ClaudeChatMetrics.tailSpace)
                         .id(bottomAnchor)
                 }
-                .frame(maxWidth: 760, alignment: .leading)
+                // Animated on what has arrived, never on what is being written:
+                // a reply's own text grows a character at a time and animating
+                // that would fight the typing rather than smooth it.
+                .animation(ClaudeChatMetrics.appearing, value: session.messages.count)
+                .animation(ClaudeChatMetrics.appearing, value: session.isResponding)
+                .animation(ClaudeChatMetrics.appearing, value: session.isStarting)
+                .frame(maxWidth: ClaudeChatMetrics.columnWidth, alignment: .leading)
                 .padding(.horizontal, 24)
                 .padding(.vertical, 20)
                 .frame(maxWidth: .infinity, alignment: .top)
@@ -211,11 +241,15 @@ private struct ClaudeChatWelcome: View {
     let session: ClaudeSession
     let project: Project?
 
+    /// The jobs a repository is opened for, not a tour of it: what is offered
+    /// here is what gets asked on most days, in the order a change goes out —
+    /// look at it, commit it, put it up for review.
     private var suggestions: [String] {
         [
-            "What does this repository do?",
+            "Review the changes on this branch",
+            "Commit all my changes and push",
+            "Create a pull request for this branch",
             "Explain the changes I have not committed yet",
-            "Find where the terminal is started and walk me through it",
         ]
     }
 
@@ -388,32 +422,41 @@ private struct ClaudeMessageView: View {
     private var assistantMessage: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(message.blocks) { block in
-                switch block {
-                case .text(let text):
-                    if !text.text.isEmpty {
-                        // Markdown only once the paragraph has stopped moving:
-                        // re-parsing it on every token arriving is work nobody
-                        // sees.
-                        if message.isStreaming {
-                            Text(text.text)
-                                .font(.callout)
-                                .fixedSize(horizontal: false, vertical: true)
-                        } else {
-                            MarkdownText(text: text.text)
-                                .font(.callout)
+                Group {
+                    switch block {
+                    case .text(let text):
+                        if !text.text.isEmpty {
+                            // Markdown only once the paragraph has stopped moving:
+                            // re-parsing it on every token arriving is work nobody
+                            // sees.
+                            if message.isStreaming {
+                                Text(text.text)
+                                    .font(.callout)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                MarkdownText(text: text.text)
+                                    .font(.callout)
+                            }
                         }
+                    case .thinking(let text):
+                        ThinkingRow(text: text)
+                    case .tool(let call):
+                        ClaudeToolRow(call: call, openFile: openFile)
                     }
-                case .thinking(let text):
-                    ThinkingRow(text: text)
-                case .tool(let call):
-                    ClaudeToolRow(call: call, openFile: openFile)
                 }
+                .transition(ClaudeChatMetrics.appear)
             }
             if !quickReplies.isEmpty {
                 ClaudeQuickReplyRow(replies: quickReplies, answer: answer)
                     .padding(.top, 2)
+                    .transition(ClaudeChatMetrics.appear)
             }
         }
+        // A tool row landing in the middle of a reply fades in like the reply
+        // did. Keyed on how many blocks there are, so the text arriving inside
+        // one of them is not an animation.
+        .animation(ClaudeChatMetrics.appearing, value: message.blocks.count)
+        .animation(ClaudeChatMetrics.appearing, value: quickReplies.isEmpty)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -689,7 +732,13 @@ private struct ClaudeComposer: View {
             input
             controls
         }
+        // The same column the transcript is read in, so the box you type in
+        // starts and ends where the messages above it do. The bar behind it
+        // still runs the whole width of the pane — it is the floor of the
+        // window, not part of the column.
+        .frame(maxWidth: ClaudeChatMetrics.columnWidth, alignment: .leading)
         .padding(12)
+        .frame(maxWidth: .infinity)
         .background(.bar)
         // A different token means a different list, so the highlight goes back
         // to the top rather than staying on the fourth row of the last one.
