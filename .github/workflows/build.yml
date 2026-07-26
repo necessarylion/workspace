@@ -1,0 +1,69 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # GitHub-hosted Apple Silicon. Nothing else has to be installed: libghostty
+    # arrives as a checksum-verified xcframework that SwiftPM downloads, and
+    # ghostty's runtime resources are checked in under Resources/ghostty-share.
+    runs-on: macos-26
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The macos-26 image already defaults to Xcode 26; this only pins it
+      # explicitly when a versioned copy is present, and never fails the run
+      # over a path that varies between image releases.
+      - name: Select Xcode
+        run: |
+          for candidate in /Applications/Xcode_26*.app; do
+            if [ -d "$candidate" ]; then
+              sudo xcode-select -s "$candidate"
+              break
+            fi
+          done
+          xcodebuild -version
+
+      # CodeEditLanguages vendors every tree-sitter grammar, so its repository
+      # is ~600 MB. Caching SwiftPM's clone is what keeps the build reasonable.
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/Library/org.swift.swiftpm
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: swiftpm-${{ runner.os }}-
+
+      - name: Cache derived data
+        uses: actions/cache@v4
+        with:
+          path: .build/xcode
+          key: derived-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: derived-${{ runner.os }}-
+
+      - name: Build universal app
+        run: |
+          APP="$(Scripts/bundle.sh Release)"
+          echo "APP=$APP" >> "$GITHUB_ENV"
+
+      # Fail loudly if the binary came out single-architecture.
+      - name: Verify architectures
+        run: |
+          ARCHS="$(lipo -archs "$APP/Contents/MacOS/Workspace")"
+          echo "$ARCHS"
+          grep -q arm64 <<< "$ARCHS"
+          grep -q x86_64 <<< "$ARCHS"
+
+      - name: Package
+        run: ditto -c -k --keepParent "$APP" Workspace.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Workspace-universal
+          path: Workspace.zip

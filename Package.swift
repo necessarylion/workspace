@@ -7,13 +7,23 @@ let package = Package(
     dependencies: [
         // Tree-sitter grammars and highlight queries. The editor itself is ours:
         // NSTextView + tree-sitter + LSP, see Sources/Workspace/Editor.
-        .package(url: "https://github.com/CodeEditApp/CodeEditLanguages.git", exact: "0.1.20")
+        // Vendored rather than fetched: the upstream repository carries every
+        // historical revision of every grammar, so cloning it costs ~600 MB
+        // against 34 MB for the release source. See Vendor/README.md.
+        .package(path: "Vendor/CodeEditLanguages"),
+        // The terminal engine. Upstream ghostty ships no reusable framework, so
+        // this package supplies libghostty as a prebuilt universal
+        // (arm64 + x86_64) xcframework that SwiftPM downloads and
+        // checksum-verifies; see Docs/Terminal.md.
+        .package(url: "https://github.com/Lakr233/libghostty-spm.git", exact: "1.3.1")
     ],
     targets: [
         .executableTarget(
             name: "Workspace",
             dependencies: [
-                "GhosttyKit",
+                // Re-exports the libghostty C module, so `import GhosttyKit`
+                // still yields ghostty_app_t, ghostty_surface_new and friends.
+                .product(name: "GhosttyKit", package: "libghostty-spm"),
                 .product(name: "CodeEditLanguages", package: "CodeEditLanguages")
             ],
             path: "Sources/Workspace",
@@ -31,12 +41,6 @@ let package = Package(
                 .linkedFramework("UserNotifications"),
                 .linkedFramework("UniformTypeIdentifiers")
             ]
-        ),
-        // The terminal: libghostty built as an xcframework with
-        // `zig build -Dxcframework-target=native`; see Docs/Terminal.md.
-        .binaryTarget(
-            name: "GhosttyKit",
-            path: ".deps/GhosttyKit.xcframework"
         )
     ]
 )

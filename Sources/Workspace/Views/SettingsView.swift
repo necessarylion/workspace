@@ -2,20 +2,231 @@ import AppKit
 import CodeEditLanguages
 import SwiftUI
 
-/// ⌘, — two lists of programs the app runs but does not ship: the command line
-/// tools it needs, and the language servers the editor starts.
+/// ⌘, — the fonts code is shown in, plus two lists of programs the app runs but
+/// does not ship: the command line tools it needs, and the language servers the
+/// editor starts.
 ///
-/// Nothing here is guessed: every row is what the program itself answered,
-/// through the same login shell every other command goes through.
+/// Nothing in those two lists is guessed: every row is what the program itself
+/// answered, through the same login shell every other command goes through.
 struct SettingsView: View {
     var body: some View {
         TabView {
+            FontSettings()
+                .tabItem { Label("Fonts", systemImage: "textformat") }
             RequirementsSettings()
                 .tabItem { Label("Requirements", systemImage: "wrench.and.screwdriver") }
             LanguageServerSettings()
                 .tabItem { Label("Language Servers", systemImage: "chevron.left.forwardslash.chevron.right") }
         }
         .frame(width: 620, height: 500)
+    }
+}
+
+// MARK: - Fonts
+
+/// The face and size the editor, the diff and the terminal use.
+///
+/// Every change lands straight away — the editor re-lays out, and libghostty is
+/// handed a new configuration — so the preview under each section is the last
+/// thing you need before deciding.
+private struct FontSettings: View {
+    /// Shared, like the catalog: `@Observable` tracks whatever this body reads.
+    private var appearance: AppearanceSettings { .shared }
+
+    /// What the previews are drawn with. Two lines, so the spacing between them
+    /// is as visible as the face itself.
+    private let sample = """
+    let open = items.filter { $0.isOpen }
+    print(open.count) // 42
+    """
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Form {
+                Section {
+                    FacePicker(
+                        title: "Face",
+                        selection: Binding(
+                            get: { appearance.codeFontName },
+                            set: { appearance.codeFontName = $0 }
+                        )
+                    )
+                    SizeStepper(
+                        title: "Editor size",
+                        value: Binding(
+                            get: { appearance.editorFontSize },
+                            set: { appearance.editorFontSize = $0 }
+                        )
+                    )
+                    SizeStepper(
+                        title: "Diff size",
+                        value: Binding(
+                            get: { appearance.diffFontSize },
+                            set: { appearance.diffFontSize = $0 }
+                        )
+                    )
+                    LineHeightStepper(
+                        value: Binding(
+                            get: { appearance.editorLineHeight },
+                            set: { appearance.editorLineHeight = $0 }
+                        )
+                    )
+                    preview(
+                        font: appearance.previewFont(named: appearance.codeFontName, size: appearance.editorFontSize),
+                        size: appearance.editorFontSize,
+                        lineHeight: appearance.editorLineHeight
+                    )
+                } header: {
+                    Text("Code")
+                } footer: {
+                    Text("The editor and the diff share a face. A diff is read at a glance, so it keeps a size of its own; line spacing is the editor's alone.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+
+                Section {
+                    Toggle(
+                        "Use a font chosen here",
+                        isOn: Binding(
+                            get: { appearance.overridesTerminalFont },
+                            set: { appearance.overridesTerminalFont = $0 }
+                        )
+                    )
+                    FacePicker(
+                        title: "Face",
+                        // Ghostty picks its own face when we name none — it is
+                        // not our editor, so it does not fall back to SF Mono.
+                        systemTitle: "From your Ghostty config",
+                        selection: Binding(
+                            get: { appearance.terminalFontName },
+                            set: { appearance.terminalFontName = $0 }
+                        )
+                    )
+                    .disabled(!appearance.overridesTerminalFont)
+                    SizeStepper(
+                        title: "Size",
+                        value: Binding(
+                            get: { appearance.terminalFontSize },
+                            set: { appearance.terminalFontSize = $0 }
+                        )
+                    )
+                    .disabled(!appearance.overridesTerminalFont)
+                    if appearance.overridesTerminalFont {
+                        preview(
+                            font: appearance.previewFont(
+                                named: appearance.terminalFontName,
+                                size: appearance.terminalFontSize
+                            ),
+                            size: appearance.terminalFontSize
+                        )
+                    }
+                } header: {
+                    Text("Terminal")
+                } footer: {
+                    Text("Left off, the terminal keeps the font from your own Ghostty config. Shells already running pick the change up immediately.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .formStyle(.grouped)
+
+            Divider()
+            footer
+        }
+    }
+
+    /// `lineHeight` is a multiple of the font's own height, the way the editor
+    /// means it; SwiftUI wants the gap in points, which is the rest of it.
+    private func preview(font: Font, size: Double, lineHeight: Double = 1) -> some View {
+        Text(sample)
+            .font(font)
+            .lineSpacing(size * (lineHeight - 1))
+            .lineLimit(2)
+            .truncationMode(.tail)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(AppColors.viewerBackground), in: .rect(cornerRadius: 6))
+            .foregroundStyle(.white.opacity(0.85))
+    }
+
+    private var footer: some View {
+        HStack(spacing: 8) {
+            Text("Only monospaced faces are listed — anything else would break the gutter and the diff columns.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+            if appearance.isCustomised {
+                Button("Restore Defaults") { appearance.restoreDefaults() }
+                    .controlSize(.small)
+                    .pointerCursor()
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+}
+
+/// The installed monospaced faces, each drawn in itself.
+private struct FacePicker: View {
+    let title: String
+    /// What "no face chosen" is called here.
+    var systemTitle = AppearanceSettings.systemFaceTitle
+    @Binding var selection: String?
+
+    var body: some View {
+        Picker(title, selection: $selection) {
+            Text(systemTitle)
+                .font(.system(size: 12, design: .monospaced))
+                .tag(String?.none)
+            Divider()
+            ForEach(AppearanceSettings.faces(including: selection), id: \.self) { face in
+                // A face shown in itself needs no other description.
+                Text(AppearanceSettings.isInstalled(face) ? face : "\(face) (not installed)")
+                    .font(.custom(face, fixedSize: 12))
+                    .tag(String?.some(face))
+            }
+        }
+        .pointerCursor()
+    }
+}
+
+/// Line spacing, as a multiple of the font's own height — the same number the
+/// editor's paragraph style takes.
+private struct LineHeightStepper: View {
+    @Binding var value: Double
+
+    var body: some View {
+        Stepper(value: $value, in: AppearanceSettings.lineHeightRange, step: 0.05) {
+            HStack {
+                Text("Line spacing")
+                Spacer()
+                Text("×" + value.formatted(.number.precision(.fractionLength(2))))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+        .pointerCursor()
+    }
+}
+
+/// A size in points, to the half point — the default editor size is 12.5.
+private struct SizeStepper: View {
+    let title: String
+    @Binding var value: Double
+
+    var body: some View {
+        Stepper(value: $value, in: AppearanceSettings.sizeRange, step: 0.5) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(value.formatted(.number.precision(.fractionLength(0...1))) + " pt")
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+        .pointerCursor()
     }
 }
 

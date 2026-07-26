@@ -60,11 +60,12 @@ Nothing appears in the app until you add a repository folder yourself.
 | Editor | Our own: `NSTextView` + **tree-sitter** highlighting + **LSP**. Gutter with line numbers and diagnostic markers, caret-line highlight, auto-indent, bracket matching, soft wrap toggle. |
 | Language servers | Started lazily per language and project root: diagnostics (squiggles + gutter dots + hover), completions (⌃Space), hover help, and ⌘-click go-to-definition. See the table below. |
 | Info tab | Folder path, remote, GitHub account, branch, head commit, **listening ports** for processes started inside the folder (right-click one to open it, copy its URL, or **stop the process** holding it), running language servers, and one-click **Open in** VS Code / Cursor / Sublime / Zed / Finder / Terminal. |
-| Terminal | Embedded **libghostty** (the [Ghostty](https://github.com/ghostty-org/ghostty) engine) rooted at the repo, **any number of shells** per repo, switched from the Terminals tab rather than a tab bar in the viewer. Your own Ghostty theme/font config applies. Used for Claude Code runs. |
+| Terminal | Embedded **libghostty** (the [Ghostty](https://github.com/ghostty-org/ghostty) engine) rooted at the repo, **any number of shells** per repo, switched from the Terminals tab rather than a tab bar in the viewer. Your own Ghostty theme/font config applies. Used for Claude Code runs. **Drop a file on it** and its path is typed at the prompt — several files land side by side, spaces and brackets escaped — which is how a screenshot or a log reaches `claude`. An image dragged straight out of a browser or Preview carries no file, so it is saved as a PNG in the temporary folder and *that* path is typed. |
 | Home terminals | Shells that belong to **no repository**, rooted in your home folder (⇧⌘T). They sit in the same list as the rest, listed under *Home*, and they outlive removing every repository — so there is a prompt before a single folder has been added. |
 | Terminals button | A **terminal glyph with a count** in the centre header, from anywhere in the app: a new shell in *Home* or in the selected repo, then every open shell, newest first, to jump straight back to one. It needs no repository and no sidebar, which is what makes the home shells always reachable. |
 | Terminals tab | Every shell that is still open, across all repos, newest first. A shell **keeps running until you close its tab** — leaving the terminal, opening a file or switching repo never kills it, and "Open Terminal" returns to the one you had. |
 | Saved terminals | The list **survives quitting the app**: every tab's folder, name and order is kept (in `UserDefaults`), and comes back on the next launch. A restored tab is listed dimmed and **starts its shell the moment you show it**, so relaunching never spawns ten processes at once. Tabs whose repo was removed, or whose folder has moved, are dropped. |
+| Settings (⌘,) → Fonts | The **face and size code is shown in**. One face for the editor and the diff, each with its own size (a diff is denser on purpose), **line spacing** for the editor, and the terminal left to your own Ghostty config until you switch it over. Only **monospaced faces** are listed — Fira Code, JetBrains Mono, Monaspace and the rest are found even though those families leave the `monoSpace` trait unset — and each is drawn in itself in the menu. Every change applies at once: the editor re-lays out, and libghostty is handed a new configuration, so **shells already running** change font too. Kept in `UserDefaults`; **Restore Defaults** puts back SF Mono at 12.5 / 10 pt and ×1.0 spacing. |
 | Settings (⌘,) → Requirements | The **command line tools** the app drives — `git`, `gh`, `bkt`, `claude` — each with its own `--version` line and who it is signed in as, all asked of the tool itself through your login shell. Missing one? **Install** runs the right command (`brew install gh`, …); logged out? **Sign In** runs `gh auth login` / `bkt auth login`. Both are interactive, so they run in a real terminal inside the sheet rather than silently in the background. The gear in the repositories footer carries a **dot** when a tool your repos actually need is missing or logged out. |
 | Settings (⌘,) → Language Servers | Every server the editor can start, with a **ready / not installed** badge checked against the same PATH the editor uses. **Install** runs that server's own line (`brew install rust-analyzer`, `npm install -g pyright`, …) in a terminal. **Add** gives any other language a server — pick the language, then type the executable, the command, the LSP language ID and, if you like, an install command. Any built-in can be **edited**, **restored** to its default, or removed; changes are kept in `UserDefaults` and take effect the next time a file of that language is opened. |
 
@@ -116,16 +117,24 @@ Or open `Package.swift` in Xcode and run.
 
 ### Note on dependencies
 
-`CodeEditLanguages` vendors every tree-sitter grammar, so a full clone is
-~600 MB. `.deps/CodeEditLanguages` holds a 64 MB shallow clone at the pinned tag
-and `.swiftpm/configuration/mirrors.json` points SwiftPM at it. Delete both to
-resolve from GitHub instead.
+A bare clone builds with nothing installed beyond Xcode — that is what CI
+(`.github/workflows/build.yml`) relies on. Where the two big pieces come from:
+
+- **Tree-sitter grammars** — `CodeEditLanguages` is checked in under
+  [Vendor/](Vendor/) and referenced by path. Its upstream repository keeps every
+  historical revision of every grammar, so cloning it costs ~600 MB against
+  34 MB for the release source; see [Vendor/README.md](Vendor/README.md).
+- **The terminal engine** — comes from
+  [libghostty-spm](https://github.com/Lakr233/libghostty-spm), which ships
+  libghostty as a prebuilt, checksum-pinned universal xcframework. Upstream
+  ghostty publishes no equivalent artifact; see
+  [Docs/Terminal.md](Docs/Terminal.md).
 
 ## Keyboard
 
 | Shortcut | Action |
 | --- | --- |
-| ⌘, | Settings — required tools and language servers, install and sign-in |
+| ⌘, | Settings — code font, required tools and language servers, install and sign-in |
 | ⇧⌘O | Add repository |
 | ⌘S | Save file |
 | ⇧⌘W | Close what is open (a terminal only goes back to the dashboard) |
@@ -167,6 +176,7 @@ Sources/Workspace/
     TerminalSession.swift     a live shell (libghostty), started on first show
     ToolRequirements.swift    git/gh/bkt/claude: installed? signed in as whom?
     LanguageServerCatalog.swift  the language server list: defaults + yours
+    AppearanceSettings.swift  the code font: face, sizes, line spacing, terminal
     WorkspaceStore.swift      window state + back/forward history + saved terminals
   Editor/
     CodeEditorController.swift  wires text view, gutter, tree-sitter and LSP
@@ -182,7 +192,7 @@ Sources/Workspace/
     LanguageService.swift       one server: handshake, sync, requests
     LanguageServerRegistry.swift  catalog → running server, one per project root
   Views/                      projects sidebar, navigator, viewer, diff, PR, info
-    SettingsView.swift        ⌘, — Requirements and Language Servers tabs
+    SettingsView.swift        ⌘, — Fonts, Requirements and Language Servers tabs
     ToolConsoleSheet.swift    runs one install or sign-in in a real terminal
 ```
 

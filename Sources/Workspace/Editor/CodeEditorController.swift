@@ -209,7 +209,22 @@ final class CodeEditorController: NSViewController {
         ruler.theme = theme
         scrollView.backgroundColor = theme.background
         applyBaseAttributes()
+        // The gutter is sized from the font, so a size change moves the text.
+        ruler.updateThickness()
         highlightVisible()
+    }
+
+    /// The face, size and line spacing chosen in Settings. Applied before the
+    /// view is loaded it only seeds the theme, so the first layout already uses
+    /// them rather than laying the file out twice.
+    func applyAppearance(font: NSFont, lineHeight: CGFloat) {
+        guard theme.font != font || theme.lineHeightMultiple != lineHeight else { return }
+        let theme = SyntaxTheme(font: font, lineHeightMultiple: lineHeight)
+        if isViewLoaded {
+            updateTheme(theme)
+        } else {
+            self.theme = theme
+        }
     }
 
     /// Scrolls a zero-based line into view and puts the caret on it.

@@ -172,7 +172,7 @@ struct DiffView: View {
                 .padding(10)
         case .hunkHeader:
             Text(file.hunks[element.hunk].header)
-                .font(.system(.caption, design: .monospaced))
+                .font(AppearanceSettings.shared.diffFont)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
@@ -705,7 +705,7 @@ struct SplitDiffRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
         }
-        .font(.system(.caption, design: .monospaced))
+        .font(AppearanceSettings.shared.diffFont)
         .padding(.horizontal, 8)
         .padding(.vertical, 1)
         .frame(width: width, alignment: .topLeading)
@@ -789,7 +789,7 @@ struct UnifiedDiffRows: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
         }
-        .font(.system(.caption, design: .monospaced))
+        .font(AppearanceSettings.shared.diffFont)
         .padding(.horizontal, 8)
         .padding(.vertical, 1)
         .frame(width: width, alignment: .leading)

@@ -7,15 +7,22 @@ this app too, because the runtime loads the default config files.
 
 ## The pieces
 
-- **`.deps/GhosttyKit.xcframework`** — libghostty built with
-  `zig build -Doptimize=ReleaseFast -Dxcframework-target=native` (Zig 0.16),
-  vendored so the app builds without a Zig toolchain. Linked via a
-  `.binaryTarget` in `Package.swift`, plus the frameworks/libs it needs
-  (Metal, CoreText, Carbon, libc++, …).
-- **`.deps/ghostty-share/`** — ghostty's runtime resources (terminfo for
-  `TERM=xterm-ghostty`, shell integration). `Scripts/bundle.sh` copies them
-  into the app bundle; `GhosttyRuntime` points `GHOSTTY_RESOURCES_DIR` there
-  before `ghostty_init`.
+- **the `GhosttyKit` package product** — libghostty as a prebuilt universal
+  (arm64 + x86_64) static xcframework, downloaded and checksum-verified by
+  SwiftPM during resolution, so no Zig toolchain and no vendored binary are
+  needed. `Package.swift` also lists the frameworks and libs the archive pulls
+  in (Metal, CoreText, Carbon, libc++, …). The product is a one-line Swift
+  target that does `@_exported import libghostty`, which is why `import
+  GhosttyKit` still yields the raw C API.
+- **`Resources/ghostty-share/`** — ghostty's runtime resources: the terminfo
+  entries for `TERM=xterm-ghostty`, the shell integration scripts, and one
+  theme. They are not part of the xcframework, so they are checked in;
+  `Scripts/bundle.sh` copies them into the app bundle and `GhosttyRuntime`
+  points `GHOSTTY_RESOURCES_DIR` there before `ghostty_init`. Upstream ships
+  590 themes (2.3 MB); only `Ghostty Default Style Dark` is kept, which is why
+  the whole directory is 84 KB. The consequence: a `theme = …` line in the
+  user's own ghostty config no longer resolves — ghostty logs it and falls
+  back to its built-in colours. Re-add a theme file here to support one.
 - **`Terminal/GhosttyRuntime.swift`** — the single `ghostty_app_t`: config
   loading, `ghostty_app_tick` scheduling (wakeup callback → main actor), and
   the runtime callbacks: clipboard read/write, paste confirmation, close
@@ -46,19 +53,39 @@ this app too, because the runtime loads the default config files.
   ghostty (whose default keybinds do copy/paste through our clipboard
   callbacks). Every other ⌘-shortcut falls through to the app's menus.
 
-## Rebuilding the framework
+## Where the binary comes from
+
+Upstream ghostty ships no reusable framework. Its only release is `tip`, and
+the one xcframework there — `ghostty-vt.xcframework` — is the VT parser alone:
+it has no `ghostty_init`, no `ghostty_app_new`, no `ghostty_surface_new`, so it
+cannot back this terminal. The prebuilt full library therefore comes from
+[libghostty-spm](https://github.com/Lakr233/libghostty-spm) (MIT), which
+rebuilds upstream at a pinned commit and publishes a universal
+arm64 + x86_64 xcframework. It is depended on with `exact:`, and its own
+manifest pins the artifact by SHA-256, so the binary cannot change under us.
+
+To move to a newer libghostty, bump the `exact:` version, then check
+`ghostty.h` for API changes — the struct layouts in
+`GhosttyRuntime`/`GhosttySurfaceView` must match.
+
+If depending on a third-party mirror ever becomes uncomfortable, the escape
+hatch is to build it yourself:
 
 ```sh
 brew install zig                 # 0.16.x
 git clone --depth 1 https://github.com/ghostty-org/ghostty.git
 cd ghostty
-zig build -Doptimize=ReleaseFast -Dxcframework-target=native
+zig build -Doptimize=ReleaseFast -Dxcframework-target=universal -Demit-macos-app=false
 # → macos/GhosttyKit.xcframework, zig-out/share/{ghostty,terminfo}
 ```
 
-Copy the xcframework over `.deps/GhosttyKit.xcframework` and the two share
-dirs into `.deps/ghostty-share/`, then check `ghostty.h` for API changes —
-the struct layouts in `GhosttyRuntime`/`GhosttySurfaceView` must match.
+The `share` output is also where `Resources/ghostty-share/` is refreshed from.
+
+Two things to know before checking such a build into a repository: the iOS
+slices are dead weight here and can be deleted, and the universal macOS
+archive is **258 MB** — past GitHub's 100 MB hard limit for a single file.
+`strip -S` takes it to 49 MB without affecting linking, which is what makes
+vendoring it feasible at all.
 
 ## Not done (yet)
 

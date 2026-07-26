@@ -242,6 +242,8 @@ struct ViewerView: View {
                         document: document,
                         projectRoot: store.project(containing: document.url)?.url,
                         wrapsLines: store.wrapsLines,
+                        font: AppearanceSettings.shared.editorFont,
+                        lineHeight: AppearanceSettings.shared.editorLineHeight,
                         onOpenLocation: { url, line in
                             store.openFile(url, revealLine: line)
                         }

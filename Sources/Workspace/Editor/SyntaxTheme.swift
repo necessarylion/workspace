@@ -41,11 +41,15 @@ struct SyntaxTheme {
         static let link = NSColor(hex: 0x3E_92_FF)
     }
 
-    /// Line height as a multiple of the font's natural height.
-    var lineHeightMultiple: CGFloat = 1.35
+    /// Line height as a multiple of the font's natural height. One means the
+    /// font's own leading and nothing added: the pane is shared with two
+    /// others, so the screen goes to code rather than to gaps. Settings loosens
+    /// it for anyone who wants the air.
+    var lineHeightMultiple: CGFloat = 1.0
 
-    init(font: NSFont) {
+    init(font: NSFont, lineHeightMultiple: CGFloat = 1.0) {
         self.font = font
+        self.lineHeightMultiple = lineHeightMultiple
         self.boldFont = Self.variant(of: font, traits: .bold)
         self.italicFont = Self.variant(of: font, traits: .italic)
         self.boldItalicFont = Self.variant(of: font, traits: [.bold, .italic])

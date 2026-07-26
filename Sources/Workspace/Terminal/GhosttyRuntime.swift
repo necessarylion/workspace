@@ -13,11 +13,19 @@ import GhosttyKit
 @MainActor
 final class GhosttyRuntime {
     static let shared = GhosttyRuntime()
+    /// Whether anything has ever asked for `shared`. Settings can then reload
+    /// the configuration without booting ghostty for a terminal nobody opened.
+    private static var isStarted = false
 
     private(set) var app: ghostty_app_t?
     private var config: ghostty_config_t?
+    /// Every live surface, so a configuration change reaches the shells that
+    /// are already running. Weak: a closed tab's view just leaves the table.
+    private let surfaces = NSHashTable<GhosttySurfaceView>.weakObjects()
 
     private init() {
+        Self.isStarted = true
+
         // Terminfo and shell integration are copied into the bundle by
         // Scripts/bundle.sh; ghostty resolves both from this variable.
         if let resources = Bundle.main.resourcePath.map({ $0 + "/ghostty" }),
@@ -30,15 +38,7 @@ final class GhosttyRuntime {
             return
         }
 
-        guard let config = ghostty_config_new() else { return }
-        // The user's own Ghostty config applies: theme, font, everything.
-        ghostty_config_load_default_files(config)
-        // …except the background, which has to match the app's chrome.
-        // libghostty only reads settings from files, so write a one-line one.
-        if let overrides = Self.writeOverrideConfig() {
-            ghostty_config_load_file(config, overrides)
-        }
-        ghostty_config_finalize(config)
+        guard let config = Self.makeConfig() else { return }
         self.config = config
 
         var runtime = ghostty_runtime_config_s()
@@ -111,19 +111,71 @@ final class GhosttyRuntime {
         tick()
     }
 
+    /// The user's own Ghostty config, with our own settings on top.
+    private static func makeConfig() -> ghostty_config_t? {
+        guard let config = ghostty_config_new() else { return nil }
+        // The user's own Ghostty config applies: theme, font, everything.
+        ghostty_config_load_default_files(config)
+        // …except the background, which has to match the app's chrome, and the
+        // font when Settings overrides it. libghostty only reads settings from
+        // files, so write a short one.
+        if let overrides = writeOverrideConfig() {
+            ghostty_config_load_file(config, overrides)
+        }
+        ghostty_config_finalize(config)
+        return config
+    }
+
     /// Writes the settings we impose on top of the user's config and returns
     /// its path, or nil if it could not be written.
     private static func writeOverrideConfig() -> String? {
         let path = NSTemporaryDirectory() + "workspace-ghostty-overrides.conf"
-        let contents = """
-        background = \(AppColors.terminalBackgroundHex)
-        """
+        var lines = ["background = \(AppColors.terminalBackgroundHex)"]
+
+        let appearance = AppearanceSettings.shared
+        if appearance.overridesTerminalFont {
+            if let face = appearance.terminalFontName, AppearanceSettings.isInstalled(face) {
+                lines.append("font-family = \(face)")
+            }
+            lines.append("font-size = \(appearance.terminalFontSize)")
+        }
+
         do {
-            try contents.write(toFile: path, atomically: true, encoding: .utf8)
+            try lines.joined(separator: "\n").write(toFile: path, atomically: true, encoding: .utf8)
             return path
         } catch {
             return nil
         }
+    }
+
+    /// Re-reads the configuration and hands it to every shell already running.
+    /// Does nothing before the first terminal — there is no ghostty yet, and
+    /// starting one just to change a font would be a strange thing to do.
+    static func applyConfigurationIfRunning() {
+        guard isStarted else { return }
+        shared.applyConfiguration()
+    }
+
+    private func applyConfiguration() {
+        guard let app, let config = Self.makeConfig() else { return }
+        let previous = self.config
+        self.config = config
+
+        ghostty_app_update_config(app, config)
+        for view in surfaces.allObjects {
+            view.updateConfig(config)
+        }
+        // Only once nothing points at it any more.
+        if let previous {
+            ghostty_config_free(previous)
+        }
+        tick()
+    }
+
+    /// Called by a surface once its shell exists, so later configuration
+    /// changes reach it.
+    func register(_ view: GhosttySurfaceView) {
+        surfaces.add(view)
     }
 
     func tick() {

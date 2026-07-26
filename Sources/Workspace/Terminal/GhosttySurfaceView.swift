@@ -17,6 +17,7 @@ final class GhosttySurfaceView: NSView {
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         wantsLayer = true
+        registerForDraggedTypes([.fileURL, .string, .png, .tiff])
     }
 
     @available(*, unavailable)
@@ -92,9 +93,18 @@ final class GhosttySurfaceView: NSView {
         }
 
         if surface != nil {
+            GhosttyRuntime.shared.register(self)
             updateSurfaceSize()
             needsDisplay = true
         }
+    }
+
+    /// A new configuration — a font changed in Settings, say. Ghostty relays
+    /// the shell out itself; the view only has to redraw.
+    func updateConfig(_ config: ghostty_config_t) {
+        guard let surface else { return }
+        ghostty_surface_update_config(surface, config)
+        needsDisplay = true
     }
 
     /// Types text into the shell. Ghostty treats this as a paste, so under
@@ -250,6 +260,85 @@ final class GhosttySurfaceView: NSView {
         if flags.contains(.command) { mods |= GHOSTTY_MODS_SUPER.rawValue }
         if flags.contains(.capsLock) { mods |= GHOSTTY_MODS_CAPS.rawValue }
         return ghostty_input_mods_e(rawValue: mods)
+    }
+
+    // MARK: - Drag and drop
+
+    /// Dropping something on the terminal types its **path** at the prompt, the
+    /// way Terminal.app does — which is how a file reaches `claude`, since a
+    /// shell has no way to be handed anything but text. Files give their own
+    /// path; an image dragged straight out of a browser or Preview carries no
+    /// file, so it is written to a temporary PNG first and that path is typed.
+    /// Dropped text is inserted as it is.
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        surface == nil ? [] : .copy
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        surface == nil ? [] : .copy
+    }
+
+    override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        surface != nil
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        guard surface != nil else { return false }
+        let pasteboard = sender.draggingPasteboard
+
+        let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] ?? []
+
+        if !urls.isEmpty {
+            // The trailing space keeps several dropped files apart and lets the
+            // sentence around the path carry on being typed.
+            send(urls.map { Self.shellEscaped($0.path) }.joined(separator: " ") + " ")
+        } else if let file = Self.temporaryImageFile(from: pasteboard) {
+            send(Self.shellEscaped(file.path) + " ")
+        } else if let text = pasteboard.string(forType: .string) {
+            send(text)
+        } else {
+            return false
+        }
+
+        // Typing usually continues right after a drop.
+        window?.makeFirstResponder(self)
+        return true
+    }
+
+    /// Backslash-escapes what a shell would otherwise read as syntax, so a path
+    /// with spaces or brackets in it arrives as one word.
+    private static let charactersNeedingEscape = Set(#"\ "'`$&;|()<>[]{}*?!#"# + "\t")
+
+    private static func shellEscaped(_ path: String) -> String {
+        var escaped = ""
+        for character in path {
+            if charactersNeedingEscape.contains(character) {
+                escaped.append("\\")
+            }
+            escaped.append(character)
+        }
+        return escaped
+    }
+
+    /// Writes pasteboard image data to a PNG in the temporary folder — macOS
+    /// clears it out on its own — and returns where it landed.
+    private static func temporaryImageFile(from pasteboard: NSPasteboard) -> URL? {
+        guard let image = NSImage(pasteboard: pasteboard),
+              let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:]) else { return nil }
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dropped-\(UUID().uuidString.prefix(8)).png")
+        do {
+            try png.write(to: url)
+        } catch {
+            return nil
+        }
+        return url
     }
 
     // MARK: - Mouse

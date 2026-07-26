@@ -23,9 +23,15 @@ Scripts/bundle.sh Release   # both scripts take an optional configuration
 - The scripts set `DISABLE_SWIFTLINT=1` and `-skipPackagePluginValidation` because
   CodeEditLanguages' SwiftLint plugin fails on Xcode 26. Keep those if editing the scripts.
 - For a compile check without launching: `Scripts/bundle.sh` is the fastest supported path.
-- Dependencies: `.deps/CodeEditLanguages` is a shallow local mirror (the full clone
-  is ~600 MB); `.swiftpm/configuration/mirrors.json` points SwiftPM at it. Don't
-  delete either unless you intend to resolve from GitHub.
+- `Release` builds a universal arm64 + x86_64 binary; `Debug` builds only for this
+  machine, so the edit-run loop stays fast. `UNIVERSAL=1` forces both in Debug.
+- A bare checkout builds, which is what lets CI (`.github/workflows/build.yml`,
+  hosted macOS runner) work. `CodeEditLanguages` is vendored in `Vendor/` and
+  referenced with `.package(path:)` — cloning it instead costs ~600 MB, see
+  `Vendor/README.md`. `libghostty` arrives through the `libghostty-spm`
+  package, which supplies it as a checksum-pinned universal xcframework.
+- Ghostty's runtime resources live in `Resources/ghostty-share/` and are checked
+  in; they are not part of the xcframework, and the terminal needs them.
 
 Runtime expectations: `gh` (GitHub), `bkt` (Bitbucket), and `claude` are external
 CLIs discovered on the user's PATH, not bundled.

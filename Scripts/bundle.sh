@@ -11,15 +11,25 @@ CONFIG="${1:-Debug}"
 DERIVED=".build/xcode"
 PRODUCTS="$DERIVED/Build/Products/$CONFIG"
 
+# Release ships a universal binary (Apple Silicon + Intel); Debug builds only
+# for this machine, because compiling twice doubles the edit-run loop. Set
+# UNIVERSAL=1 to force both architectures in Debug too.
+if [ "$CONFIG" = "Release" ] || [ "${UNIVERSAL:-0}" = "1" ]; then
+    ARCH_ARGS=(ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO)
+else
+    ARCH_ARGS=(ARCHS="$(uname -m)" ONLY_ACTIVE_ARCH=YES)
+fi
+
 # DISABLE_SWIFTLINT: the SwiftLint build plugin used by CodeEdit's packages
 # fails under Xcode 26 ("The folder Output doesn't exist"); the plugin itself
 # offers this opt-out.
 DISABLE_SWIFTLINT=1 xcodebuild \
     -scheme Workspace \
-    -destination 'platform=macOS,arch=arm64' \
+    -destination 'platform=macOS' \
     -derivedDataPath "$DERIVED" \
     -configuration "$CONFIG" \
     -skipPackagePluginValidation \
+    "${ARCH_ARGS[@]}" \
     build >&2
 
 APP="$PRODUCTS/Workspace.app"
@@ -38,8 +48,10 @@ done
 
 # Ghostty runtime resources: terminfo + shell integration. GhosttyRuntime
 # points GHOSTTY_RESOURCES_DIR at Resources/ghostty before ghostty_init.
-cp -R .deps/ghostty-share/ghostty "$APP/Contents/Resources/ghostty"
-cp -R .deps/ghostty-share/terminfo "$APP/Contents/Resources/terminfo"
+# These are checked in (Resources/ghostty-share) so a fresh clone can bundle
+# the app without fetching anything beyond the SwiftPM dependencies.
+cp -R Resources/ghostty-share/ghostty "$APP/Contents/Resources/ghostty"
+cp -R Resources/ghostty-share/terminfo "$APP/Contents/Resources/terminfo"
 
 # Ad-hoc signature: enough for local runs and keeps macOS from complaining.
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
