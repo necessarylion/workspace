@@ -279,6 +279,31 @@ final class Project: Identifiable {
     /// What the last staging, commit or push printed when it failed.
     var gitError: String?
 
+    /// Set while Claude is writing the commit message, so the button can spin
+    /// and nothing commits the box out from under it.
+    var isWritingCommitMessage = false
+
+    /// Fills the commit box with a message Claude wrote for the change in front
+    /// of it — the staged files, or the whole working tree while nothing is
+    /// staged, which is the same set the Commit button would take.
+    func writeCommitMessage() async {
+        guard !isWritingCommitMessage, !isRunningGitCommand else { return }
+        isWritingCommitMessage = true
+        gitError = nil
+        defer { isWritingCommitMessage = false }
+
+        do {
+            commitMessage = try await ClaudeCommitMessage.write(
+                in: url,
+                stagedOnly: !stagedChanges.isEmpty,
+                branch: gitStatus?.branch,
+                recentSubjects: recentCommits.prefix(10).map(\.headline)
+            )
+        } catch {
+            gitError = error.localizedDescription
+        }
+    }
+
     var stagedChanges: [GitStatus.Change] { gitStatus?.changes.filter(\.isStaged) ?? [] }
     var unstagedChanges: [GitStatus.Change] { gitStatus?.changes.filter { !$0.isStaged } ?? [] }
 

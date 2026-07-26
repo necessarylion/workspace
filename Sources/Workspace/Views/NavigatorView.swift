@@ -678,8 +678,15 @@ struct ChangeListView: View {
 
     private var canCommit: Bool {
         !isBusy
+            && !project.isWritingCommitMessage
             && !project.stagedChanges.isEmpty
             && !project.commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// There has to be a change to describe, and only one message can be on its
+    /// way at a time.
+    private var canWriteCommitMessage: Bool {
+        !isBusy && !project.isWritingCommitMessage && project.changeCount > 0
     }
 
     var body: some View {
@@ -890,17 +897,7 @@ struct ChangeListView: View {
             }
 
             if project.changeCount > 0 {
-                TextField(
-                    "Commit message",
-                    text: Binding(
-                        get: { project.commitMessage },
-                        set: { project.commitMessage = $0 }
-                    ),
-                    axis: .vertical
-                )
-                .lineLimit(1...4)
-                .textFieldStyle(.roundedBorder)
-                .font(.callout)
+                commitField
             }
 
             HStack(spacing: 8) {
@@ -911,6 +908,23 @@ struct ChangeListView: View {
                 if isBusy {
                     ProgressView().controlSize(.mini)
                 }
+
+                // Claude writes the message from the same change the Commit
+                // button beside it would take. Its own spinner replaces the
+                // mark, so the row keeps its width while it thinks.
+                Button {
+                    Task { await project.writeCommitMessage() }
+                } label: {
+                    if project.isWritingCommitMessage {
+                        ProgressView().controlSize(.mini).frame(width: 14, height: 14)
+                    } else {
+                        ClaudeMark(size: 14)
+                    }
+                }
+                .disabled(!canWriteCommitMessage)
+                .help("Write the commit message with Claude")
+                .pointerCursor(canWriteCommitMessage)
+
                 Button("Commit") {
                     Task {
                         if await project.commit() {
@@ -941,6 +955,45 @@ struct ChangeListView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    /// The message being written.
+    ///
+    /// A `TextField` was the obvious control and the wrong one: it grows to the
+    /// four lines it is allowed and then simply stops, so a longer message —
+    /// exactly what a subject plus a body is, and what the Claude button writes
+    /// — could only be walked through with the arrow keys, never scrolled and
+    /// never seen whole. A `TextEditor` scrolls, so the same four lines of space
+    /// now show any part of the message you like. The border is drawn here
+    /// because a text editor, unlike a text field, has no bordered style.
+    private var commitField: some View {
+        TextEditor(
+            text: Binding(
+                get: { project.commitMessage },
+                set: { project.commitMessage = $0 }
+            )
+        )
+        .font(.callout)
+        .scrollContentBackground(.hidden)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 3)
+        .frame(height: 70)
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Color(nsColor: .separatorColor))
+        }
+        .overlay(alignment: .topLeading) {
+            // A text editor has no prompt of its own.
+            if project.commitMessage.isEmpty {
+                Text("Commit message")
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 8)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     /// What git has: staged, unstaged, and commits waiting to go out.

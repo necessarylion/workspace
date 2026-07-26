@@ -352,10 +352,12 @@ struct ViewerView: View {
                 diff: diff,
                 layout: Binding(get: { item.diffLayout }, set: { item.diffLayout = $0 }),
                 selectedFile: Binding(get: { item.diffFile }, set: { item.diffFile = $0 }),
-                // A commit keeps its own, which starts hidden; a working-tree
-                // diff stays on the window-wide preference.
-                showsFiles: item.isCommit
-                    ? Binding(get: { item.showsCommitFiles }, set: { item.showsCommitFiles = $0 })
+                // A commit and the combined "All Changes" diff each keep their
+                // own, which starts hidden — the navigator is already listing
+                // the same files beside the latter. A single file's diff stays
+                // on the window-wide preference.
+                showsFiles: item.isCommit || item.isAllChanges
+                    ? Binding(get: { item.showsDiffFileList }, set: { item.showsDiffFileList = $0 })
                     : nil
             )
         } else {

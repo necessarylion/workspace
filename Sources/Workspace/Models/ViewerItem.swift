@@ -73,11 +73,14 @@ final class ViewerItem: Identifiable {
     var authorName: String?
     var authorAvatarURL: URL?
 
-    /// Whether the file index shows beside a commit's diff. Off to start with:
-    /// a commit is read top to bottom as one change, so the list is in the way
-    /// until it is asked for — unlike a pull request, where it is how you get
-    /// around. Kept per item rather than window-wide for the same reason.
-    var showsCommitFiles = false
+    /// Whether the file index shows beside a commit's or the working tree's
+    /// combined diff. Off to start with: a commit is read top to bottom as one
+    /// change, and the combined diff already has the navigator's change list
+    /// beside it, so a second copy of the same list only takes width. Either way
+    /// the list is in the way until it is asked for — unlike a pull request,
+    /// where it is how you get around. Kept per item rather than window-wide for
+    /// the same reason.
+    var showsDiffFileList = false
 
     // Payloads, filled in depending on `kind`.
     var document: OpenDocument?
@@ -182,6 +185,12 @@ final class ViewerItem: Identifiable {
 
     nonisolated var isCommit: Bool {
         if case .commit = kind { true } else { false }
+    }
+
+    /// The one diff holding everything in the working tree — see
+    /// `WorkspaceStore.openAllChanges`, which marks it with an empty path.
+    nonisolated var isAllChanges: Bool {
+        if case .workingDiff(_, let path, _) = kind { path.isEmpty } else { false }
     }
 
     /// The full hash of the commit on screen, for the header's copy button. The

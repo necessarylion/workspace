@@ -51,9 +51,8 @@ enum ClaudeCommitMessage {
         branch: String?,
         recentSubjects: [String]
     ) async throws -> String {
-        guard let executable = await ClaudeCLI.shared.info().executable else {
-            throw Failure.notInstalled
-        }
+        let cli = await ClaudeCLI.shared.info()
+        guard let executable = cli.executable else { throw Failure.notInstalled }
 
         let context = await context(
             in: directory,
@@ -71,8 +70,14 @@ enum ClaudeCommitMessage {
         try? context.write(to: file, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: file) }
 
-        let script = "cat \(Shell.quote(file.path)) | \(Shell.quote(executable))"
+        var script = "cat \(Shell.quote(file.path)) | \(Shell.quote(executable))"
             + " -p \(Shell.quote(instruction)) --output-format text"
+        // Writing a commit message is not a conversation the user had, so it
+        // has no business in the sessions list. An older CLI has no such flag
+        // and refuses to start rather than ignoring it, hence the check.
+        if cli.supportsNoSessionPersistence {
+            script += " --no-session-persistence"
+        }
         let result = await Shell.runScript(script, in: directory, timeout: 180)
         guard result.isSuccess else { throw Failure.claudeFailed(result.failureMessage) }
 

@@ -604,8 +604,8 @@ struct PullRequestDetailView: View {
                     // One commit of a pull request reads like any other commit:
                     // the file index waits until it is asked for.
                     showsFiles: Binding(
-                        get: { item.showsCommitFiles },
-                        set: { item.showsCommitFiles = $0 }
+                        get: { item.showsDiffFileList },
+                        set: { item.showsDiffFileList = $0 }
                     )
                 )
             } else if item.isLoadingCommitDiff {

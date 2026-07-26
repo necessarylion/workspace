@@ -14,6 +14,8 @@ struct ClaudeCLIInfo: Sendable {
     /// read, which is treated as "no idea, send what was asked for".
     var permissionModes: Set<String> = []
     var supportsEffort = false
+    /// Whether a one-shot run can be told to leave no transcript behind.
+    var supportsNoSessionPersistence = false
 
     var isInstalled: Bool { executable != nil }
 
@@ -62,7 +64,8 @@ actor ClaudeCLI {
         return ClaudeCLIInfo(
             executable: executable,
             permissionModes: permissionModes(in: help.stdout),
-            supportsEffort: help.stdout.contains("--effort")
+            supportsEffort: help.stdout.contains("--effort"),
+            supportsNoSessionPersistence: help.stdout.contains("--no-session-persistence")
         )
     }
 
