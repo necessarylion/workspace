@@ -50,7 +50,7 @@ struct WorkspaceApp: App {
                 .keyboardShortcut("0", modifiers: .command)
 
                 Button(store.showsNavigator ? "Hide Navigator" : "Show Navigator") {
-                    store.showsNavigator.toggle()
+                    store.toggleNavigator()
                 }
                 .keyboardShortcut("0", modifiers: [.option, .command])
             }

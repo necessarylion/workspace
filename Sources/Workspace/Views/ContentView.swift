@@ -52,6 +52,16 @@ struct ContentView: View {
                 FileFinderOverlay()
             }
         }
+        // A pull request is read across the whole window, so the navigator folds
+        // away for it and comes back afterwards — see the store, which knows
+        // whether it was there in the first place. Watched here rather than done
+        // at every call site: opening one, back, forward, closing it and
+        // switching repository all come down to this one value changing.
+        .onChange(of: store.isShowingPullRequest, initial: true) {
+            withAnimation(.easeOut(duration: 0.12)) {
+                store.syncNavigatorWithPullRequest()
+            }
+        }
         .animation(.easeOut(duration: 0.12), value: store.isSwitchingProjects)
         .animation(.easeOut(duration: 0.1), value: store.isFindingFiles)
         .onWindowKeyEvent(matching: [.keyDown, .flagsChanged]) { event, window in

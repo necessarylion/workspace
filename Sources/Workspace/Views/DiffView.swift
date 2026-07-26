@@ -236,6 +236,7 @@ struct DiffView: View {
                 threads: threads(file: file, row: row),
                 isPosting: comments?.isPosting ?? false,
                 replyingTo: $replyingTo,
+                mentions: comments?.mentions ?? .none,
                 onReply: { parent, body in await comments?.reply(parent, body) }
             )
             .frame(width: width, alignment: .leading)
@@ -244,6 +245,7 @@ struct DiffView: View {
                 DiffCommentComposer(
                     anchor: anchor,
                     isPosting: comments?.isPosting ?? false,
+                    mentions: comments?.mentions ?? .none,
                     onCancel: { composing = nil },
                     onSend: { body in
                         await comments?.add(anchor, body)
@@ -283,6 +285,8 @@ struct DiffComments {
     /// Thread roots keyed by the line they are anchored to.
     var threads: [DiffLineAnchor: [PullRequestCommentNode]]
     var isPosting: Bool
+    /// Who an `@` in one of these boxes can name.
+    var mentions: MentionSource = .none
     /// Starts a new thread on a line.
     var add: (DiffLineAnchor, String) async -> Void
     /// Replies to a comment in an existing thread.

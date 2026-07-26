@@ -161,6 +161,75 @@ extension PullRequestService {
         }
     }
 
+    // MARK: - The description
+
+    /// The description as the host itself stores it, which is where an edit has
+    /// to start from.
+    ///
+    /// GitHub hands over the Markdown the author typed, so the copy already in
+    /// hand is that. Bitbucket Cloud's is not: there a mention arrives as an
+    /// account id and the app puts the name in its place for reading — see
+    /// ``BitbucketMarkup`` — and saving that text back would post the name as
+    /// plain words and lose the mention. Nothing is fetched when the description
+    /// has no `@` in it at all, since then nothing can have been replaced.
+    static func editableDescription(for pr: PullRequest, in directory: URL) async -> String {
+        guard pr.host == .bitbucket, pr.body.contains("@"),
+              !pr.repositoryOwner.isEmpty, !pr.repositorySlug.isEmpty
+        else { return pr.body }
+
+        let path = "/2.0/repositories/\(pr.repositoryOwner)/\(pr.repositorySlug)/pullrequests/\(pr.number)"
+        let result = await Shell.run(["bkt", "api", path], in: directory, timeout: 60)
+        guard result.isSuccess,
+              let object = try? JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
+        else { return pr.body }
+
+        if let raw = (object["summary"] as? [String: Any])?["raw"] as? String { return raw }
+        if let description = object["description"] as? String { return description }
+        return pr.body
+    }
+
+    /// Replaces the pull request's description with `body`, which is Markdown —
+    /// both CLIs take it whole, on one flag.
+    static func updateDescription(
+        _ body: String,
+        on pr: PullRequest,
+        in directory: URL
+    ) async throws {
+        switch pr.host {
+        case .github:
+            let result = await GitHubCLI.run(
+                ["pr", "edit", "\(pr.number)", "--body", body],
+                in: directory,
+                timeout: 60
+            )
+            guard result.isSuccess else {
+                throw PullRequestError.commandFailed(result.failureMessage)
+            }
+
+        case .bitbucket:
+            // Same dance as everywhere else: name the repository outright, and
+            // fall back to whatever context bkt is configured with.
+            var attempts: [[String]] = []
+            let base = ["bkt", "pr", "edit", "\(pr.number)", "--body", body]
+            if !pr.repositoryOwner.isEmpty, !pr.repositorySlug.isEmpty {
+                attempts.append(base + ["--workspace", pr.repositoryOwner, "--repo", pr.repositorySlug])
+                attempts.append(base + ["--project", pr.repositoryOwner, "--repo", pr.repositorySlug])
+            }
+            attempts.append(base)
+
+            var lastMessage = "Bitbucket refused the new description."
+            for command in attempts {
+                let result = await Shell.run(command, in: directory, timeout: 60)
+                if result.isSuccess { return }
+                lastMessage = result.failureMessage
+            }
+            throw PullRequestError.commandFailed(lastMessage)
+
+        case .unknown:
+            throw PullRequestError.unsupportedHost
+        }
+    }
+
     // MARK: - Reviewing
 
     /// Approves the pull request, or asks for changes on it.

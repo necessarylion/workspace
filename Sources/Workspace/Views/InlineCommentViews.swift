@@ -35,6 +35,7 @@ struct DiffCommentThreads: View {
     let threads: [PullRequestCommentNode]
     let isPosting: Bool
     @Binding var replyingTo: PullRequestComment?
+    var mentions: MentionSource = .none
     let onReply: (PullRequestComment, String) async -> Void
 
     var body: some View {
@@ -45,6 +46,7 @@ struct DiffCommentThreads: View {
                     depth: 0,
                     replyingTo: $replyingTo,
                     isPosting: isPosting,
+                    mentions: mentions,
                     onReply: onReply
                 )
             }
@@ -66,6 +68,7 @@ struct DiffCommentThreads: View {
 struct DiffCommentComposer: View {
     let anchor: DiffLineAnchor
     let isPosting: Bool
+    var mentions: MentionSource = .none
     let onCancel: () -> Void
     let onSend: (String) async -> Void
 
@@ -82,10 +85,11 @@ struct DiffCommentComposer: View {
             .truncationMode(.head)
 
             CommentComposer(
-                prompt: "Comment on this line…",
+                prompt: "Comment on this line…  @ to name someone",
                 sendTitle: "Comment",
                 sendSymbol: "paperplane",
                 isPosting: isPosting,
+                mentions: mentions,
                 onCancel: onCancel,
                 onSend: onSend
             )
@@ -108,11 +112,11 @@ struct CommentComposer: View {
     let sendTitle: String
     var sendSymbol = "arrowshape.turn.up.left"
     let isPosting: Bool
+    var mentions: MentionSource = .none
     let onCancel: () -> Void
     let onSend: (String) async -> Void
 
     @State private var draft = ""
-    @FocusState private var isFocused: Bool
 
     private var isEmpty: Bool {
         draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -120,23 +124,17 @@ struct CommentComposer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            TextEditor(text: $draft)
-                .font(.callout)
-                .frame(minHeight: 48, maxHeight: 110)
-                .scrollContentBackground(.hidden)
-                .padding(5)
-                .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
-                .overlay(alignment: .topLeading) {
-                    if draft.isEmpty {
-                        Text(prompt)
-                            .font(.callout)
-                            .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 11)
-                            .allowsHitTesting(false)
-                    }
-                }
-                .focused($isFocused)
+            MentionTextBox(
+                text: $draft,
+                prompt: prompt,
+                mentions: mentions,
+                minHeight: 44,
+                maxLines: 6,
+                // A reply box is opened in order to type in it, and ⎋ closes it
+                // again — the same key that closes everything else in the window.
+                focusesOnAppear: true,
+                onEscape: onCancel
+            )
 
             HStack(spacing: 7) {
                 Spacer()
@@ -161,7 +159,6 @@ struct CommentComposer: View {
                 .pointerCursor(!isPosting && !isEmpty)
             }
         }
-        .onAppear { isFocused = true }
     }
 
     private func send() async {

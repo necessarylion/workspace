@@ -190,57 +190,53 @@ struct MarkdownText: View {
                     .foregroundStyle(.secondary)
             }
         case .table(let headers, let rows):
-            // No horizontal scroll view around this: one would offer the grid
+            // No horizontal scroll view around this: one would offer the table
             // unbounded width, so a cell would never wrap and a wide table would
-            // scroll instead of fitting. Bounded by the pane, the columns share
-            // what there is and long cells wrap.
-            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
-                // The fill goes on each cell, not on the `GridRow`: a row
-                // background only covers the cells' own widths, which leaves
-                // unpainted gaps wherever a column is wider than its text.
+            // scroll instead of fitting. Bounded by the pane, the columns take
+            // what their text asks for and long cells wrap — see
+            // `MarkdownTableLayout` for why this is not a `Grid`.
+            MarkdownTableLayout(columns: headers.count) {
+                // The fill goes on each cell, not on a row: a row background
+                // only covers the cells' own widths, which leaves unpainted
+                // gaps wherever a column is wider than its text.
                 // `maxWidth: .infinity` makes a cell take the whole column.
-                GridRow {
-                    ForEach(headers.indices, id: \.self) { column in
-                        inline(headers[column])
-                            .font(.callout.weight(.semibold))
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .frame(maxHeight: .infinity, alignment: .topLeading)
-                            .background(.quaternary.opacity(0.4))
-                    }
+                ForEach(headers.indices, id: \.self) { column in
+                    inline(headers[column])
+                        .font(.callout.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(maxHeight: .infinity, alignment: .topLeading)
+                        .background(.quaternary.opacity(0.4))
                 }
                 ForEach(rows.indices, id: \.self) { index in
-                    Divider()
-                    GridRow {
-                        ForEach(rows[index].indices, id: \.self) { column in
-                            inline(rows[index][column])
-                                // Take as many lines as the wrapped text needs
-                                // rather than being squeezed onto one.
-                                .fixedSize(horizontal: false, vertical: true)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                // Once cells wrap they no longer agree on a
-                                // height, and a fill that stops at the text
-                                // leaves the stripe ragged. Stretch every cell
-                                // to the tallest one in its row.
-                                .frame(maxHeight: .infinity, alignment: .topLeading)
-                                .background(
-                                    index.isMultiple(of: 2)
-                                        ? AnyShapeStyle(.clear)
-                                        : AnyShapeStyle(.quaternary.opacity(0.15))
-                                )
-                        }
+                    ForEach(headers.indices, id: \.self) { column in
+                        inline(column < rows[index].count ? rows[index][column] : "")
+                            // Take as many lines as the wrapped text needs
+                            // rather than being squeezed onto one.
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            // Once cells wrap they no longer agree on a
+                            // height, and a fill that stops at the text
+                            // leaves the stripe ragged. Stretch every cell
+                            // to the tallest one in its row.
+                            .frame(maxHeight: .infinity, alignment: .topLeading)
+                            .background(
+                                index.isMultiple(of: 2)
+                                    ? AnyShapeStyle(.clear)
+                                    : AnyShapeStyle(.quaternary.opacity(0.15))
+                            )
+                            // The layout owns no spacing, so the rule between
+                            // rows rides on the cells; each one spans its own
+                            // column and together they draw a single line.
+                            .overlay(alignment: .top) { Divider() }
                     }
                 }
             }
             .frame(maxWidth: .infinity)
-            // The cells stretch to their row, so the grid itself has to be
-            // pinned to its natural height or that `.infinity` would make the
-            // whole table greedy.
-            .fixedSize(horizontal: false, vertical: true)
             .background(.quaternary.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))
         case .rule:
@@ -307,6 +303,9 @@ struct MarkdownText: View {
             // run wide, so at a matching size code looks larger than the prose
             // it is quoted in.
             piece.font = .system(size: baseSize - 1, design: .monospaced)
+            // Green on the chip, the way a terminal renders a code span: the
+            // fill alone is subtle enough that a short span can be missed.
+            piece.foregroundColor = Self.chipTextColor
             if #available(macOS 15.0, *) {
                 // Tagged only; `CodeChipBackdrop` paints the rounded fill.
                 result = result + Text(piece).customAttribute(CodeChip())
@@ -320,6 +319,19 @@ struct MarkdownText: View {
     }
 
     static let chipColor = Color.secondary.opacity(0.22)
+
+    /// The colour of the code itself. Hard-coded rather than taken from the
+    /// syntax palette: a code span has no language and so no capture to look
+    /// up, and the palette's `string` colour — the obvious stand-in — is red in
+    /// most light themes, which reads as an error. Two shades of green instead,
+    /// dark enough to stay legible on paper-white and light enough on the dark
+    /// chip.
+    static let chipTextColor = Color(nsColor: NSColor(name: nil) { appearance in
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return isDark
+            ? NSColor(srgbRed: 0.60, green: 0.80, blue: 0.51, alpha: 1)
+            : NSColor(srgbRed: 0.10, green: 0.45, blue: 0.20, alpha: 1)
+    })
 
     /// The point size SwiftUI's default body font resolves to, which every
     /// block but a heading is set in.
@@ -562,5 +574,162 @@ struct MarkdownText: View {
         let rest = line.dropFirst(digits.count)
         guard rest.hasPrefix(". ") || rest.hasPrefix(") ") else { return nil }
         return (String(digits), rest.dropFirst(2).trimmingCharacters(in: .whitespaces))
+    }
+}
+
+/// Lays a Markdown table out one column at a time.
+///
+/// `Grid` cannot do this: it hands every column the same share of the pane, so a
+/// `#` column holding `B1` ends up as wide as the one holding a sentence, and
+/// the sentence wraps for no reason. Here each column asks for the width its
+/// longest cell wants on one line, and only the columns that ask for more than
+/// their fair share give any of it back — a narrow column stays narrow and the
+/// width it does not need goes to the ones that have to wrap.
+///
+/// Subviews arrive in row-major order, `columns` per row, the header first.
+private struct MarkdownTableLayout: Layout {
+    let columns: Int
+
+    struct Cache {
+        /// Width each column wants with nothing wrapped.
+        var natural: [CGFloat]
+        /// Width below which a column's longest word would be cut.
+        var minimum: [CGFloat]
+        /// The width the rest of the cache was resolved for; `nil` until then.
+        var resolvedFor: CGFloat?
+        var widths: [CGFloat] = []
+        var rowHeights: [CGFloat] = []
+    }
+
+    func makeCache(subviews: Subviews) -> Cache {
+        var natural = [CGFloat](repeating: 0, count: max(columns, 1))
+        var minimum = natural
+        for (index, subview) in subviews.enumerated() {
+            let column = index % max(columns, 1)
+            natural[column] = max(natural[column], subview.sizeThatFits(.unspecified).width)
+            // The narrowest proposal there is: a `Text` answers it with the
+            // width of its longest unbreakable run.
+            minimum[column] = max(
+                minimum[column],
+                subview.sizeThatFits(ProposedViewSize(width: 0, height: nil)).width
+            )
+        }
+        return Cache(natural: natural, minimum: zip(minimum, natural).map { Swift.min($0, $1) })
+    }
+
+    func updateCache(_ cache: inout Cache, subviews: Subviews) {
+        cache = makeCache(subviews: subviews)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        let width = proposal.width ?? cache.natural.reduce(0, +)
+        resolve(width: width, subviews: subviews, cache: &cache)
+        // The columns, not the proposal: asked for nothing the table still
+        // answers with the width its longest words need.
+        return CGSize(
+            width: cache.widths.reduce(0, +),
+            height: cache.rowHeights.reduce(0, +)
+        )
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout Cache
+    ) {
+        resolve(width: bounds.width, subviews: subviews, cache: &cache)
+        var y = bounds.minY
+        for row in cache.rowHeights.indices {
+            var x = bounds.minX
+            for column in 0..<columns {
+                let index = row * columns + column
+                guard index < subviews.count else { break }
+                subviews[index].place(
+                    at: CGPoint(x: x, y: y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(
+                        width: cache.widths[column],
+                        height: cache.rowHeights[row]
+                    )
+                )
+                x += cache.widths[column]
+            }
+            y += cache.rowHeights[row]
+        }
+    }
+
+    /// Fills in the column widths and row heights for `width`. Measuring rows is
+    /// the expensive half, so a repeat of the same width reuses the last answer.
+    private func resolve(width: CGFloat, subviews: Subviews, cache: inout Cache) {
+        guard columns > 0, !subviews.isEmpty else {
+            cache.widths = []
+            cache.rowHeights = []
+            return
+        }
+        guard cache.resolvedFor != width else { return }
+        cache.resolvedFor = width
+        cache.widths = Self.columnWidths(
+            natural: cache.natural,
+            minimum: cache.minimum,
+            available: width
+        )
+        // A row is as tall as the cell that wraps onto the most lines.
+        let rows = (subviews.count + columns - 1) / columns
+        cache.rowHeights = (0..<rows).map { row in
+            (0..<columns).reduce(CGFloat.zero) { height, column in
+                let index = row * columns + column
+                guard index < subviews.count else { return height }
+                let cell = subviews[index].sizeThatFits(
+                    ProposedViewSize(width: cache.widths[column], height: nil)
+                )
+                return max(height, cell.height)
+            }
+        }
+    }
+
+    /// Splits `available` between the columns: anything that fits in an equal
+    /// share is left at the width it asked for, and what is left over goes to
+    /// the wide columns in proportion to how much they wanted.
+    static func columnWidths(
+        natural: [CGFloat],
+        minimum: [CGFloat],
+        available: CGFloat
+    ) -> [CGFloat] {
+        guard !natural.isEmpty else { return [] }
+        let wanted = natural.reduce(0, +)
+        guard wanted > 0 else {
+            return natural.map { _ in available / CGFloat(natural.count) }
+        }
+        // Room to spare: the table still spans the pane, but the extra is shared
+        // out in proportion, so a narrow column stays narrow.
+        if wanted <= available {
+            return natural.map { $0 + (available - wanted) * ($0 / wanted) }
+        }
+
+        var widths = natural
+        var flexible = Set(natural.indices)
+        var budget = available
+        // Pin every column that is content with an equal share. Each pass frees
+        // up more for the rest, which can settle a further column, so repeat
+        // until a pass pins nothing.
+        var settled = false
+        while !settled, !flexible.isEmpty {
+            settled = true
+            let share = budget / CGFloat(flexible.count)
+            for column in flexible.sorted() where natural[column] <= share {
+                widths[column] = natural[column]
+                budget -= natural[column]
+                flexible.remove(column)
+                settled = false
+            }
+        }
+        // The rest wrap. They divide what is left in proportion to what they
+        // asked for, but never down past their longest word.
+        let asked = flexible.reduce(CGFloat.zero) { $0 + natural[$1] }
+        for column in flexible where asked > 0 {
+            widths[column] = max(minimum[column], budget * natural[column] / asked)
+        }
+        return widths
     }
 }

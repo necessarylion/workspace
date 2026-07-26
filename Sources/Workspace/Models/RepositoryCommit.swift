@@ -105,11 +105,22 @@ struct RepositoryCommit: Identifiable, Sendable, Hashable {
 
 // MARK: - Grouping
 
-/// A day's worth of commits, as the dashboard lists them.
-struct CommitDay: Identifiable {
+/// What ``CommitDay`` needs of a commit to bucket it: a hash to name the group
+/// by, and the day it was made. The repository's own commits and a pull
+/// request's both answer to it, which is what lets the dashboard and the pull
+/// request's Commits tab read as one list rather than as two designs.
+protocol DatedCommit: Identifiable {
+    var sha: String { get }
+    var date: Date? { get }
+}
+
+extension RepositoryCommit: DatedCommit {}
+
+/// A day's worth of commits, as the dashboard and the pull request list them.
+struct CommitDay<Commit: DatedCommit>: Identifiable {
     /// Midnight of the day, or nil for commits git gave no readable date for.
     var date: Date?
-    var commits: [RepositoryCommit]
+    var commits: [Commit]
 
     /// The first commit's hash identifies the group: a date cannot, since a
     /// commit git gave no readable date for lands in a group without one.
@@ -130,9 +141,9 @@ struct CommitDay: Identifiable {
 
     /// Buckets commits by the day they were authored, keeping the newest-first
     /// order `git log` already put them in.
-    static func group(_ commits: [RepositoryCommit]) -> [CommitDay] {
+    static func group(_ commits: [Commit]) -> [CommitDay<Commit>] {
         let calendar = Calendar.current
-        var days: [CommitDay] = []
+        var days: [CommitDay<Commit>] = []
         for commit in commits {
             let day = commit.date.map { calendar.startOfDay(for: $0) }
             if !days.isEmpty, days.last?.date == day {

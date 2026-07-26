@@ -35,7 +35,7 @@ final class ViewerItem: Identifiable {
     /// than in the view because the picker sits up in the window header, next to
     /// back and forward, and each pull request remembers where you left it.
     enum PullRequestTab: String, CaseIterable, Identifiable {
-        case details, diff, commits, builds
+        case details, diff, commits
         var id: String { rawValue }
 
         var title: String {
@@ -43,7 +43,6 @@ final class ViewerItem: Identifiable {
             case .details: "Details"
             case .diff: "Diff"
             case .commits: "Commits"
-            case .builds: "Builds"
             }
         }
 
@@ -52,7 +51,6 @@ final class ViewerItem: Identifiable {
             case .details: "bubble.left.and.bubble.right"
             case .diff: "plusminus"
             case .commits: "clock.arrow.circlepath"
-            case .builds: "hammer"
             }
         }
     }
@@ -119,6 +117,18 @@ final class ViewerItem: Identifiable {
     /// The file picked in a commit's own diff. Separate from `diffFile`: the
     /// pull request's diff and one commit's are different sets of files.
     var commitDiffFile: DiffFile.ID?
+
+    // Who is reviewing the pull request, and how many of them have approved.
+    // Loaded with the conversation, because the count sits in the summary bar
+    // that is on screen whichever tab is open.
+    var reviewers: [PullRequestReviewer] = []
+    var isLoadingReviewers = false
+    var reviewersError: String?
+    /// The people the picker offers, fetched the first time it is opened — the
+    /// list costs a call to the host and most pull requests never ask for it.
+    var reviewerCandidates: [ReviewerCandidate] = []
+    var isLoadingReviewerCandidates = false
+    var hasLoadedReviewerCandidates = false
 
     // Pull request builds: the CI runs on its head commit.
     var builds: [PullRequestBuild] = []

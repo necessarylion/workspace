@@ -25,7 +25,7 @@ struct Diff: Sendable, Hashable {
     /// hundred files up front runs tree-sitter over every hunk of every one of
     /// them on the main actor, and laying them all out is a scroll nobody can
     /// find anything in anyway.
-    static let fileByFileThreshold = 20
+    static let fileByFileThreshold = 10
 
     /// Whether this diff is too big to show whole — see ``fileByFileThreshold``.
     var isFileByFile: Bool { files.count > Self.fileByFileThreshold }

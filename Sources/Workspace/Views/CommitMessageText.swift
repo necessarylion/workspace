@@ -260,12 +260,26 @@ final class LinkedMessageView: NSView {
         setHovered(nil)
     }
 
-    /// Taken so the view is the one that hears the mouse going up. What it does
-    /// waits for that release, the way a button does.
-    override func mouseDown(with event: NSEvent) {}
+    /// The whole click is taken here, release included, rather than left to
+    /// AppKit to deliver as a `mouseUp` later.
+    ///
+    /// The row around a message is usually a SwiftUI `Button`, and a button
+    /// answers every click in what it wraps — including the ones this view has
+    /// already answered itself. That is how following a `#123` also opened the
+    /// commit the message belongs to. Waiting for the release here keeps that
+    /// release out of the button's reach, so a click does one thing: the link
+    /// if it landed on one, and otherwise whatever the row asked for.
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        while let next = window.nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
+            guard next.type == .leftMouseUp else { continue }
+            click(at: convert(next.locationInWindow, from: nil))
+            return
+        }
+    }
 
-    override func mouseUp(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
+    /// Released over the message: the link under the pointer, or the row.
+    private func click(at point: NSPoint) {
         guard bounds.contains(point) else { return }
         if let index = reference(at: point) {
             openReference?(references[index].number)

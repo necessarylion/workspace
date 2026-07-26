@@ -275,7 +275,7 @@ extension PullRequestService {
 
     /// Recent `gh api --paginate` merges pages into one JSON array; older
     /// versions print one array per page, back to back. Handle both.
-    private static func decodeJSONArrayPages<T: Decodable>(
+    static func decodeJSONArrayPages<T: Decodable>(
         _ text: String,
         as type: T.Type
     ) -> [T] {

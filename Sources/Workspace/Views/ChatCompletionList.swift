@@ -59,6 +59,13 @@ struct ChatCompletion: Identifiable, Equatable {
     /// The folder a file sits in, drawn behind its name so two files with the
     /// same name can be told apart.
     var trailing: String = ""
+    /// A person's picture, where the row is a person: a face is recognised
+    /// before a handle is read. Rows that are not people leave it empty and keep
+    /// their symbol.
+    var avatar: URL?
+    /// Whether this row stands for a person at all — a face is still drawn from
+    /// their initials when the host has no picture of them.
+    var isPerson = false
 }
 
 /// The list itself, above the box rather than floating over the transcript: it
@@ -89,10 +96,14 @@ struct ChatCompletionList: View {
             accept(completion)
         } label: {
             HStack(spacing: 7) {
-                Image(systemName: completion.symbol)
-                    .font(.caption)
-                    .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
-                    .frame(width: 14)
+                if completion.isPerson {
+                    AuthorAvatar(name: completion.title, url: completion.avatar, size: 15)
+                } else {
+                    Image(systemName: completion.symbol)
+                        .font(.caption)
+                        .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+                        .frame(width: 14)
+                }
 
                 Text(completion.title)
                     .font(.callout)

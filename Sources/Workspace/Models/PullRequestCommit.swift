@@ -31,6 +31,10 @@ struct PullRequestCommit: Identifiable, Sendable, Hashable {
     }
 }
 
+/// Grouped by day in the Commits tab, the way the dashboard groups the
+/// repository's own history — see ``CommitDay``.
+extension PullRequestCommit: DatedCommit {}
+
 extension PullRequestService {
 
     // MARK: - Reading

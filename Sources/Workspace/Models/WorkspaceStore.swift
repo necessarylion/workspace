@@ -63,6 +63,13 @@ final class WorkspaceStore {
     var showsProjects = true
     var showsNavigator = true
 
+    /// Where the navigator was before a pull request took the window. A pull
+    /// request is read across the whole width — the list of the other ones is
+    /// the last thing wanted beside it — so the pane folds away while one is on
+    /// screen and comes back exactly as it was afterwards. Nil means no pull
+    /// request has folded it, or that it has since been moved by hand.
+    private var navigatorBeforePullRequest: Bool?
+
     // Viewer (centre)
     private var items: [String: ViewerItem] = [:]
 
@@ -465,6 +472,39 @@ final class WorkspaceStore {
         return items[viewer.history[viewer.index]]
     }
 
+    /// Whether a pull request is the thing on screen. The dashboard takes the
+    /// window back, so a pull request left open behind it does not count.
+    var isShowingPullRequest: Bool {
+        !showsDashboard && current?.isPullRequest == true
+    }
+
+    /// Folds the navigator away while a pull request has the window, and puts it
+    /// back afterwards — but only if it was there to begin with. Driven from
+    /// `ContentView`, which watches `isShowingPullRequest`: every way into and
+    /// out of a pull request (opening one, back, forward, closing it, switching
+    /// repository) ends up changing that one value.
+    func syncNavigatorWithPullRequest() {
+        if isShowingPullRequest {
+            // Already folded for the pull request before this one: leave the
+            // remembered state alone, or it would record the folded pane.
+            guard navigatorBeforePullRequest == nil else { return }
+            navigatorBeforePullRequest = showsNavigator
+            showsNavigator = false
+        } else if let wasShowing = navigatorBeforePullRequest {
+            navigatorBeforePullRequest = nil
+            if wasShowing { showsNavigator = true }
+        }
+    }
+
+    /// Shows or folds the navigator by hand — the button in the viewer's header
+    /// and the View menu. Doing it while a pull request is open counts as the new
+    /// preference, so closing the pull request leaves the pane where it was put
+    /// rather than undoing it.
+    func toggleNavigator() {
+        showsNavigator.toggle()
+        navigatorBeforePullRequest = nil
+    }
+
     /// The conversation open for the selected repository, if one has been
     /// started. The viewer keeps this one item mounted under whatever else is
     /// showing rather than swapping it out — see `ViewerView.body`.
@@ -773,8 +813,9 @@ final class WorkspaceStore {
         let item = items[kind.key] ?? ViewerItem(kind: kind, title: pr.title)
         item.pullRequest = pr
         present(item)
-        // The viewer shows one pull request, so the navigator switches to the
-        // list of the rest — the same move opening a terminal makes.
+        // The pane itself folds away for a pull request — see
+        // `syncNavigatorWithPullRequest` — but the list it is left on is the one
+        // of the other pull requests, which is where unfolding it belongs.
         navigatorTab = .pullRequests
 
         if item.diff == nil {
@@ -782,6 +823,9 @@ final class WorkspaceStore {
         }
         if item.comments.isEmpty {
             Task { await loadComments(item, project: project, pr: pr) }
+        }
+        if item.reviewers.isEmpty {
+            Task { await loadReviewers(item, project: project, pr: pr) }
         }
         if item.syncState == nil {
             Task { await refreshSyncState(item, project: project, pr: pr) }
@@ -856,6 +900,98 @@ final class WorkspaceStore {
             item.commentError = error.localizedDescription
         }
         item.isLoadingComments = false
+    }
+
+    /// Who has been asked to review, and what each of them has said. Loaded with
+    /// the pull request itself: the count of approvals belongs to the summary
+    /// bar, which is on screen whichever tab is open.
+    func loadReviewers(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        item.isLoadingReviewers = true
+        item.reviewersError = nil
+        do {
+            item.reviewers = try await PullRequestService.reviewers(for: pr, in: project.url)
+        } catch {
+            item.reviewers = []
+            item.reviewersError = error.localizedDescription
+        }
+        item.isLoadingReviewers = false
+    }
+
+    /// The people the reviewer picker offers. Read once per pull request, when
+    /// the picker is first opened — and an empty answer is still an answer, since
+    /// a handle can always be typed in by hand.
+    func loadReviewerCandidates(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        guard !item.hasLoadedReviewerCandidates, !item.isLoadingReviewerCandidates else { return }
+        item.isLoadingReviewerCandidates = true
+        item.reviewerCandidates = await PullRequestService.reviewerCandidates(
+            for: pr,
+            in: project.url
+        )
+        item.hasLoadedReviewerCandidates = true
+        item.isLoadingReviewerCandidates = false
+    }
+
+    /// Asks the host to add reviewers, then reads the list back from it rather
+    /// than assuming what it did — a handle the host resolved differently, or a
+    /// person who was already on the list, then reads correctly here too.
+    func addReviewers(
+        _ handles: [String],
+        on item: ViewerItem,
+        project: Project,
+        pr: PullRequest
+    ) async {
+        await runPullRequestAction(on: item, project: project, pr: pr) {
+            try await PullRequestService.addReviewers(handles, to: pr, in: project.url)
+        } onSuccess: {
+            self.showStatus(handles.count == 1
+                ? "\(handles[0]) asked to review #\(pr.number)"
+                : "\(handles.count) reviewers added to #\(pr.number)")
+            Task { await self.loadReviewers(item, project: project, pr: pr) }
+        }
+    }
+
+    /// The description the editor opens on — the Markdown the host stores,
+    /// which on Bitbucket is not always the text on screen. See
+    /// ``PullRequestService/editableDescription(for:in:)``.
+    func editableDescription(project: Project, pr: PullRequest) async -> String {
+        await PullRequestService.editableDescription(for: pr, in: project.url)
+    }
+
+    /// Writes the description back to the host. `true` once it has landed, which
+    /// is what closes the editor — a refusal leaves what was typed where it is,
+    /// so nothing written is thrown away.
+    func updateDescription(
+        _ body: String,
+        on item: ViewerItem,
+        project: Project,
+        pr: PullRequest
+    ) async -> Bool {
+        guard !item.isRunningPullRequestAction else { return false }
+        item.isRunningPullRequestAction = true
+        defer { item.isRunningPullRequestAction = false }
+
+        do {
+            try await PullRequestService.updateDescription(body, on: pr, in: project.url)
+        } catch {
+            showError(error.localizedDescription)
+            return false
+        }
+
+        // The host has taken it, so show it here rather than waiting for the
+        // list to come back around with it.
+        var updated = pr
+        updated.body = body
+        item.pullRequest = updated
+        showStatus("Description updated on #\(pr.number)")
+
+        // What was just saved is the raw text, where Bitbucket names a mention
+        // by account id; this asks for the names back, and costs nothing when
+        // there is no mention in it.
+        if let named = await PullRequestService.namedMentions(in: updated, directory: project.url) {
+            item.pullRequest?.body = named
+        }
+        Task { await project.refreshPullRequests() }
+        return true
     }
 
     /// The pull request's commits. Loaded when the Commits tab is first shown
@@ -1232,6 +1368,9 @@ final class WorkspaceStore {
         navigatorTab = tab
         if !showsNavigator {
             showsNavigator = true
+            // Asked for outright, so a pull request that folded it away has no
+            // say in it any more.
+            navigatorBeforePullRequest = nil
         }
     }
 

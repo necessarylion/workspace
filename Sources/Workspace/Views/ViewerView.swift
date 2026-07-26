@@ -178,7 +178,7 @@ struct ViewerView: View {
             // control of the same width and padding, so that bar's segmented
             // picker keeps its right edge whatever glyph this button uses.
             Button {
-                withAnimation { store.showsNavigator.toggle() }
+                withAnimation { store.toggleNavigator() }
             } label: {
                 Image(systemName: "sidebar.trailing")
             }
@@ -673,18 +673,7 @@ struct WelcomeView: View {
 
                 ForEach(CommitDay.group(shown)) { day in
                     VStack(alignment: .leading, spacing: 6) {
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(day.title)
-                                .font(.subheadline.weight(.medium))
-                            Text(day.commits.count == 1 ? "1 commit" : "\(day.commits.count) commits")
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.tertiary)
-                            // A hairline carries the eye across to the count and
-                            // marks where one day ends and the next begins.
-                            Rectangle()
-                                .fill(.quaternary)
-                                .frame(height: 1)
-                        }
+                        CommitDayHeading(title: day.title, count: day.commits.count)
                         ForEach(day.commits) { commit in
                             RepositoryCommitRow(
                                 commit: commit,
@@ -776,6 +765,29 @@ struct AskClaudeButton: View {
         .pointerCursor()
         .help("Open a Claude Code conversation about this repository")
         .fixedSize()
+    }
+}
+
+/// The line that heads a day in a list of commits — the day, how many landed on
+/// it, and a rule across to the edge. Shared by the dashboard's history and the
+/// pull request's Commits tab, which is what keeps the two lists reading alike.
+struct CommitDayHeading: View {
+    let title: String
+    let count: Int
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(title)
+                .font(.subheadline.weight(.medium))
+            Text(count == 1 ? "1 commit" : "\(count) commits")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.tertiary)
+            // A hairline carries the eye across to the count and marks where one
+            // day ends and the next begins.
+            Rectangle()
+                .fill(.quaternary)
+                .frame(height: 1)
+        }
     }
 }
 

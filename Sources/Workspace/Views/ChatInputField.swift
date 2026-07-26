@@ -29,8 +29,15 @@ struct ChatInputField: NSViewRepresentable {
     var placeholder = ""
     /// How far it grows before it starts scrolling instead.
     var maxLines = 10
-    var onSubmit: () -> Void
-    var onEscape: () -> Void
+    /// Whether ⏎ sends. The chat's box does; a comment box does not — there ⏎
+    /// writes a line and ⌘↩ posts, so the key is left to the text view.
+    var submitsOnReturn = true
+    /// Whether the box takes the keyboard the moment it appears. A pane opened
+    /// in order to type in it does; a box that is simply *there*, like the one
+    /// under a conversation, must not steal the keyboard from the page.
+    var focusesOnAppear = true
+    var onSubmit: () -> Void = {}
+    var onEscape: () -> Void = {}
     /// Offered ↑ ↓ ⏎ ⇥ ⎋ before the field acts on them. Returning true means a
     /// completion list took the key, so the field leaves it alone.
     var onCompletionKey: (ChatCompletionKey) -> Bool = { _ in false }
@@ -75,9 +82,11 @@ struct ChatInputField: NSViewRepresentable {
         )
         scrollView.documentView = textView
 
-        // A chat pane is opened in order to type in it.
-        DispatchQueue.main.async {
-            textView.window?.makeFirstResponder(textView)
+        if focusesOnAppear {
+            // A chat pane, or a reply box, is opened in order to type in it.
+            DispatchQueue.main.async {
+                textView.window?.makeFirstResponder(textView)
+            }
         }
         return scrollView
     }
@@ -148,6 +157,9 @@ struct ChatInputField: NSViewRepresentable {
                 // A list that is up owns ⏎: it is picking the completion, not
                 // sending a half-typed mention.
                 if parent.onCompletionKey(.accept) { return true }
+                // Where ⏎ does not send, it is a line break like any other and
+                // the text view knows better than we do what to do with it.
+                guard parent.submitsOnReturn else { return false }
                 // Both keys arrive here; only the event knows which was pressed.
                 if NSApp.currentEvent?.modifierFlags.contains(.shift) == true {
                     textView.insertNewlineIgnoringFieldEditor(nil)

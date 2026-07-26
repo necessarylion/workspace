@@ -1,5 +1,38 @@
 import Foundation
 
+/// Where a pull request has ended up. Both hosts have their own words for it —
+/// GitHub says `MERGED` / `CLOSED`, Bitbucket `MERGED` / `DECLINED` /
+/// `SUPERSEDED` — and the app only cares whether there is still anything to do
+/// with it.
+enum PullRequestState: String, Sendable, Hashable {
+    case open
+    case merged
+    /// Closed without merging: GitHub's `CLOSED`, Bitbucket's `DECLINED` and
+    /// `SUPERSEDED`.
+    case closed
+
+    /// Reads whatever word the host used. Anything unrecognised counts as open,
+    /// which is what the list endpoints return and what leaves the actions where
+    /// they were.
+    init(hostValue: String?) {
+        switch hostValue?.uppercased() {
+        case "MERGED": self = .merged
+        case "CLOSED", "DECLINED", "SUPERSEDED", "REJECTED": self = .closed
+        default: self = .open
+        }
+    }
+
+    /// The word the summary bar shows. Open needs none — the actions below it
+    /// already say as much.
+    var badge: String? {
+        switch self {
+        case .open: nil
+        case .merged: "Merged"
+        case .closed: "Closed"
+        }
+    }
+}
+
 /// A pull request, normalised across GitHub (`gh`) and Bitbucket (`bkt`).
 struct PullRequest: Identifiable, Sendable, Hashable {
     var number: Int
@@ -16,6 +49,10 @@ struct PullRequest: Identifiable, Sendable, Hashable {
     var additions: Int?
     var deletions: Int?
     var reviewDecision: String?
+    /// Open unless the host said otherwise — see `PullRequestState`. Only the
+    /// single-request loaders can see anything else: the lists ask for open ones
+    /// only, and a merged request reaches the app through a `#123`.
+    var state: PullRequestState = .open
     var host: GitHostKind
     /// Owner / workspace / project key, kept for CLI calls that need it.
     var repositoryOwner: String = ""
@@ -170,7 +207,7 @@ enum PullRequestService {
 
     // MARK: - GitHub
 
-    private static let gitHubFields = "number,title,author,headRefName,headRefOid,baseRefName,url,isDraft,updatedAt,additions,deletions,body,reviewDecision"
+    private static let gitHubFields = "number,title,author,headRefName,headRefOid,baseRefName,url,isDraft,updatedAt,additions,deletions,body,reviewDecision,state"
 
     private struct GitHubItem: Decodable {
         struct Author: Decodable { let login: String? }
@@ -187,6 +224,8 @@ enum PullRequestService {
         let deletions: Int?
         let body: String?
         let reviewDecision: String?
+        /// `OPEN`, `MERGED` or `CLOSED`.
+        let state: String?
     }
 
     private static func loadGitHub(in directory: URL) async throws -> [PullRequest] {
@@ -243,6 +282,7 @@ enum PullRequestService {
             additions: item.additions,
             deletions: item.deletions,
             reviewDecision: item.reviewDecision,
+            state: PullRequestState(hostValue: item.state),
             host: .github,
             headSHA: item.headRefOid ?? ""
         )
@@ -411,6 +451,7 @@ enum PullRequestService {
                 additions: nil,
                 deletions: nil,
                 reviewDecision: nil,
+                state: PullRequestState(hostValue: item.state),
                 host: .bitbucket
             )
         }
