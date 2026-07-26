@@ -1,10 +1,22 @@
 name: Build
 
+# A push to main or a pull request only proves the app still compiles; nothing
+# is kept. Publishing happens on a version tag — see the release step.
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
+  release:
+    types: [published]
   workflow_dispatch:
+
+# A release made in the web UI fires twice (the tag push and the release
+# itself). Both runs carry the same tag ref, so the later one supersedes the
+# earlier and only one build happens.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -12,6 +24,10 @@ jobs:
     # arrives as a checksum-verified xcframework that SwiftPM downloads, and
     # ghostty's runtime resources are checked in under Resources/ghostty-share.
     runs-on: macos-26
+
+    # Attaching the app to a release is a write to the repository.
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -60,10 +76,35 @@ jobs:
           grep -q arm64 <<< "$ARCHS"
           grep -q x86_64 <<< "$ARCHS"
 
-      - name: Package
-        run: ditto -c -k --keepParent "$APP" Workspace.zip
+      # Everything below only runs for a version tag. `gh release create` fails
+      # if the release already exists — which it does when the tag came from a
+      # release made in the web UI — so create it only when missing and always
+      # upload afterwards, which makes re-running the job harmless.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ditto -c -k --keepParent "$APP" Workspace.zip
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Workspace-universal
-          path: Workspace.zip
+          NOTES=$(cat <<'EOF'
+          Download `Workspace.zip`, unzip it, and move `Workspace.app` to
+          your Applications folder.
+
+          The app is signed ad-hoc rather than with a Developer ID, so macOS
+          quarantines it on download and reports it as damaged. Clear the flag
+          once, after moving it:
+
+          ```sh
+          xattr -dr com.apple.quarantine /Applications/Workspace.app
+          ```
+
+          Requires macOS 14 or later. Universal (Apple Silicon and Intel).
+          EOF
+          )
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --generate-notes --notes "$NOTES"
+          fi
+          gh release upload "$TAG" Workspace.zip --clobber

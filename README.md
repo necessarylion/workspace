@@ -4,8 +4,6 @@ A native macOS app for working across your GitHub and Bitbucket repositories:
 see your projects, their open pull requests, review diffs, comment on PRs,
 browse and edit files, and drive Claude Code in an embedded terminal.
 
-Inspired by [kero](https://github.com/egoist/kero).
-
 ## Layout
 
 ```
@@ -121,6 +119,25 @@ Or open `Package.swift` in Xcode and run.
 > only `xcodebuild` can compile. Both scripts use `xcodebuild` and set
 > `DISABLE_SWIFTLINT=1`, because CodeEditLanguages' SwiftLint build plugin fails
 > on Xcode 26.
+
+### Release
+
+A push to `main` or a pull request only compiles the app — nothing is kept.
+Publishing is a version tag:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+CI then builds the universal app and attaches `Workspace.zip` to a release of
+that name, giving it a permanent download URL. Making the release through
+GitHub's web interface instead works the same way; the workflow finds the
+release already there and only uploads the app to it.
+
+The bundle is signed ad-hoc, not with a Developer ID, so macOS quarantines it
+on download and calls it damaged. The release notes tell people to clear that
+once with `xattr -dr com.apple.quarantine /Applications/Workspace.app`; getting
+rid of the step entirely needs a paid Apple Developer account and notarization.
 
 ### Note on dependencies
 
