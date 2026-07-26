@@ -16,6 +16,8 @@ struct CodeEditorView: NSViewControllerRepresentable {
     /// False when the file was opened from the file tree, which keeps the
     /// keyboard for its own shortcuts until the text is clicked.
     var takesFocusOnAppear = true
+    /// What the file search is looking for, marked wherever it occurs here.
+    var searchHighlight: String?
     var onOpenLocation: ((URL, Int) -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -81,6 +83,10 @@ struct CodeEditorView: NSViewControllerRepresentable {
         }
 
         controller.applyAppearance(theme)
+
+        // After `load`, so a file opened from a search result is marked once its
+        // text is there rather than while the controller still holds the last.
+        controller.searchHighlight = searchHighlight
 
         if let line = document.revealLine {
             // Clearing the request is a state change, so it waits a runloop turn.

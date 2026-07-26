@@ -819,7 +819,10 @@ struct ConversationView<Header: View>: View {
 
             TextEditor(text: $draft)
                 .font(.body)
-                .frame(minHeight: 58, maxHeight: 130)
+                // A line and a bit at rest. Most comments here are a sentence,
+                // and the box was taking room from the thread above it to stand
+                // ready for an essay.
+                .frame(minHeight: 29, maxHeight: 65)
                 .scrollContentBackground(.hidden)
                 .padding(6)
                 .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))

@@ -49,6 +49,11 @@ final class WorkspaceStore {
     var navigatorTab: NavigatorTab = .files
     var fileSearchText = ""
 
+    /// What the file search found, kept for the editor: a file opened from a
+    /// result marks every occurrence, not only the line that was clicked. Set
+    /// when a result is opened, dropped when the search box is emptied.
+    var searchHighlight: String?
+
     /// Whether the file tree lists what `.gitignore` covers. Off by default —
     /// build output and caches bury the files actually worked on — and the files
     /// pane has a toggle for the times one of them is wanted.
@@ -1807,11 +1812,11 @@ final class WorkspaceStore {
     /// so a huge repository can say so rather than look broken.
     private(set) var isListingFiles = false
 
-    /// One path list per repository, read when the palette opens on it and read
-    /// again on every open after that: a file added since is the one you are
-    /// most likely reaching for, and the list already there stays usable while
-    /// the new one is being read.
-    @ObservationIgnored private var fileFinderPaths: [URL: [String]] = [:]
+    /// One prepared path list per repository, read when the palette opens on it
+    /// and read again on every open after that: a file added since is the one
+    /// you are most likely reaching for, and the list already there stays usable
+    /// while the new one is being read.
+    @ObservationIgnored private var fileFinderIndexes: [URL: FileFinder.Index] = [:]
     @ObservationIgnored private var fileListTask: Task<Void, Never>?
     @ObservationIgnored private var fileSearchTask: Task<Void, Never>?
 
@@ -1870,22 +1875,25 @@ final class WorkspaceStore {
     /// How many files the palette is searching, for its footer.
     var fileFinderCount: Int {
         guard let project = selectedProject else { return 0 }
-        return fileFinderPaths[project.url]?.count ?? 0
+        return fileFinderIndexes[project.url]?.count ?? 0
     }
 
     private func listFiles(in project: Project) {
         fileListTask?.cancel()
         let root = project.url
-        isListingFiles = fileFinderPaths[root] == nil
+        isListingFiles = fileFinderIndexes[root] == nil
         fileListTask = Task { [weak self] in
+            // Listed, then folded once for the whole repository — a keystroke
+            // should only have to compare, never to prepare.
             let paths = await ClaudeCompletions.files(in: root)
+            let index = await FileFinder.index(paths)
             guard !Task.isCancelled else { return }
-            self?.apply(paths, for: root)
+            self?.apply(index, for: root)
         }
     }
 
-    private func apply(_ paths: [String], for root: URL) {
-        fileFinderPaths[root] = paths
+    private func apply(_ index: FileFinder.Index, for root: URL) {
+        fileFinderIndexes[root] = index
         isListingFiles = false
         // Anything typed while the list was still being read has had nothing to
         // search until now.
@@ -1903,10 +1911,10 @@ final class WorkspaceStore {
         }
         // Nothing to rank yet: what is on screen stays rather than blinking
         // empty, and `apply` runs this again the moment the list lands.
-        guard let paths = fileFinderPaths[project.url] else { return }
+        guard let index = fileFinderIndexes[project.url] else { return }
 
         fileSearchTask = Task { [weak self] in
-            let matches = await FileFinder.search(query, in: paths)
+            let matches = await FileFinder.search(query, in: index)
             guard !Task.isCancelled else { return }
             self?.show(matches, for: query)
         }

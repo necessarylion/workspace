@@ -58,7 +58,10 @@ final class ClaudeSession: Identifiable {
     /// waiting for a `claude` process to start would mean an empty menu the
     /// first time you reach for one.
     private(set) var slashCommands: [ClaudeSlashCommand] = []
-    private(set) var projectFiles: [String] = []
+    /// The repository's paths, already folded for matching — the same index ⌘P
+    /// searches, so the two menus rank a query identically and neither pays to
+    /// prepare the list on a keystroke.
+    private(set) var projectFiles: FileFinder.Index = .empty
 
     @ObservationIgnored private var process: StreamingShellProcess?
     @ObservationIgnored private var reader: Task<Void, Never>?
@@ -110,7 +113,7 @@ final class ClaudeSession: Identifiable {
             ? ClaudeCompletions.rememberedBuiltIns()
             : slashCommands
         slashCommands = merge(await commands, into: carried)
-        projectFiles = await files
+        projectFiles = await FileFinder.index(await files)
     }
 
     /// Keeps whatever the CLI has told us about — its built-ins and the

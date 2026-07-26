@@ -30,6 +30,22 @@ final class CodeEditorController: NSViewController {
     private var theme = SyntaxTheme.standard
     private var isApplyingExternalText = false
     private var isApplyingHighlight = false
+
+    /// What the file search was looking for, so every place it occurs in this
+    /// file is marked — the one hit that was clicked is rarely the only one
+    /// worth seeing. Nil while no search is running.
+    var searchHighlight: String? {
+        didSet {
+            guard searchHighlight != oldValue else { return }
+            findSearchMatches()
+            applySearchHighlight(in: nil)
+        }
+    }
+
+    /// Where `searchHighlight` occurs, in order, found once per file rather than
+    /// per re-colouring pass.
+    private var searchMatches: [NSRange] = []
+    private var searchRescan: Task<Void, Never>?
     /// The region already coloured, so plain scrolling does no work until the
     /// viewport leaves it.
     private var highlightedRange = NSRange(location: 0, length: 0)
@@ -155,6 +171,7 @@ final class CodeEditorController: NSViewController {
         }
 
         applyBaseAttributes()
+        findSearchMatches()
         ruler.invalidateLines()
         ruler.updateThickness()
         highlightVisible()
@@ -200,6 +217,7 @@ final class CodeEditorController: NSViewController {
 
         highlighter?.setText(text)
         applyBaseAttributes()
+        findSearchMatches()
         ruler.invalidateLines()
         ruler.updateThickness()
         highlightVisible()
@@ -362,6 +380,110 @@ final class CodeEditorController: NSViewController {
         isApplyingHighlight = false
     }
 
+    // MARK: - Search matches
+
+    /// Every occurrence of the query, literal and case-insensitive — the same
+    /// terms the search pane found them with.
+    ///
+    /// `.literal` is both the faster comparison and the truer one here: without
+    /// it a search walks the text looking for canonically equivalent forms,
+    /// which is not what the tools that found these files matched on.
+    private func findSearchMatches() {
+        searchMatches = []
+        searchRescan?.cancel()
+        guard let query = searchHighlight, !query.isEmpty,
+              let text = textView?.textStorage?.string as NSString?
+        else { return }
+
+        var start = 0
+        while start < text.length {
+            let remaining = NSRange(location: start, length: text.length - start)
+            let found = text.range(of: query, options: [.caseInsensitive, .literal], range: remaining)
+            guard found.location != NSNotFound, found.length > 0 else { break }
+            searchMatches.append(found)
+            start = NSMaxRange(found)
+        }
+    }
+
+    /// Moves the known matches out of an edit's way, so the marks stay under the
+    /// right words between the keystroke and the rescan. Everything before the
+    /// edit is where it was, everything after it slides by the change in length,
+    /// and anything the edit ran through is dropped until the rescan looks
+    /// again. That is a walk over the matches rather than over the file.
+    private func shiftSearchMatches(edited: NSRange, delta: Int) {
+        guard !searchMatches.isEmpty else { return }
+        let replaced = NSRange(location: edited.location, length: max(edited.length - delta, 0))
+        let end = NSMaxRange(replaced)
+        searchMatches = searchMatches.compactMap { match in
+            if NSMaxRange(match) <= replaced.location { return match }
+            guard match.location >= end else { return nil }
+            return NSRange(location: match.location + delta, length: match.length)
+        }
+    }
+
+    /// Re-finds the matches once typing stops. Scanning the whole file per
+    /// keystroke is the one cost worth avoiding here; the shifted ranges hold
+    /// the picture together until this lands.
+    private func scheduleSearchRescan() {
+        searchRescan?.cancel()
+        searchRescan = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, let self, searchHighlight != nil else { return }
+            findSearchMatches()
+            applySearchHighlight(in: nil)
+        }
+    }
+
+    /// The matches overlapping `target`, by binary search. They are found in
+    /// order, so a re-colouring pass touches the handful on screen instead of
+    /// walking every hit in the file — which is what makes scrolling a file with
+    /// a thousand of them cost the same as a file with three.
+    private func searchMatches(overlapping target: NSRange) -> ArraySlice<NSRange> {
+        var low = 0
+        var high = searchMatches.count
+        while low < high {
+            let middle = (low + high) / 2
+            if NSMaxRange(searchMatches[middle]) <= target.location {
+                low = middle + 1
+            } else {
+                high = middle
+            }
+        }
+        let limit = NSMaxRange(target)
+        var end = low
+        while end < searchMatches.count, searchMatches[end].location < limit { end += 1 }
+        return searchMatches[low..<end]
+    }
+
+    /// Marks the matches, the way the find bar's "highlight all" does. Follows
+    /// ``applyDiagnosticUnderlines(in:)``: with a range it only re-adds the ones
+    /// inside it, because the caller has just wiped that range's attributes.
+    private func applySearchHighlight(in target: NSRange?) {
+        guard let storage = textView?.textStorage else { return }
+        // The common case by far: no search running, and a scroll pass that
+        // should cost nothing at all.
+        guard target == nil || !searchMatches.isEmpty else { return }
+
+        let full = NSRange(location: 0, length: storage.length)
+        let painted = target.map { NSIntersectionRange($0, full) }
+        let due = painted.map(searchMatches(overlapping:)) ?? searchMatches[...]
+        guard painted == nil || !due.isEmpty else { return }
+
+        isApplyingHighlight = true
+        storage.beginEditing()
+        if painted == nil {
+            storage.removeAttribute(.backgroundColor, range: full)
+        }
+        let colour = NSColor.systemYellow.withAlphaComponent(0.32)
+        for match in due {
+            let range = NSIntersectionRange(match, painted ?? full)
+            guard range.length > 0 else { continue }
+            storage.addAttribute(.backgroundColor, value: colour, range: range)
+        }
+        storage.endEditing()
+        isApplyingHighlight = false
+    }
+
     // MARK: - Position conversion
 
     /// LSP position (line, UTF-16 character) to a text offset.
@@ -441,9 +563,10 @@ final class CodeEditorController: NSViewController {
         isApplyingHighlight = false
         highlightedRange = target
 
-        // setAttributes just wiped the underlines in `target`; put back only
-        // the ones that fall inside it.
+        // setAttributes just wiped the underlines and the search marks in
+        // `target`; put back only the ones that fall inside it.
         applyDiagnosticUnderlines(in: target)
+        applySearchHighlight(in: target)
     }
 
     private func visibleCharacterRange() -> NSRange {
@@ -678,6 +801,13 @@ extension CodeEditorController: NSTextStorageDelegate {
     private func handleEdit(range: NSRange, delta: Int, text: String) {
         highlighter?.apply(editedRange: range, changeInLength: delta, newText: text)
         ruler.invalidateLines()
+        // An edit moves every match after it, and can make or unmake one. The
+        // cheap half is done now so nothing is drawn in the wrong place; the
+        // scan waits for a pause in the typing.
+        if searchHighlight != nil {
+            shiftSearchMatches(edited: range, delta: delta)
+            scheduleSearchRescan()
+        }
 
         // Anything that lays out text — re-colouring, and resizing the gutter,
         // which re-tiles the scroll view — has to wait until the storage has

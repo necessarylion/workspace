@@ -11,7 +11,7 @@ extension SyntaxPalette {
         foreground: NSColor(hex: 0xCC_CC_CC),
         background: NSColor(hex: 0x18_1A_1D),
         lineNumber: NSColor(hex: 0x49_51_62),
-        currentLine: NSColor(hex: 0x1E_1F_22),
+        currentLine: NSColor(hex: 0x24_26_2B),
         indentGuide: NSColor(hex: 0x22_23_26),
         styles: [
             "attribute": SyntaxStyle(color: NSColor(hex: 0x9D_D2_74)),

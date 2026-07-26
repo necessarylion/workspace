@@ -369,6 +369,7 @@ struct ViewerView: View {
                         wrapsLines: store.wrapsLines,
                         theme: AppearanceSettings.shared.editorTheme,
                         takesFocusOnAppear: store.editorTakesFocus,
+                        searchHighlight: store.searchHighlight,
                         onOpenLocation: { url, line in
                             store.openFile(url, revealLine: line)
                         }

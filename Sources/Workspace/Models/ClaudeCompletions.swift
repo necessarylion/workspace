@@ -223,57 +223,9 @@ enum ClaudeCompletions {
         return paths
     }
 
-    // MARK: - Matching
-
-    /// The paths worth offering for what has been typed so far.
-    ///
-    /// Ranked by where the match lands rather than only by whether it matches:
-    /// what you nearly always want is a file whose *name* starts with what you
-    /// typed, and it should not be sitting under twenty files that happen to
-    /// have those letters somewhere in a folder name.
-    static func rank(_ query: String, in paths: [String], limit: Int = 10) -> [String] {
-        let needle = query.lowercased()
-        guard !needle.isEmpty else { return Array(paths.prefix(limit)) }
-
-        var scored: [(path: String, score: Int, length: Int)] = []
-        for path in paths {
-            let lowered = path.lowercased()
-            let name = (lowered as NSString).lastPathComponent
-            let score: Int
-            if name == needle {
-                score = 0
-            } else if name.hasPrefix(needle) {
-                score = 1
-            } else if lowered.hasPrefix(needle) {
-                score = 2
-            } else if name.contains(needle) {
-                score = 3
-            } else if lowered.contains(needle) {
-                score = 4
-            } else if isSubsequence(needle, of: lowered) {
-                score = 5
-            } else {
-                continue
-            }
-            scored.append((path, score, path.count))
-        }
-
-        return scored
-            .sorted {
-                $0.score != $1.score ? $0.score < $1.score
-                    : ($0.length != $1.length ? $0.length < $1.length : $0.path < $1.path)
-            }
-            .prefix(limit)
-            .map(\.path)
-    }
-
-    /// Letters in order but not together — how `csv` finds `CodeServiceView`.
-    private static func isSubsequence(_ needle: String, of haystack: String) -> Bool {
-        var remaining = Substring(needle)
-        for character in haystack where character == remaining.first {
-            remaining = remaining.dropFirst()
-            if remaining.isEmpty { return true }
-        }
-        return remaining.isEmpty
-    }
+    // Matching lives in `FileFinder`, which both the chat's `@` menu and ⌘P
+    // rank with. It folds a repository's paths to bytes once when the list is
+    // read, so a keystroke only ever compares — the string-by-string version
+    // that used to live here lowercased all twenty thousand of them again on
+    // every letter typed, on the main actor.
 }

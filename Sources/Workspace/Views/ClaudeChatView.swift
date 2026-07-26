@@ -139,11 +139,17 @@ struct ClaudeChatView: View {
 
     /// How much has been written into the last message so far. Only the tail is
     /// measured: everything above it has stopped changing.
+    ///
+    /// Counted in UTF-8 bytes rather than characters. `String.count` walks the
+    /// whole string to group it into graphemes, and this is read on every pass
+    /// of the transcript's body while a reply is streaming — so a long answer
+    /// would be re-measured end to end per token. Any number that moves when
+    /// text arrives will do, and this one is free.
     private var tailLength: Int {
         session.messages.last?.blocks.reduce(0) { total, block in
             switch block {
-            case .text(let text), .thinking(let text): total + text.text.count
-            case .tool(let call): total + call.partialInput.count + (call.result?.count ?? 0)
+            case .text(let text), .thinking(let text): total + text.text.utf8.count
+            case .tool(let call): total + call.partialInput.utf8.count + (call.result?.utf8.count ?? 0)
             }
         } ?? 0
     }
@@ -644,6 +650,10 @@ private struct ClaudeComposer: View {
     /// The token ⎋ was pressed on, so the list stays shut until the caret moves
     /// somewhere else rather than springing back on the next keystroke.
     @State private var dismissedToken: ChatCompletionToken?
+    /// The menu as it stands. Held rather than computed, because ranking a
+    /// repository's worth of paths is not work a keystroke can do on the way to
+    /// the screen — see ``refreshCompletions``.
+    @State private var completions: [ChatCompletion] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -665,21 +675,49 @@ private struct ClaudeComposer: View {
         // A different token means a different list, so the highlight goes back
         // to the top rather than staying on the fourth row of the last one.
         .onChange(of: token) { selectedCompletion = 0 }
+        // Keyed on the file list as well as the token: what was typed before it
+        // finished loading had nothing to match against, and this is what asks
+        // again the moment there is something.
+        .task(id: CompletionRequest(token: token, files: session.projectFiles.count)) {
+            await refreshCompletions()
+        }
         .task { await session.loadCompletions() }
     }
 
     // MARK: - Completions
+
+    /// What the menu is currently an answer to. A change in either half is a
+    /// reason to work it out again; nothing else is.
+    private struct CompletionRequest: Equatable {
+        let token: ChatCompletionToken?
+        let files: Int
+    }
 
     private var token: ChatCompletionToken? {
         let found = ChatCompletionToken.read(in: session.draft, caret: caret)
         return found == dismissedToken ? nil : found
     }
 
-    private var completions: [ChatCompletion] {
-        guard let token else { return [] }
+    /// Works out the menu for what is under the caret.
+    ///
+    /// The file half is awaited rather than computed inline: it compares the
+    /// query against every path in the repository, which is tens of thousands
+    /// of them, and doing that on the main actor is felt in the box being typed
+    /// into. `.task(id:)` cancels the one in flight when another letter lands,
+    /// so only the last query's list is ever shown.
+    private func refreshCompletions() async {
+        guard let token else {
+            completions = []
+            return
+        }
         switch token.kind {
-        case .command: return commandCompletions(token.query)
-        case .file: return fileCompletions(token.query)
+        case .command:
+            // A handful of names — nothing worth leaving the main actor for.
+            completions = commandCompletions(token.query)
+        case .file:
+            let found = await fileCompletions(token.query)
+            guard !Task.isCancelled else { return }
+            completions = found
         }
     }
 
@@ -714,14 +752,21 @@ private struct ClaudeComposer: View {
         }
     }
 
-    private func fileCompletions(_ query: String) -> [ChatCompletion] {
-        ClaudeCompletions.rank(query, in: session.projectFiles).map { path in
+    private func fileCompletions(_ query: String) async -> [ChatCompletion] {
+        let index = session.projectFiles
+        // A bare `@` has nothing to rank by, so it opens on the first few paths
+        // rather than on an empty box — enough to show the menu is there.
+        let matches = query.isEmpty
+            ? index.paths.prefix(10).map { FileFinder.Match(path: $0, highlighted: []) }
+            : await FileFinder.search(query, in: index, limit: 10)
+
+        return matches.map { match in
             ChatCompletion(
-                id: "file:" + path,
-                insert: "@" + path,
-                title: (path as NSString).lastPathComponent,
-                symbol: FileIcon.symbol(for: URL(fileURLWithPath: path)),
-                trailing: (path as NSString).deletingLastPathComponent
+                id: "file:" + match.path,
+                insert: "@" + match.path,
+                title: match.name,
+                symbol: FileIcon.symbol(for: URL(fileURLWithPath: match.path)),
+                trailing: match.folder
             )
         }
     }

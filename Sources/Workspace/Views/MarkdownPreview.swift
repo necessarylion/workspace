@@ -336,7 +336,28 @@ struct MarkdownText: View {
         return NSFont.preferredFont(forTextStyle: style).pointSize
     }
 
-    private var blocks: [Block] { Self.blocks(in: text) }
+    @MainActor
+    private var blocks: [Block] { Self.cachedBlocks(in: text) }
+
+    /// The parse, remembered.
+    ///
+    /// A view body runs many times over for text that has not changed — a
+    /// scroll, a hover, a window resize — and a page of PR comments is a stack
+    /// of these. Parsing the same Markdown on each of those passes is work
+    /// nobody sees, so the answer is kept, the way `MarkdownCodeHighlighter`
+    /// keeps its colours. The cap only stops a long reading session from
+    /// growing this without end.
+    @MainActor
+    private static func cachedBlocks(in text: String) -> [Block] {
+        if let cached = cache[text] { return cached }
+        let parsed = blocks(in: text)
+        if cache.count > 200 { cache.removeAll() }
+        cache[text] = parsed
+        return parsed
+    }
+
+    @MainActor
+    private static var cache: [String: [Block]] = [:]
 
     static func blocks(in text: String) -> [Block] {
         var result: [Block] = []

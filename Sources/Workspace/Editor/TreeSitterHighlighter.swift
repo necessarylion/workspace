@@ -16,6 +16,19 @@ final class TreeSitterHighlighter {
     private var tree: MutableTree?
     private var text: String = ""
 
+    /// UTF-16 offset where each line begins, `lineStarts[0]` always 0.
+    ///
+    /// tree-sitter wants an edit described in rows and columns as well as in
+    /// offsets, and working one out used to mean walking the text from the very
+    /// beginning — every keystroke, so a file of any size charged for its whole
+    /// length on each letter typed near the bottom of it. Kept as a list
+    /// instead: a row is a binary search, and an edit shifts the offsets after
+    /// it rather than recounting them.
+    private var lineStarts: [Int] = [0]
+    /// Length of `text` in UTF-16, kept alongside so a point can be clamped to
+    /// it without measuring the string again.
+    private var textLength = 0
+
     var isReady: Bool { query != nil && tree != nil }
 
     init(language: CodeLanguage) {
@@ -57,7 +70,6 @@ final class TreeSitterHighlighter {
         changeInLength delta: Int,
         newText: String
     ) {
-        let oldText = text
         text = newText
 
         guard let tree else {
@@ -69,80 +81,118 @@ final class TreeSitterHighlighter {
         let newEndOffset = NSMaxRange(editedRange)
         let oldEndOffset = max(newEndOffset - delta, 0)
 
-        // One pass over the unchanged prefix gives the start point; the old end
-        // point continues that same pass.
-        var scanner = LineScanner(oldText)
-        scanner.advance(to: startOffset)
-        let startPoint = scanner.point
-        var oldEndScanner = scanner
-        oldEndScanner.advance(to: oldEndOffset)
+        // Read off the index while it still describes the text before the edit.
+        let startPoint = point(at: startOffset)
+        let oldEndPoint = point(at: oldEndOffset)
+        let lineStart = lineStarts[row(at: startOffset)]
+
+        // One pass over what was inserted, which answers both questions below:
+        // where the new text ends, and which line starts now sit inside it.
+        let breaks = Self.lineBreaks(
+            in: newText,
+            range: NSRange(location: startOffset, length: newEndOffset - startOffset)
+        )
+        let newEndPoint = Point(
+            row: Int(startPoint.row) + breaks.count,
+            column: (newEndOffset - (breaks.last.map { $0 + 1 } ?? lineStart)) * 2
+        )
+
+        replaceLineStarts(
+            from: startOffset,
+            oldEnd: oldEndOffset,
+            newEnd: newEndOffset,
+            inserted: breaks.map { $0 + 1 }
+        )
 
         let edit = InputEdit(
             startByte: startOffset * 2,
             oldEndByte: oldEndOffset * 2,
             newEndByte: newEndOffset * 2,
             startPoint: startPoint,
-            oldEndPoint: oldEndScanner.point,
-            newEndPoint: Self.point(
-                afterReplacing: NSRange(location: startOffset, length: newEndOffset - startOffset),
-                in: newText,
-                startingAt: startPoint,
-                lineStart: scanner.lineStart
-            )
+            oldEndPoint: oldEndPoint,
+            newEndPoint: newEndPoint
         )
         tree.edit(edit)
         self.tree = parser.parse(tree: tree, string: text)
     }
 
     private func reparse() {
+        rebuildLineStarts()
         tree = parser.parse(tree: nil as MutableTree?, string: text)
     }
 
-    /// End point of freshly inserted text. Only the inserted region is scanned:
-    /// everything before the edit is identical in both versions.
-    private static func point(
-        afterReplacing range: NSRange,
-        in newText: String,
-        startingAt startPoint: Point,
-        lineStart: Int
-    ) -> Point {
-        let inserted = (newText as NSString).substring(with: range) as NSString
-        var row = Int(startPoint.row)
-        var lastBreak = -1
-        for index in 0..<inserted.length where inserted.character(at: index) == 0x0A {
-            row += 1
-            lastBreak = index
+    // MARK: - Lines
+
+    /// UTF-16 offsets of the newlines inside one range of a string. Only the
+    /// range is looked at: everything outside it is unchanged by the edit.
+    private static func lineBreaks(in text: String, range: NSRange) -> [Int] {
+        guard range.length > 0 else { return [] }
+        let region = (text as NSString).substring(with: range) as NSString
+
+        var found: [Int] = []
+        for index in 0..<region.length where region.character(at: index) == 0x0A {
+            found.append(range.location + index)
         }
-        let column = lastBreak >= 0
-            ? inserted.length - (lastBreak + 1)
-            : NSMaxRange(range) - lineStart
-        return Point(row: row, column: column * 2)
+        return found
     }
 
-    /// Walks a string once, tracking the line and line start for an offset.
-    private struct LineScanner {
-        private var iterator: String.UTF16View.Iterator
-        private(set) var offset = 0
-        private(set) var row = 0
-        private(set) var lineStart = 0
-
-        init(_ string: String) {
-            iterator = string.utf16.makeIterator()
+    private func rebuildLineStarts() {
+        var starts = [0]
+        var offset = 0
+        for unit in text.utf16 {
+            offset += 1
+            if unit == 0x0A { starts.append(offset) }
         }
+        lineStarts = starts
+        textLength = offset
+    }
 
-        mutating func advance(to target: Int) {
-            while offset < target, let unit = iterator.next() {
-                offset += 1
-                if unit == 0x0A {
-                    row += 1
-                    lineStart = offset
-                }
+    /// The line `offset` sits on, counted from 0.
+    private func row(at offset: Int) -> Int {
+        // The last line start at or before the offset, so one before the first
+        // that is past it. `lineStarts[0]` is 0, so this is never negative.
+        var low = 0
+        var high = lineStarts.count
+        while low < high {
+            let middle = (low + high) / 2
+            if lineStarts[middle] > offset {
+                high = middle
+            } else {
+                low = middle + 1
             }
         }
+        return low - 1
+    }
 
-        var point: Point {
-            Point(row: row, column: (offset - lineStart) * 2)
+    private func point(at offset: Int) -> Point {
+        // Clamped, because an edit can be reported against a longer text than
+        // the one the index was built from if a change was ever missed, and a
+        // point past the end would be a nonsense column rather than a crash.
+        let offset = min(max(offset, 0), textLength)
+        let row = row(at: offset)
+        return Point(row: row, column: (offset - lineStarts[row]) * 2)
+    }
+
+    /// Moves the index over an edit: the line starts that fell inside the
+    /// replaced text give way to the ones the new text brought, and everything
+    /// after them slides by the difference in length.
+    private func replaceLineStarts(from start: Int, oldEnd: Int, newEnd: Int, inserted: [Int]) {
+        // A line start exactly at `start` is untouched — the newline that made
+        // it sits before the edit, so the line still begins where it did.
+        let first = firstLineStart(after: start)
+        let last = firstLineStart(after: oldEnd)
+        lineStarts.replaceSubrange(first..<last, with: inserted)
+
+        let delta = newEnd - oldEnd
+        textLength += delta
+        guard delta != 0 else { return }
+        for index in (first + inserted.count)..<lineStarts.count {
+            lineStarts[index] += delta
         }
+    }
+
+    private func firstLineStart(after offset: Int) -> Int {
+        row(at: offset) + 1
     }
 
     // MARK: - Highlighting
