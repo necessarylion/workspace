@@ -16,9 +16,10 @@ struct ViewerView: View {
         // sidebars. Editor and diff draw the same colour; the terminal is
         // darker still.
         .background(Color(nsColor: AppColors.viewerBackground))
-        // ⎋ is the close button: it does what the ✕ in the header does. The
-        // editor and the comment boxes keep their own escapes — see
-        // `onEscapeKey` — and while the ⌃⇥ row is up, ⎋ belongs to it.
+        // ⎋ is the close button: it does what the ✕ in the header does. A
+        // focused terminal, the editor's completion list and the comment boxes
+        // keep their own escapes — see `EscapeKey.leavesEscapeAlone` — and
+        // while the ⌃⇥ row is up, ⎋ belongs to it.
         .onEscapeKey(
             when: store.current != nil
                 && !store.showsDashboard

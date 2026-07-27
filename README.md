@@ -255,7 +255,7 @@ A bare clone builds with nothing installed beyond Xcode — that is what CI
 | ⌘S | Save the file you are editing · save the PR description you are editing |
 | ⇧⌘E | Save the Markdown preview as a PDF |
 | ⇧⌘W | Close what is open (a terminal only goes back to the dashboard) |
-| ⎋ | The same, the editor and the terminal included — except with a completion list up, or while writing in a comment box, which keep ⎋ |
+| ⎋ | The same, the editor included — except **while the terminal has the keyboard**, where ⎋ goes to the program in it (`claude` reads it to interrupt a turn, clear the line, and twice over to open the history); use ⌃` or ⇧⌘W to leave a terminal. A completion list and a comment box you are writing in keep ⎋ too |
 | ⌘[ / ⌘] | Back / forward through history |
 | ⌘P | Go to file — the whole repository by name, ↑↓ to walk it, ⏎ to open, ⎋ to leave (⌘P again closes it too) |
 | ⌘0 / ⌥⌘0 | Toggle the repositories / navigator sidebar |
