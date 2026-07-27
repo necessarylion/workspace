@@ -65,6 +65,9 @@ final class AppearanceSettings {
         /// A diff is denser than a file on purpose: two columns have to fit.
         static let diffSize: Double = 10
         static let terminalSize: Double = 13
+        /// The terminal is set in SF Mono too, so a shell and a file read as the
+        /// same app rather than as two.
+        static let faceName = "SF Mono"
         /// A little air, now the editor is CodeEditSourceEditor. The old 1.0 was
         /// the font's own leading and nothing added, chosen when the pane was
         /// shared three ways and every point went to code. The package's own
@@ -92,7 +95,12 @@ final class AppearanceSettings {
         let defaults = UserDefaults.standard
         codeFontName = defaults.string(forKey: Keys.codeFont)
         terminalFontName = defaults.string(forKey: Keys.terminalFont)
-        overridesTerminalFont = defaults.bool(forKey: Keys.terminalOverride)
+        // On unless it was turned off. `bool(forKey:)` cannot tell "never set"
+        // from "set to false", and the default is now on — the terminal is meant
+        // to arrive in the same face as everything else.
+        overridesTerminalFont = defaults.object(forKey: Keys.terminalOverride) == nil
+            ? true
+            : defaults.bool(forKey: Keys.terminalOverride)
         // `double(forKey:)` answers 0 for a key that was never written, which is
         // not a font size — read those as "never set".
         editorFontSize = Self.size(defaults.double(forKey: Keys.editorSize), or: Default.editorSize)
@@ -163,6 +171,15 @@ final class AppearanceSettings {
             ?? .monospacedSystemFont(ofSize: size, weight: .regular)
     }
 
+    /// The family name to hand the terminal, or nil to leave its own config
+    /// alone. Falls back to SF Mono, which is also what the editor uses when no
+    /// face has been chosen — and nil if even that is not installed, since
+    /// libghostty takes a *name* and has no fallback of ours to reach for.
+    var terminalFace: String? {
+        if let terminalFontName, Self.isInstalled(terminalFontName) { return terminalFontName }
+        return Self.isInstalled(Default.faceName) ? Default.faceName : nil
+    }
+
     private static func swiftUIFont(named name: String?, size: Double) -> Font {
         guard let name, NSFont(name: name, size: size) != nil else {
             // Matches `sfMono(size:)`: the named face when this Mac has it,
@@ -177,10 +194,10 @@ final class AppearanceSettings {
 
     // MARK: - The faces on offer
 
-    /// The name shown for "no face chosen". Names SF Mono rather than "System
-    /// Monospaced", because that is the face it resolves to and Xcode's own —
-    /// the old label made the default look like a nondescript fallback.
-    static let systemFaceTitle = "SF Mono (system)"
+    /// The name shown for "no face chosen" — which resolves to SF Mono, the face
+    /// Xcode uses. Named rather than called "System Monospaced", which made the
+    /// default read as a nondescript fallback when it is the intended choice.
+    static let systemFaceTitle = Default.faceName
 
     /// Every monospaced family installed on this Mac, sorted by name.
     ///
@@ -230,7 +247,11 @@ final class AppearanceSettings {
             || editorFontSize != Default.editorSize
             || diffFontSize != Default.diffSize
             || editorLineHeight != Default.lineHeight
-            || overridesTerminalFont
+            // Inverted along with the default: leaving the terminal to its own
+            // config is now the departure from it, not the other way round.
+            || !overridesTerminalFont
+            || terminalFontName != nil
+            || terminalFontSize != Default.terminalSize
             || palette.name != SyntaxPalette.all[0].name
     }
 
@@ -242,7 +263,9 @@ final class AppearanceSettings {
         terminalFontName = nil
         terminalFontSize = Default.terminalSize
         palette = SyntaxPalette.all[0]
-        // Last, so the terminal is rebuilt once, with everything else already back.
-        overridesTerminalFont = false
+        // Last, so the terminal is rebuilt once, with everything else already
+        // back. True, matching the launch default: SF Mono in the terminal is
+        // part of what "defaults" now means.
+        overridesTerminalFont = true
     }
 }

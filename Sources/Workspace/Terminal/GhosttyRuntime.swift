@@ -134,7 +134,11 @@ final class GhosttyRuntime {
 
         let appearance = AppearanceSettings.shared
         if appearance.overridesTerminalFont {
-            if let face = appearance.terminalFontName, AppearanceSettings.isInstalled(face) {
+            // `terminalFace` is SF Mono when nothing was chosen, so a shell opens
+            // in the face a file opens in. Nil only if that is not installed
+            // either — libghostty takes a name and cannot be handed the system
+            // face under Apple's private one, so it keeps its own default.
+            if let face = appearance.terminalFace {
                 lines.append("font-family = \(face)")
             }
             lines.append("font-size = \(appearance.terminalFontSize)")
