@@ -5,25 +5,25 @@ extension SyntaxPalette {
     /// It names no background of its own, so the editor keeps the app's viewer
     /// colour and the pane blends with the chrome around it.
     static let darkPlus: SyntaxPalette = {
-        let foreground = NSColor(hex: 0xD4_D4_D4)
-        let comment = NSColor(hex: 0x6A_99_55)      // green
-        let keyword = NSColor(hex: 0x56_9C_D6)      // blue
-        let control = NSColor(hex: 0xC5_86_C0)      // mauve — if/for/return
-        let string = NSColor(hex: 0xCE_91_78)       // terracotta
-        let stringEscape = NSColor(hex: 0xD7_BA_7D) // tan
-        let regex = NSColor(hex: 0xD1_69_69)        // dull red
-        let number = NSColor(hex: 0xB5_CE_A8)       // pale green
-        let constant = NSColor(hex: 0x4F_C1_FF)     // bright blue
-        let type = NSColor(hex: 0x4E_C9_B0)         // teal
-        let function = NSColor(hex: 0xDC_DC_AA)     // soft yellow
-        let variable = NSColor(hex: 0x9C_DC_FE)     // pale blue
-        let punctuation = NSColor(hex: 0x9D_9D_9D)
+        let foreground = NSColor(rgb: 0xD4_D4_D4)
+        let comment = NSColor(rgb: 0x6A_99_55)      // green
+        let keyword = NSColor(rgb: 0x56_9C_D6)      // blue
+        let control = NSColor(rgb: 0xC5_86_C0)      // mauve — if/for/return
+        let string = NSColor(rgb: 0xCE_91_78)       // terracotta
+        let stringEscape = NSColor(rgb: 0xD7_BA_7D) // tan
+        let regex = NSColor(rgb: 0xD1_69_69)        // dull red
+        let number = NSColor(rgb: 0xB5_CE_A8)       // pale green
+        let constant = NSColor(rgb: 0x4F_C1_FF)     // bright blue
+        let type = NSColor(rgb: 0x4E_C9_B0)         // teal
+        let function = NSColor(rgb: 0xDC_DC_AA)     // soft yellow
+        let variable = NSColor(rgb: 0x9C_DC_FE)     // pale blue
+        let punctuation = NSColor(rgb: 0x9D_9D_9D)
 
         return SyntaxPalette(
             name: "Dark+",
             foreground: foreground,
             background: nil,
-            lineNumber: NSColor(hex: 0x6E_76_81),
+            lineNumber: NSColor(rgb: 0x6E_76_81),
             currentLine: NSColor(white: 1, alpha: 0.045),
             // Present, but a good deal fainter than any text on the line.
             indentGuide: NSColor(white: 1, alpha: 0.12),
@@ -85,8 +85,8 @@ extension SyntaxPalette {
                 "text.title": SyntaxStyle(color: keyword, bold: true),
                 "text.strong": SyntaxStyle(color: foreground, bold: true),
                 "text.emphasis": SyntaxStyle(color: foreground, italic: true),
-                "text.uri": SyntaxStyle(color: NSColor(hex: 0x3E_92_FF)),
-                "error": SyntaxStyle(color: NSColor(hex: 0xF4_47_47), bold: true)
+                "text.uri": SyntaxStyle(color: NSColor(rgb: 0x3E_92_FF)),
+                "error": SyntaxStyle(color: NSColor(rgb: 0xF4_47_47), bold: true)
             ]
         )
     }()

@@ -61,16 +61,6 @@ final class WorkspaceStore {
 
     var fileSearchText = ""
 
-    /// What the file search found, kept for the editor: a file opened from a
-    /// result marks every occurrence, not only the line that was clicked. Set
-    /// when a result is opened, dropped when the search box is emptied.
-    var searchHighlight: String?
-
-    /// ⌘F in the editor. One for the app, because there is one editor — and it
-    /// lives here rather than in the file view so ⎋ can tell "close the find
-    /// bar" from "close the file".
-    let editorFind = EditorFind()
-
     /// Whether the file tree lists what `.gitignore` covers. Off by default —
     /// build output and caches bury the files actually worked on — and the files
     /// pane has a toggle for the times one of them is wanted.
@@ -712,15 +702,7 @@ final class WorkspaceStore {
 
     // MARK: - Opening things
 
-    /// Whether the editor takes the keyboard as it appears. Set by `openFile`
-    /// and read by the viewer: opening from the file tree leaves the keys there,
-    /// so ⏎, ⌘⌫ and the arrows keep working on the tree until the editor itself
-    /// is clicked — the way VS Code's explorer behaves. Everything else (a
-    /// search result, go-to-definition, a diff) opens ready to type in.
-    private(set) var editorTakesFocus = true
-
-    func openFile(_ url: URL, revealLine: Int? = nil, takingFocus: Bool = true) {
-        editorTakesFocus = takingFocus
+    func openFile(_ url: URL, revealLine: Int? = nil) {
         let key = ViewerItem.Kind.file(url).key
         if let existing = items[key] {
             if let revealLine { existing.document?.revealLine = revealLine }
@@ -1971,7 +1953,7 @@ final class WorkspaceStore {
                     ? openPath(under: sources[0], movedTo: result.finished[0])
                     : nil
                 for source in sources { closeItems(under: source) }
-                if let showAgain { openFile(showAgain, takingFocus: false) }
+                if let showAgain { openFile(showAgain) }
             }
             await project.refreshGitStatus()
             // Leave what landed picked, so the next action carries on with the
@@ -2000,7 +1982,7 @@ final class WorkspaceStore {
                 project.refreshFileTree()
                 await project.refreshGitStatus()
                 selectFiles([renamed])
-                if let showAgain { openFile(showAgain, takingFocus: false) }
+                if let showAgain { openFile(showAgain) }
                 showStatus("Renamed to \(renamed.lastPathComponent)")
             case .unchanged:
                 break
