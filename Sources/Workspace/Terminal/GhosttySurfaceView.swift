@@ -11,6 +11,12 @@ final class GhosttySurfaceView: NSView {
 
     var onTitleChange: ((String) -> Void)?
     var onClose: (() -> Void)?
+    /// The program rang the bell (BEL). `claude` rings it when it wants an
+    /// answer, which is the whole reason this is forwarded at all.
+    var onBell: (() -> Void)?
+    /// The program asked the desktop for a notification of its own — OSC 9 or
+    /// OSC 777. Title, then body; the title is absent for the short form.
+    var onDesktopNotification: ((String?, String) -> Void)?
 
     private var pendingStart: (directory: URL, initialInput: String?)?
 

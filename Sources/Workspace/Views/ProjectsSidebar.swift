@@ -397,6 +397,12 @@ struct CollapsedProjectsRail: View {
                 GitHostIcon(host: project.host, size: 19)
             }
             .frame(width: 44, height: 44)
+            // Folded, the rail is all there is to say a repository has a turn
+            // running in it, so the badge rides the corner of the tile.
+            .overlay(alignment: .topTrailing) {
+                ClaudeWorkingBadge(count: store.workingClaudeCount(in: project), size: 13)
+                    .offset(x: 5, y: -4)
+            }
 
             // The name is the only way to tell two GitHub repositories apart, so
             // it is worth the two lines even at this width; the tooltip carries
@@ -436,6 +442,7 @@ struct ProjectCard: View {
                     .font(.callout.weight(.medium))
                     .lineLimit(1)
                 Spacer()
+                ClaudeWorkingBadge(count: store.workingClaudeCount(in: project))
                 if project.isLoadingPullRequests {
                     ProgressView().controlSize(.mini)
                 }
@@ -500,6 +507,42 @@ struct ProjectCard: View {
         .buttonStyle(.plain)
         .help(project.isPinned ? "Unpin from the top" : "Pin to the top")
         .pointerCursor()
+    }
+}
+
+/// The sign that a repository has a conversation mid-turn, for its card and for
+/// its square on the folded rail.
+///
+/// Claude's own mark rather than a spinner, and it breathes rather than spins:
+/// there is already a spinner on the card for the pull request load, and two
+/// turning things a few points apart say nothing about which is which. Nothing
+/// is drawn at all when no turn is running — a badge that is always there is
+/// only furniture.
+struct ClaudeWorkingBadge: View {
+    let count: Int
+    var size: CGFloat = 12
+
+    @State private var isDim = false
+
+    var body: some View {
+        if count > 0 {
+            HStack(spacing: 3) {
+                ClaudeMark(size: size)
+                // Only worth the width once there is more than one — a single
+                // "1" beside the mark says nothing the mark did not.
+                if count > 1 {
+                    Text("\(count)")
+                        .font(.caption2.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .opacity(isDim ? 0.35 : 1)
+            .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: isDim)
+            .onAppear { isDim = true }
+            .help(count == 1
+                ? "A Claude conversation is working"
+                : "\(count) Claude conversations are working")
+        }
     }
 }
 
