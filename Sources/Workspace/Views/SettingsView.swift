@@ -2,23 +2,51 @@ import AppKit
 import CodeEditLanguages
 import SwiftUI
 
-/// ⌘, — the fonts code is shown in, plus two lists of programs the app runs but
-/// does not ship: the command line tools it needs, and the language servers the
-/// editor starts.
+/// ⌘, — the fonts code is shown in, the app's own updates, plus two lists of
+/// programs the app runs but does not ship: the command line tools it needs,
+/// and the language servers the editor starts.
 ///
 /// Nothing in those two lists is guessed: every row is what the program itself
 /// answered, through the same login shell every other command goes through.
 struct SettingsView: View {
+    private var updater: AppUpdater { .shared }
+
+    enum Tab: Hashable {
+        case appearance, requirements, servers, updates
+    }
+
+    @State private var tab: Tab = .appearance
+    /// The last request for the Updates tab this view acted on, so the same one
+    /// does not move the selection again every time the window is reopened.
+    @State private var answeredRequest = 0
+
     var body: some View {
-        TabView {
+        TabView(selection: $tab) {
             FontSettings()
                 .tabItem { Label("Appearance", systemImage: "paintpalette") }
+                .tag(Tab.appearance)
             RequirementsSettings()
                 .tabItem { Label("Requirements", systemImage: "wrench.and.screwdriver") }
+                .tag(Tab.requirements)
             LanguageServerSettings()
                 .tabItem { Label("Language Servers", systemImage: "chevron.left.forwardslash.chevron.right") }
+                .tag(Tab.servers)
+            UpdateSettings()
+                .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
+                .tag(Tab.updates)
         }
         .frame(width: 620, height: 500)
+        // "Check for Updates…" and the sidebar's badge both open this window
+        // asking for one particular tab. Handled in two places because the ask
+        // usually comes *before* this view exists, and sometimes after.
+        .onAppear { answerUpdatesRequest() }
+        .onChange(of: updater.updatesTabRequest) { answerUpdatesRequest() }
+    }
+
+    private func answerUpdatesRequest() {
+        guard updater.updatesTabRequest != answeredRequest else { return }
+        answeredRequest = updater.updatesTabRequest
+        tab = .updates
     }
 }
 

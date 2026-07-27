@@ -147,6 +147,7 @@ struct ProjectsSidebar: View {
             .buttonStyle(.plain)
             .pointerCursor()
             Spacer()
+            updateButton
             settingsButton
             Button {
                 store.refreshAll()
@@ -162,6 +163,23 @@ struct ProjectsSidebar: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    /// There only while a new version of the app is waiting — the one place a
+    /// banner that has been put away can still be found.
+    @ViewBuilder
+    private var updateButton: some View {
+        if let release = AppUpdater.shared.pending {
+            Button {
+                SettingsWindow.showUpdates()
+            } label: {
+                Image(systemName: "arrow.down.circle.fill")
+                    .foregroundStyle(.blue)
+            }
+            .buttonStyle(.plain)
+            .help("Workspace \(release.version.text) is available")
+            .pointerCursor()
+        }
     }
 
     /// Opens Settings, with a dot when a tool the repositories here depend on is

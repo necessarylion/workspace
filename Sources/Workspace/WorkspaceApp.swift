@@ -24,6 +24,14 @@ struct WorkspaceApp: App {
         // lights float over the leftmost pane, which leaves room for them.
         .windowStyle(.hiddenTitleBar)
         .commands {
+            // Right under "About Workspace", where every Mac app keeps it.
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    AppUpdater.shared.check()
+                    SettingsWindow.showUpdates()
+                }
+            }
+
             CommandGroup(replacing: .newItem) {
                 Button("Add Repository…") {
                     store.promptForProjectFolder()
@@ -89,7 +97,7 @@ struct WorkspaceApp: App {
 
                 Button("Ask Claude") {
                     if let project = store.selectedProject {
-                        store.openClaudeChat(in: project)
+                        store.openClaude(in: project)
                     }
                 }
                 .keyboardShortcut("l", modifiers: [.command, .shift])

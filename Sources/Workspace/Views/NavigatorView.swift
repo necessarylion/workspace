@@ -734,11 +734,17 @@ struct ChangeListView: View {
                 VStack(spacing: 0) {
                     recentCommits
                     if status.changes.isEmpty {
+                        // Told to take the slack, so the commits above it stay
+                        // pinned to the top of the pane. Left at its own size the
+                        // empty state does not fill, and the stack ends up
+                        // shorter than the pane — which centres the whole thing
+                        // and pushes the commits into the middle of nowhere.
                         ContentUnavailableView(
                             "Working tree clean",
                             systemImage: "checkmark.seal",
                             description: Text("Nothing to commit on \(status.branch).")
                         )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         changeList(status)
                     }

@@ -10,10 +10,9 @@ import Foundation
 /// capital, and having to get it right is the difference between a palette you
 /// reach for and one you fight.
 ///
-/// The order is the one the chat's `@` menu uses, since it is the same question
-/// asked twice: a file whose *name* starts with what you typed comes before one
-/// that merely has those letters in a folder somewhere, and the letters found
-/// scattered — `csv` finding `CodeServiceView` — come last of all.
+/// A file whose *name* starts with what you typed comes before one that merely
+/// has those letters in a folder somewhere, and the letters found scattered —
+/// `csv` finding `CodeServiceView` — come last of all.
 enum FileFinder {
     // MARK: - What a row is
 
@@ -43,6 +42,67 @@ enum FileFinder {
         var folder: String {
             nameStart == 0 ? "" : String(path.prefix(nameStart - 1))
         }
+    }
+
+    // MARK: - Reading the repository
+
+    /// Every file in the repository, as paths relative to it.
+    ///
+    /// `git ls-files` rather than walking the folder: it is one call however
+    /// deep the tree is, and it already leaves out what `.gitignore` covers —
+    /// listing `node_modules/…` would bury the files actually worked on. A
+    /// folder that is not a repository falls back to a walk.
+    static func paths(in project: URL) async -> [String] {
+        let listed = await Shell.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            in: project,
+            timeout: 20
+        )
+        if listed.isSuccess {
+            let paths = listed.stdout
+                .split(separator: "\n")
+                .map(String.init)
+                .filter { !$0.isEmpty }
+            if !paths.isEmpty { return paths }
+        }
+        return await walk(project)
+    }
+
+    private static let skippedFolders: Set<String> = [
+        ".git", ".build", ".swiftpm", "node_modules", "DerivedData", ".next", "dist",
+    ]
+
+    private static func walk(_ project: URL) async -> [String] {
+        await Task.detached(priority: .utility) { walkSync(project) }.value
+    }
+
+    /// Synchronous on purpose: a directory enumerator cannot be stepped from an
+    /// async context, so the walk happens whole inside the detached task.
+    private static func walkSync(_ project: URL) -> [String] {
+        let manager = FileManager.default
+        guard let walker = manager.enumerator(
+            at: project,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var paths: [String] = []
+        let root = project.standardizedFileURL.path + "/"
+        for case let url as URL in walker {
+            if skippedFolders.contains(url.lastPathComponent) {
+                walker.skipDescendants()
+                continue
+            }
+            let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            guard !isDirectory else { continue }
+            let path = url.standardizedFileURL.path
+            guard path.hasPrefix(root) else { continue }
+            paths.append(String(path.dropFirst(root.count)))
+            // A tree with a hundred thousand files is not one anybody picks a
+            // file out of, and the list has to stay cheap to filter.
+            if paths.count >= 20_000 { break }
+        }
+        return paths
     }
 
     // MARK: - The repository, prepared

@@ -1,11 +1,16 @@
+import AppKit
 import SwiftUI
 
-/// The *Claude* tab of the navigator: the conversations open in this window,
+/// The *Claude* tab of the navigator: the conversations running in this window,
 /// then every conversation Claude Code has ever had about this repository.
 ///
+/// Each one is a **terminal tab** running the real `claude`, which is what lets
+/// several be under way at once — separate processes in separate shells, a turn
+/// working away in one while another is typed into. This pane is the way back to
+/// any of them, and the way to start one more.
+///
 /// The past ones come off disk rather than out of this window, so a session
-/// started in a shell is in the list too — and the one on screen is marked, so
-/// it is clear which of them the composer below is typing into.
+/// started in a shell of your own is in the list too.
 struct ClaudeSessionListView: View {
     @Environment(WorkspaceStore.self) private var store
     let project: Project
@@ -13,24 +18,16 @@ struct ClaudeSessionListView: View {
     @State private var sessions: [ClaudePastSession] = []
     @State private var isLoading = true
 
-    /// The chat this pane belongs to, if it is open. Nothing is started just by
-    /// looking at the list.
-    private var session: ClaudeSession? {
-        store.claudeSession(for: project)
+    /// The conversations this repository has running, whichever is on screen.
+    private var live: [OpenTerminal] {
+        store.runningClaudes(in: project)
     }
 
-    /// Every conversation running in this window, whether or not it is the one
-    /// on screen — they answer at the same time, so the list has to show more
-    /// than the one being typed into.
-    private var live: [ClaudeSession] {
-        store.claudeSessions(in: project)
-    }
-
-    /// Transcripts a live chat is already showing. Their row belongs in the open
-    /// list above, so the disk list leaves them out rather than offering a
-    /// second way in that would start a duplicate.
+    /// Transcripts a running tab already has open. Their row belongs in the list
+    /// above, so the disk list leaves them out rather than offering a second way
+    /// in that would only send you back to the same shell.
     private var liveTranscriptIDs: Set<String> {
-        Set(live.compactMap(\.claudeSessionID))
+        Set(live.compactMap(\.session.claudeSessionID))
     }
 
     var body: some View {
@@ -40,21 +37,10 @@ struct ClaudeSessionListView: View {
             footer
         }
         .task(id: project.id) { await load() }
-        // The id arrives with the `init` at the *top* of the first turn, before
-        // the CLI has written a word of the transcript — so this catches a new
-        // conversation existing, but not yet what it is called.
-        //
-        // Every open chat is watched, not just the one on screen: they answer at
-        // the same time, and it is the one left running in the background whose
-        // row would otherwise sit stale.
-        .task(id: live.compactMap(\.claudeSessionID).joined(separator: ",")) { await load() }
-        // …which is what this is for. By the time a turn ends the prompt is on
-        // disk, so the row that was missing (or sitting there untitled) turns
-        // into the real thing without anyone reaching for refresh.
-        .onChange(of: live.map(\.isResponding)) { was, now in
-            guard zip(was, now).contains(where: { $0 && !$1 }) else { return }
-            Task { await load() }
-        }
+        // A conversation started here writes its transcript the moment its first
+        // prompt lands, so the list is read again whenever a tab comes or goes —
+        // which is the cheapest signal there is that something happened.
+        .task(id: live.count) { await load() }
     }
 
     private var list: some View {
@@ -63,20 +49,20 @@ struct ClaudeSessionListView: View {
                 newChatRow
 
                 if !live.isEmpty {
-                    sectionHeader("Open")
-                    ForEach(live, id: \.id) { chat in
+                    sectionHeader("Running")
+                    ForEach(live) { terminal in
                         LiveClaudeRow(
-                            session: chat,
-                            isCurrent: chat.id == session?.id,
-                            open: { store.selectClaudeChat(chat, in: project) },
-                            close: { store.closeClaudeChat(chat, in: project) }
+                            terminal: terminal,
+                            isOnScreen: store.isShowing(terminal),
+                            open: { store.showTerminal(terminal) },
+                            close: { store.closeTerminal(terminal) }
                         )
                     }
                 }
 
-                // Always drawn, whether or not anything is open above it: it is
-                // the switch for the section below, and a switch that only
-                // appears once a conversation is running would be unreachable
+                // Always drawn, whether or not anything is running above it: it
+                // is the switch for the section below, and a switch that only
+                // appears once a conversation is going would be unreachable
                 // exactly when the list is nothing but history.
                 pastHeader
 
@@ -94,7 +80,7 @@ struct ClaudeSessionListView: View {
                         Text(
                             sessions.isEmpty
                                 ? "No conversations about this repository yet."
-                                : "Every conversation on disk is already open."
+                                : "Every conversation on disk is already running."
                         )
                         .font(.caption)
                         .foregroundStyle(.tertiary)
@@ -105,7 +91,7 @@ struct ClaudeSessionListView: View {
                     ForEach(past) { past in
                         ClaudeSessionRow(
                             past: past,
-                            open: { open(past) },
+                            open: { store.resumeClaude(past, in: project) },
                             delete: { delete(past) }
                         )
                     }
@@ -151,7 +137,7 @@ struct ClaudeSessionListView: View {
         .animation(.easeOut(duration: 0.15), value: store.showsPastClaudeConversations)
     }
 
-    /// The conversations on disk that no open chat is already showing.
+    /// The conversations on disk that no running tab already has open.
     private var past: [ClaudePastSession] {
         let open = liveTranscriptIDs
         return sessions.filter { !open.contains($0.id) }
@@ -167,12 +153,12 @@ struct ClaudeSessionListView: View {
             .padding(.bottom, 2)
     }
 
-    /// Always at the top, whether or not a chat is open. It starts another one
-    /// beside the ones already running rather than clearing the one on screen —
-    /// two conversations about the same repository can be under way at once.
+    /// Always at the top, whether or not one is already going. It starts another
+    /// beside the ones already running rather than taking over one of them — two
+    /// conversations about the same repository can be under way at once.
     private var newChatRow: some View {
         Button {
-            store.newClaudeChat(in: project)
+            store.openClaude(in: project)
         } label: {
             HStack(spacing: 7) {
                 Image(systemName: "square.and.pencil")
@@ -213,23 +199,6 @@ struct ClaudeSessionListView: View {
         .background(.bar)
     }
 
-    /// Resuming a transcript gets a chat of its own rather than taking over the
-    /// one on screen — that chat may be mid-turn, and replacing its transcript
-    /// under it would throw the answer away. A conversation already open is
-    /// simply shown again.
-    private func open(_ past: ClaudePastSession) {
-        if let already = live.first(where: { $0.claudeSessionID == past.id }) {
-            store.selectClaudeChat(already, in: project)
-            return
-        }
-        // An untouched chat is worth reusing: it has nothing to lose, and
-        // resuming into it saves leaving an empty one behind.
-        let session = live.first { $0.isEmpty && !$0.isResponding }
-            ?? store.newClaudeChat(in: project)
-        store.selectClaudeChat(session, in: project)
-        Task { await session.resume(past) }
-    }
-
     /// To the Trash, so it can be taken back out — which is why it does not ask
     /// first, the same as deleting a file in the Files tab.
     private func delete(_ past: ClaudePastSession) {
@@ -237,12 +206,6 @@ struct ClaudeSessionListView: View {
             if let error = await ClaudeSessionsIndex.delete(past) {
                 store.showError("Could not delete the conversation — \(error)")
                 return
-            }
-            // A transcript that is open has just gone: what is left cannot be
-            // resumed, so that chat starts over rather than sending its next
-            // prompt to a session id that no longer exists.
-            for chat in live where chat.claudeSessionID == past.id {
-                chat.newChat()
             }
             sessions.removeAll { $0.id == past.id }
             store.showStatus("Conversation moved to the Trash")
@@ -256,36 +219,30 @@ struct ClaudeSessionListView: View {
     }
 }
 
-/// One conversation running in this window. The row shows it; the ✕ under the
-/// pointer ends that one alone.
-///
-/// What it says under the title is whether the chat is working — the reason to
-/// have more than one open is to leave a turn running and get on with another,
-/// so "still answering" is the thing worth reading from here.
+/// One conversation running in this window — a terminal tab with `claude` in it.
+/// The row shows it; the ✕ under the pointer closes that tab alone, and the
+/// others keep going.
 private struct LiveClaudeRow: View {
-    let session: ClaudeSession
-    let isCurrent: Bool
+    let terminal: OpenTerminal
+    let isOnScreen: Bool
     let open: () -> Void
     let close: () -> Void
 
     @State private var isHovering = false
 
+    /// The shell renames its own tab (OSC 0/2), so what `claude` calls the
+    /// conversation is what this says once it has settled on something.
+    private var title: String { terminal.session.title }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(session.displayTitle)
+            Text(title)
                 .font(.callout)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
             HStack(spacing: 5) {
-                if session.isResponding {
-                    ProgressView().controlSize(.mini).scaleEffect(0.6).frame(width: 8, height: 8)
-                    Text(session.activity ?? "Working…")
-                        .foregroundStyle(.tint)
-                } else if isCurrent {
-                    Text("on screen")
-                } else {
-                    Text("open")
-                }
+                Image(systemName: "terminal")
+                Text(isOnScreen ? "on screen" : "running")
             }
             .font(.caption2)
             .foregroundStyle(.tertiary)
@@ -307,29 +264,31 @@ private struct LiveClaudeRow: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help("End this conversation")
+                .help("End this conversation and close its tab")
                 .pointerCursor()
                 .padding(.top, 5)
                 .padding(.trailing, 5)
             }
         }
         .background(
-            isCurrent ? AnyShapeStyle(.tint.opacity(0.16)) : AnyShapeStyle(.quaternary.opacity(isHovering ? 0.3 : 0.16)),
+            isOnScreen
+                ? AnyShapeStyle(.tint.opacity(0.16))
+                : AnyShapeStyle(.quaternary.opacity(isHovering ? 0.3 : 0.16)),
             in: RoundedRectangle(cornerRadius: 7)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 7)
-                .stroke(isCurrent ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 1)
+                .stroke(isOnScreen ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 1)
         )
         .onHover { isHovering = $0 }
         .onTapGesture(perform: open)
         .pointerCursor()
-        .help(session.displayTitle)
+        .help(title)
     }
 }
 
-/// One past conversation. The whole row opens it; the ✕ that appears under the
-/// pointer throws it away.
+/// One past conversation. The whole row resumes it in a terminal of its own; the
+/// ✕ that appears under the pointer throws the transcript away.
 private struct ClaudeSessionRow: View {
     let past: ClaudePastSession
     let open: () -> Void
@@ -384,7 +343,7 @@ private struct ClaudeSessionRow: View {
         .pointerCursor()
         .help(past.title)
         .contextMenu {
-            Button("Open Conversation", action: open)
+            Button("Resume in a Terminal", action: open)
             Button("Reveal Transcript in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([past.file])
             }

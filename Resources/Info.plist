@@ -18,8 +18,10 @@
     <string>Workspace</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- Both are stamped by Scripts/bundle.sh from the git tag; what is here
+         is only what an untagged build falls back to. -->
     <key>CFBundleShortVersionString</key>
-    <string>0.1</string>
+    <string>0.0.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>

@@ -114,38 +114,4 @@ enum ClaudeSessionsIndex {
             ? String(firstLine.prefix(90)) + "…"
             : firstLine
     }
-
-    /// A transcript's entries, oldest first, for putting a resumed conversation
-    /// back on screen. Sidechains — what a subagent said to itself — are left
-    /// out, the same as they are while a conversation is live.
-    ///
-    /// Only the tail of a very long transcript is read: what is wanted is the
-    /// conversation you are coming back to, not every tool call of the last
-    /// three hours.
-    static func transcript(of file: URL, limit: Int = 8 * 1024 * 1024) async -> [JSONValue] {
-        await Task.detached(priority: .userInitiated) {
-            guard let handle = try? FileHandle(forReadingFrom: file) else { return [] }
-            defer { try? handle.close() }
-
-            let size = (try? handle.seekToEnd()) ?? 0
-            var data: Data?
-            if size > UInt64(limit) {
-                try? handle.seek(toOffset: size - UInt64(limit))
-                data = try? handle.readToEnd()
-                // The cut lands mid-line; that half line is not JSON.
-                if let cut = data, let newline = cut.firstIndex(of: 0x0A) {
-                    data = cut[cut.index(after: newline)...]
-                }
-            } else {
-                try? handle.seek(toOffset: 0)
-                data = try? handle.readToEnd()
-            }
-
-            guard let data, let text = String(data: data, encoding: .utf8) else { return [] }
-            return text
-                .split(separator: "\n")
-                .compactMap { JSONValue.parse(String($0)) }
-                .filter { $0["isSidechain"]?.boolValue != true }
-        }.value
-    }
 }

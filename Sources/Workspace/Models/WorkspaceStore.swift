@@ -208,12 +208,10 @@ final class WorkspaceStore {
         projects.removeAll { $0.id == project.id }
         LanguageServerRegistry.shared.shutdownServices(inside: project.url)
 
-        // Forget anything that belonged to it, its shells and its Claude
-        // conversation included — the window-wide terminal is untouched, it
-        // belongs to no repository.
+        // Forget anything that belonged to it, its shells included — the
+        // window-wide terminal is untouched, it belongs to no repository.
         for (key, item) in items where item.projectID == project.id {
             item.terminals.forEach { $0.terminate() }
-            item.claudes.forEach { $0.shutDown() }
             items[key] = nil
         }
         persistTerminals()
@@ -509,14 +507,6 @@ final class WorkspaceStore {
         showsNavigator.toggle()
     }
 
-    /// The conversation open for the selected repository, if one has been
-    /// started. The viewer keeps this one item mounted under whatever else is
-    /// showing rather than swapping it out — see `ViewerView.body`.
-    var openClaudeItem: ViewerItem? {
-        guard let projectID = selectedProjectID else { return nil }
-        return items[ViewerItem.Kind.claude(projectID: projectID).key]
-    }
-
     /// The document the viewer is actually showing. The open item survives a
     /// trip to the dashboard — that is what Forward goes back to — so anything
     /// that acts on what is *on screen* (the preview toggle, Save as PDF) has
@@ -578,9 +568,8 @@ final class WorkspaceStore {
             showsDashboard = true
             return
         }
-        // A terminal is only ever closed tab by tab, by the user, and a Claude
-        // conversation is only ever thrown away from inside it. This puts the
-        // dashboard back and leaves both running.
+        // A terminal is only ever closed tab by tab, by the user. This puts
+        // the dashboard back and leaves its shells running.
         if current.survivesClosing {
             showsDashboard = true
             return
@@ -615,9 +604,8 @@ final class WorkspaceStore {
     /// **A file with unsaved edits is never dropped.** Nothing else in the app
     /// would warn about them, so closing it here would be losing work without
     /// saying so; it keeps its slot until it is saved or closed by hand. Only
-    /// files are touched — a shell and a Claude conversation have something
-    /// running behind them, and a diff or a pull request costs a title and a
-    /// patch rather than a live editor.
+    /// files are touched — a shell has something running behind it, and a diff
+    /// or a pull request costs a title and a patch rather than a live editor.
     private func closeOtherFiles(keeping id: String) {
         for (key, item) in items where key != id && item.isFile && !item.isDirty {
             items[key] = nil
@@ -671,7 +659,6 @@ final class WorkspaceStore {
         case .commit(let projectID, _): projectID
         case .pullRequest(let projectID, _): projectID
         case .terminal(let projectID): projectID
-        case .claude(let projectID): projectID
         }
     }
 
@@ -687,7 +674,7 @@ final class WorkspaceStore {
             viewer.history.removeFirst()
             viewer.index -= 1
             // A terminal outlives its history entry: its shells keep running
-            // until the user closes their tabs. So does a Claude conversation.
+            // until the user closes their tabs.
             if !isOpenAnywhere(oldest), items[oldest]?.survivesClosing != true {
                 items[oldest] = nil
             }
@@ -1655,102 +1642,86 @@ final class WorkspaceStore {
 
     // MARK: - External tools
 
-    /// Starts Claude Code on this repository, in its own terminal tab.
-    func openClaude(in project: Project) {
-        openTerminal(in: project, runningCommand: "claude", title: "Claude")
-    }
-
-    /// Opens the repository's Claude conversation in the viewer — the same
-    /// `claude`, driven rather than typed at. Kept alive like a terminal, so
-    /// leaving it and coming back finds the transcript and the half-written
-    /// prompt where they were.
+    /// Starts Claude Code on this repository, in a terminal tab of its own.
     ///
-    /// Returns to the conversation already on screen rather than starting a
-    /// second one; ``newClaudeChat(in:)`` is how another is added.
-    @discardableResult
-    func openClaudeChat(in project: Project) -> ViewerItem {
-        let item = claudeItem(for: project)
-        if item.claudes.isEmpty {
-            addClaudeSession(to: item, in: project)
-        }
-        present(item)
-        // The viewer shows one conversation, so the navigator shows the rest —
-        // the same move opening a terminal or a pull request makes.
+    /// A conversation is a shell here, not a pane of its own: `claude` is a
+    /// terminal program, and the app used to drive it through a stream of JSON
+    /// and redraw the whole transcript in SwiftUI — which cost far more to keep
+    /// on screen than the thing it was imitating. Reaching for the real CLI
+    /// means the transcript is drawn by the terminal, and every version of
+    /// Claude Code works, flags and all, without the app having to know about
+    /// any of them.
+    ///
+    /// **Always a new tab.** As many conversations can run at once as you care
+    /// to start — separate processes in separate shells, so a turn working away
+    /// in one carries on while another is typed into, and the Claude tab is how
+    /// you get back to any of them.
+    ///
+    /// The conversation is given its **id up front** (`--session-id`) rather
+    /// than being left to name itself. Without one there is no way to tell the
+    /// transcript it is writing from a conversation that merely ended: the
+    /// history would list a row for the chat that is running in front of you,
+    /// and clicking it would start a second `claude` on the same file. A CLI too
+    /// old for the flag simply goes without, and takes that duplicate row.
+    func openClaude(in project: Project) {
+        // The tab is made now and the command typed in a moment later. The
+        // shell needs about a second to draw its prompt either way, so asking
+        // the CLI what it accepts costs nothing that was not already being
+        // waited for — and the tab is on screen while it happens.
+        let item = openTerminal(in: project, title: "Claude")
+        guard let session = item.selectedTerminal else { return }
+        session.runsClaude = true
         navigatorTab = .claude
-        return item
-    }
 
-    /// Another conversation about the same repository, running beside the ones
-    /// already open. Each has its own `claude` process, so a turn under way in
-    /// one carries on while this one is typed into.
-    @discardableResult
-    func newClaudeChat(in project: Project) -> ClaudeSession {
-        let item = claudeItem(for: project)
-        let session = addClaudeSession(to: item, in: project)
-        present(item)
-        navigatorTab = .claude
-        return session
-    }
-
-    /// Puts one of the open conversations back on screen. The others keep
-    /// running: nothing is stopped by looking away from it.
-    func selectClaudeChat(_ session: ClaudeSession, in project: Project) {
-        let item = claudeItem(for: project)
-        guard item.claudes.contains(where: { $0.id == session.id }) else { return }
-        item.selectedClaudeID = session.id
-        present(item)
-        navigatorTab = .claude
-    }
-
-    /// Ends one conversation and forgets it, leaving the rest alone. Closing the
-    /// last one leaves the item with none, which is what the viewer reads as
-    /// "no chat here" — the transcript itself is on disk either way, so it can
-    /// be resumed from the list afterwards.
-    func closeClaudeChat(_ session: ClaudeSession, in project: Project) {
-        let item = claudeItem(for: project)
-        guard let index = item.claudes.firstIndex(where: { $0.id == session.id }) else { return }
-        session.shutDown()
-        item.claudes.remove(at: index)
-        if item.selectedClaudeID == session.id {
-            // The one before it, so closing down a row of chats walks back up
-            // the list instead of jumping to the end each time.
-            let next = min(max(index - 1, 0), item.claudes.count - 1)
-            item.selectedClaudeID = item.claudes.indices.contains(next) ? item.claudes[next].id : nil
-        }
-        if item.claudes.isEmpty, current?.id == item.id {
-            closeCurrent()
+        Task {
+            let cli = await ClaudeCLI.shared.info()
+            guard cli.supportsSessionID else {
+                session.run("claude")
+                return
+            }
+            let id = UUID().uuidString.lowercased()
+            session.claudeSessionID = id
+            session.run("claude --session-id \(id)")
         }
     }
 
-    /// A repository's conversations, in the order they were started. Empty until
-    /// one is opened: listing them must not start anything.
-    func claudeSessions(in project: Project) -> [ClaudeSession] {
-        items[ViewerItem.Kind.claude(projectID: project.id).key]?.claudes ?? []
+    /// Picks a past conversation up where it was left, in a terminal of its own.
+    ///
+    /// The tab is remembered by session id, so clicking the same row again comes
+    /// back to the shell already running it rather than starting a second
+    /// `claude` on the same transcript — which the CLI would let you do, and
+    /// which would leave two of them writing to one file. Different
+    /// conversations get different tabs, and all of them keep running.
+    func resumeClaude(_ past: ClaudePastSession, in project: Project) {
+        if let running = claudeTerminal(for: past.id, in: project) {
+            showTerminal(running)
+            navigatorTab = .claude
+            return
+        }
+        // The first prompt of a conversation is its title, and a prompt can be a
+        // paragraph. The shell renames the tab itself within a second or two;
+        // this is only what it is called until then.
+        let title = past.title.count > 32
+            ? String(past.title.prefix(32)) + "…"
+            : past.title
+        let item = openTerminal(
+            in: project,
+            runningCommand: "claude --resume \(Shell.quote(past.id))",
+            title: title
+        )
+        item.selectedTerminal?.runsClaude = true
+        item.selectedTerminal?.claudeSessionID = past.id
+        navigatorTab = .claude
     }
 
-    /// The conversation on screen for this repository, if any. The sessions list
-    /// asks with this rather than making one.
-    func claudeSession(for project: Project) -> ClaudeSession? {
-        items[ViewerItem.Kind.claude(projectID: project.id).key]?.claude
+    /// Every conversation this repository has running, in the order they were
+    /// started. What the Claude tab lists above the history.
+    func runningClaudes(in project: Project) -> [OpenTerminal] {
+        terminals(in: .project(project.id)).filter(\.session.runsClaude)
     }
 
-    /// The one item that holds this repository's conversations, made on demand.
-    /// Like a terminal, it lives outside the history's clean-up, so it is
-    /// registered as soon as it exists rather than waiting to be presented.
-    private func claudeItem(for project: Project) -> ViewerItem {
-        let kind = ViewerItem.Kind.claude(projectID: project.id)
-        if let existing = items[kind.key] { return existing }
-        let item = ViewerItem(kind: kind, title: "Claude", subtitle: project.name)
-        items[item.id] = item
-        return item
-    }
-
-    @discardableResult
-    private func addClaudeSession(to item: ViewerItem, in project: Project) -> ClaudeSession {
-        let session = ClaudeSession(directory: project.url)
-        item.claudes.append(session)
-        item.selectedClaudeID = session.id
-        return session
+    private func claudeTerminal(for sessionID: String, in project: Project) -> OpenTerminal? {
+        terminals(in: .project(project.id)).first { $0.session.claudeSessionID == sessionID }
     }
 
     /// Opens the project in another editor, if it is installed.
@@ -2112,7 +2083,7 @@ final class WorkspaceStore {
         fileListTask = Task { [weak self] in
             // Listed, then folded once for the whole repository — a keystroke
             // should only have to compare, never to prepare.
-            let paths = await ClaudeCompletions.files(in: root)
+            let paths = await FileFinder.paths(in: root)
             let index = await FileFinder.index(paths)
             guard !Task.isCancelled else { return }
             self?.apply(index, for: root)

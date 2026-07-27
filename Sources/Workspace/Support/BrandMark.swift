@@ -57,6 +57,69 @@ enum BrandArtwork {
     static func has(_ name: String) -> Bool { BrandPath.all[name] != nil }
 }
 
+// MARK: - Claude
+
+/// Claude's own mark, drawn from artwork we ship rather than borrowed from the
+/// desktop app's icon — the CLI is what these buttons run, and that does not
+/// mean the desktop app is installed. The resource is the whole tile, mark and
+/// terracotta together, so nothing about the artwork is reconstructed here.
+struct ClaudeMark: View {
+    var size: CGFloat = 15
+
+    /// The radius the tile is rounded by, as a fraction of its side — macOS'
+    /// own app-icon proportion, because the mark sits beside real app icons.
+    private static let cornerFraction: CGFloat = 0.225
+
+    /// Read once, by URL like every other resource here rather than through
+    /// `Image(_:bundle:)`: on macOS that initialiser resolves a name against an
+    /// asset catalogue, and a file copied in by `.process` is a loose one, so
+    /// it comes back empty rather than failing. The artwork stays an SVG —
+    /// AppKit keeps it as a vector rep, which is what lets one 2 KB file serve
+    /// every size below without a set of bitmaps.
+    ///
+    /// The corners are rounded into the image rather than clipped in the view:
+    /// one of these is a segment of a segmented `Picker`, and that flattens a
+    /// segment's label down to a plain image, losing any shape clipped around
+    /// it. Drawing through a handler keeps the rounding vector too — it runs
+    /// again at whatever resolution the image is asked to rasterise at.
+    ///
+    /// `isTemplate` is forced off because a template is filled with the accent
+    /// colour, and two of these sit inside buttons where that is not the
+    /// default one.
+    @MainActor private static let artwork: NSImage? = {
+        guard let url = Bundle.module.url(forResource: "claude-mark", withExtension: "svg"),
+              let source = NSImage(contentsOf: url) else { return nil }
+        let rounded = NSImage(size: source.size, flipped: false) { rect in
+            NSBezierPath(
+                roundedRect: rect,
+                xRadius: rect.width * cornerFraction,
+                yRadius: rect.height * cornerFraction
+            ).addClip()
+            source.draw(in: rect)
+            return true
+        }
+        rounded.isTemplate = false
+        return rounded
+    }()
+
+    var body: some View {
+        Group {
+            if let artwork = Self.artwork {
+                Image(nsImage: artwork)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                // Shipped artwork cannot go missing in a built app, but a mark
+                // that silently renders as nothing is not worth the risk. Only
+                // this branch is clipped — the artwork carries its own corners.
+                Color(red: 0.851, green: 0.467, blue: 0.341)
+                    .clipShape(RoundedRectangle(cornerRadius: size * Self.cornerFraction))
+            }
+        }
+        .frame(width: size, height: size)
+    }
+}
+
 // MARK: - Git hosts
 
 /// The mark of the host a repository lives on, sized like the text beside it.

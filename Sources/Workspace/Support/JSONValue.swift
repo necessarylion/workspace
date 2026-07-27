@@ -2,10 +2,11 @@ import Foundation
 
 /// A JSON value whose shape is not known ahead of time.
 ///
-/// The `claude` CLI streams tool inputs and tool results whose fields depend on
-/// which tool ran, so they cannot be decoded into a struct. They arrive here
-/// instead, and the chat view reaches into them by key. `Sendable` matters: a
-/// parsed line crosses from the process reader over to the main actor.
+/// A line of a `claude` transcript is one of these: what a tool was passed and
+/// what came back depend on which tool ran, so they cannot be decoded into a
+/// struct. They arrive here instead and are reached into by key — see
+/// ``ClaudeSessionsIndex``, which reads a conversation's title out of the head
+/// of its file. `Sendable` matters: the parse happens off the main actor.
 enum JSONValue: Sendable, Equatable {
     case null
     case bool(Bool)

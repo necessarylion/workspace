@@ -47,6 +47,7 @@ struct ContentView: View {
         // its own; this only names the window in the Window menu.
         .navigationTitle("Workspace")
         .overlay(alignment: .bottom) { statusToast }
+        .overlay(alignment: .bottomTrailing) { UpdateBanner() }
         .overlay {
             if store.isSwitchingProjects {
                 ProjectSwitcherOverlay()
@@ -65,6 +66,9 @@ struct ContentView: View {
         // Checked once at launch, so the sidebar's Settings button can point out
         // a missing `gh`/`bkt` before a pull request list comes back empty.
         .task { await tools.refresh() }
+        // The app's own releases, asked after at most six hours. Starting it
+        // here rather than in the app's `init` keeps a launch free of network.
+        .task { AppUpdater.shared.startAutomaticChecks() }
         // Asked once per repository, right after it is added.
         .sheet(item: $store.gitHubAccountPrompt) { prompt in
             GitHubAccountSheet(prompt: prompt)

@@ -27,7 +27,7 @@ enum RequiredTool: String, CaseIterable, Identifiable, Sendable {
         case .git: "Status, diffs, branches and checkouts."
         case .gh: "GitHub pull requests, comments and reviews."
         case .bkt: "Bitbucket pull requests, comments and reviews."
-        case .claude: "The Ask Claude chat, and the Claude actions in the terminal."
+        case .claude: "Ask Claude, resuming a past conversation, and writing a commit message."
         case .rg: "Searching inside files from the Files tab. Without it `git grep` stands in, which is slower on a large repository."
         }
     }

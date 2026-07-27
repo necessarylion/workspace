@@ -40,6 +40,20 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+# The version the app reports, and the one its updater compares against the
+# latest GitHub release. CI passes VERSION for a tag build; a local build takes
+# the newest tag it can see, and 0.0.0 when there is none — a version no release
+# can match, so a build made from an untagged tree always sees the latest
+# release as newer than itself.
+#
+# The `|| true` is not decoration: `set -e` with `pipefail` reads the 128 git
+# exits with when there is no tag as a failed assignment and stops the build.
+VERSION="${VERSION:-$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null | sed 's/^v//' || true)}"
+VERSION="${VERSION:-0.0.0}"
+BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
+
 # Package resource bundles (tree-sitter queries, symbols) sit next to the
 # executable; the app looks for them in Resources.
 for bundle in "$PRODUCTS"/*.bundle; do

@@ -100,6 +100,16 @@ The app is one window with three panes, and the mental model that drives the cod
   subset of the protocol (`LSPTypes`), one `LanguageService` per server, and
   `LanguageServerRegistry` mapping language → server binary, started lazily per
   project root. Servers are whatever is on PATH; nothing is bundled.
+- **Updates** (`Models/AppUpdater.swift`) — the app updates itself from its own
+  GitHub releases, over plain HTTPS to `api.github.com` and the release asset.
+  **Not through `gh`**: `gh` is a tool the user installs and signs in to, and the
+  update has to work on a Mac with neither. `Scripts/bundle.sh` stamps
+  `CFBundleShortVersionString` from the git tag (`0.0.0` when there is none), and
+  that is the only thing compared against the release tag. Checking and
+  downloading can happen on their own; the relaunch that swaps the bundle is
+  always a button. The swap is a detached bash script — the app cannot replace
+  the copy it is running from — that waits for the process to go, renames the old
+  bundle aside, `ditto`s the new one in, and puts the old one back if that fails.
 - **Terminal** — everything sits behind `Models/TerminalSession.swift` (owns the
   process and the reusable view) and `Views/TerminalPaneView.swift`. The rest of
   the app only calls `send(_:)` and `startIfNeeded(runningCommand:)` — this narrow

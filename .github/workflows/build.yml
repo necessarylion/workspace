@@ -63,8 +63,14 @@ jobs:
           key: derived-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
           restore-keys: derived-${{ runner.os }}-
 
+      # VERSION is what the bundle reports and what the in-app updater compares
+      # against the latest release, so a tag build has to carry its own tag —
+      # the shallow checkout cannot always work one out for itself.
       - name: Build universal app
         run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+          fi
           APP="$(Scripts/bundle.sh Release)"
           echo "APP=$APP" >> "$GITHUB_ENV"
 

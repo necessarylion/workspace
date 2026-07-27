@@ -14,6 +14,19 @@ final class TerminalSession: Identifiable {
     /// When this shell was last brought on screen. The lists keep a fixed
     /// order, so this only picks which shell a repository comes back to.
     var lastUsedAt = Date()
+
+    /// Whether this tab was started to run `claude`. As many can be going at
+    /// once as the repository has tabs — they are separate processes in
+    /// separate shells — and the Claude tab lists exactly these, so a
+    /// conversation left working in the background is one click away.
+    ///
+    /// Not saved with the tab: a restored tab has no process behind it yet, and
+    /// listing it as a running conversation would be a lie.
+    var runsClaude = false
+
+    /// Which conversation on disk it resumed, when it resumed one. What stops a
+    /// second `claude --resume` being started on the same transcript.
+    var claudeSessionID: String?
     /// Called when the shell exits or ghostty asks to close the surface.
     @ObservationIgnored var onExit: (() -> Void)?
     /// Called when the shell renames the tab, so the saved list can keep up.
@@ -50,6 +63,16 @@ final class TerminalSession: Identifiable {
         view.start(directory: directory, initialInput: nil)
 
         guard let command else { return }
+        run(command, autoRun: autoRun)
+    }
+
+    /// Types a command in once the shell is actually there to receive it.
+    ///
+    /// Separate from `startIfNeeded` because the command is not always known
+    /// when the tab is made: starting Claude Code has to ask the CLI what it
+    /// accepts first, and that question is answered while the shell is still
+    /// drawing its prompt rather than before the tab appears.
+    func run(_ command: String, autoRun: Bool = true) {
         Task {
             // The shell only exists once the view has a window — in a sheet that
             // takes noticeably longer than in a pane — and anything typed before

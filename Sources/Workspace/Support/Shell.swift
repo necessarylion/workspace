@@ -34,22 +34,14 @@ enum Shell {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     }
 
-    /// The `PATH` every command here runs with, for the one runner that cannot
-    /// go through `run`/`runScript`: ``StreamingShellProcess`` stays up for a
-    /// whole conversation, so it starts its process itself and needs the same
-    /// answer this resolved once.
-    static func resolvedPath() async -> String? {
-        await InteractivePath.shared.value()
-    }
-
     /// Where a tool actually is, as the user's own prompt would find it.
     ///
     /// Asking `command -v` through `runScript` is not the same question. That
     /// runs a **login** shell, and a login shell re-reads ~/.zprofile — where
     /// `brew shellenv` puts /opt/homebrew/bin back in front of whatever `PATH`
     /// we handed it. A tool installed in two places is then found in the copy
-    /// the user's own prompt would *not* use, which is how the chat ended up
-    /// driving a `claude` two hundred versions behind the one they run.
+    /// the user's own prompt would *not* use, which is how the app ended up
+    /// running a `claude` two hundred versions behind the one they do.
     ///
     /// An interactive shell has the last word on `PATH`, so it gets asked, and
     /// the absolute path it gives back settles the question for good.

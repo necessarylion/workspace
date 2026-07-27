@@ -9,19 +9,7 @@ struct ViewerView: View {
         VStack(spacing: 0) {
             headerBar
             Divider()
-            ZStack {
-                // The one item that is covered rather than swapped out. A file
-                // opened from the chat would otherwise take the whole transcript
-                // off screen, and it is expensive twice over: SwiftUI rebuilds
-                // it, re-parsing every message's Markdown, and AppKit throws
-                // away the scroll position of a view that leaves the window. Left
-                // in place under the editor, it costs nothing to come back to and
-                // is exactly where it was.
-                claudeLayer
-                if !showsClaude {
-                    otherContent
-                }
-            }
+            mainContent
         }
         .frame(minWidth: 480, minHeight: 360)
         // A shade of its own, so the centre pane reads apart from the two
@@ -43,46 +31,9 @@ struct ViewerView: View {
         }
     }
 
-    /// Whether the chat is the thing on screen, as opposed to merely mounted.
-    /// A `.claude` item with no session behind it is not: that falls through to
-    /// `content(_:)`, which says so.
-    private var showsClaude: Bool {
-        guard !store.showsDashboard, let item = store.current else { return false }
-        return item.isClaude && item.claude != nil
-    }
-
-    /// Every conversation this repository has open, kept in the view tree for as
-    /// long as it exists. Hidden rather than removed when something else is
-    /// showing — and taken out of hit testing with it, so a covered composer
-    /// cannot catch a click.
-    ///
-    /// All of them are mounted, not just the one on screen: they run at the same
-    /// time, and a chat that was torn out of the tree while its turn ran would
-    /// come back having missed the transcript scrolling past.
-    @ViewBuilder
-    private var claudeLayer: some View {
-        if let item = store.openClaudeItem,
-           case .claude(let projectID) = item.kind {
-            let project = store.project(withID: projectID)
-            ForEach(item.claudes, id: \.id) { session in
-                let isOnScreen = showsClaude && session.id == item.claude?.id
-                // The chat is told whether it is the one being looked at, not
-                // left to work it out from being drawn: it is never taken out
-                // of the tree, so `onAppear` fires once and never again.
-                ClaudeChatView(session: session, project: project, isOnScreen: isOnScreen)
-                    .id(session.id)
-                    .opacity(isOnScreen ? 1 : 0)
-                    .allowsHitTesting(isOnScreen)
-                    .accessibilityHidden(!isOnScreen)
-            }
-        }
-    }
-
-    /// Everything that is not the chat: the open item, or the dashboard. Drawn
-    /// over the chat, so it carries the pane's colour itself — the window's own
-    /// background sits below both layers and would let the transcript show
-    /// through.
-    private var otherContent: some View {
+    /// The open item, or the dashboard when there is none. It carries the
+    /// pane's colour itself — the window's own background sits below it.
+    private var mainContent: some View {
         VStack(spacing: 0) {
             if let item = store.current, !store.showsDashboard {
                 content(item)
@@ -253,9 +204,7 @@ struct ViewerView: View {
         return HStack(spacing: 7) {
             // A commit is one person's work, so the face says more than the
             // glyph every other kind of item gets.
-            if item.isClaude {
-                ClaudeMark(size: 15)
-            } else if let author = item.authorName {
+            if let author = item.authorName {
                 AuthorAvatar(name: author, url: item.authorAvatarURL, size: 16)
             } else if let brand = item.brand {
                 BrandMark(name: brand.name, size: 13, color: brand.color)
@@ -339,10 +288,6 @@ struct ViewerView: View {
             } else {
                 TerminalContainerView(item: item)
             }
-        case .claude:
-            // The chat itself is drawn by `claudeLayer`, which keeps it mounted
-            // under everything else. Only the empty case is left here.
-            ContentUnavailableView("No conversation", systemImage: "sparkles")
         }
     }
 
@@ -607,7 +552,7 @@ struct WelcomeView: View {
                     Text(status.branch)
                 }
                 Spacer(minLength: 12)
-                AskClaudeButton { store.openClaudeChat(in: project) }
+                AskClaudeButton { store.openClaude(in: project) }
             }
             .font(.callout)
             .foregroundStyle(.secondary)
@@ -786,9 +731,10 @@ struct WelcomeView: View {
     }
 }
 
-/// The way into the chat, at the top of the dashboard. It carries Claude's own
-/// icon rather than a glyph, so it is found by looking rather than by reading —
-/// which is the point of putting it above everything else on the board.
+/// The way into Claude Code, at the top of the dashboard: it starts `claude` in
+/// a terminal tab of its own. It carries Claude's own icon rather than a glyph,
+/// so it is found by looking rather than by reading — which is the point of
+/// putting it above everything else on the board.
 struct AskClaudeButton: View {
     let open: () -> Void
 
@@ -813,7 +759,7 @@ struct AskClaudeButton: View {
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
         .pointerCursor()
-        .help("Open a Claude Code conversation about this repository")
+        .help("Start a Claude Code conversation about this repository, in a terminal")
         .fixedSize()
     }
 }
