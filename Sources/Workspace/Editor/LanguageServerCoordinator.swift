@@ -1,0 +1,556 @@
+import AppKit
+import CodeEditSourceEditor
+import CodeEditTextView
+import Foundation
+import SwiftUI
+
+/// The join between one open file and its language server.
+///
+/// The editor is CodeEditSourceEditor's now, so this is the whole of the app's
+/// side of the conversation: it opens the document with the server, keeps the
+/// server's copy in step as the text is edited, and turns what comes back into
+/// the things the window shows — diagnostics in the status bar, the symbol list,
+/// ⌘-click go-to-definition and the completion list.
+///
+/// One of these belongs to one open file. `TextViewCoordinator` is how the
+/// package lets an app reach the controller it builds itself, and the same
+/// object also conforms to `TextViewDelegate` — which is the only way to see an
+/// edit *before* it is applied, and the only reason incremental sync is possible
+/// at all (see ``queue(_:)``).
+///
+/// Not `@MainActor`, though nearly everything it does is: `TextViewCoordinator`
+/// carries no actor, so an isolated conformance does not compile. Every callback
+/// arrives from AppKit's own lifecycle, which is the main thread by
+/// construction, hence `assumeIsolated` rather than a hop — a hop would land
+/// after the edit it was told about.
+///
+/// `@unchecked Sendable` follows from the same fact, and is the narrowest way to
+/// say it. Nothing here is touched off the main thread — the isolated members
+/// say so, and the two `assumeIsolated` callbacks are the package calling from
+/// its own main-thread lifecycle — but the compiler cannot see that through a
+/// protocol that carries no actor, and `withObservationTracking` hands its
+/// `onChange` over as `@Sendable`.
+final class LanguageServerCoordinator: TextViewCoordinator, TextViewDelegate, @unchecked Sendable {
+    private let document: OpenDocument
+    private let root: URL
+    private weak var store: WorkspaceStore?
+
+    private var service: LanguageService?
+    /// The second server this file wants open alongside its own — `.vue` only.
+    /// It answers nothing; it only has to be holding the same text, or every
+    /// type in a `<script>` block is resolved against the file as last saved.
+    private var companion: LanguageService?
+    private weak var controller: TextViewController?
+
+    /// Edits waiting to be sent, oldest first.
+    private var pending: [LSP.TextChange] = []
+    private var flushTask: Task<Void, Never>?
+    /// Set when an edit could not be expressed as a range, so the next send has
+    /// to be the whole file. One unexpressed edit makes every later range in the
+    /// batch a lie, and the only honest repair is to restate the document.
+    private var needsFullText = false
+    private var isRunning = false
+    /// Whether `didOpen` has actually reached the server. Until it has, there is
+    /// nothing to send edits against.
+    private var isOpen = false
+
+    /// The last completion list, and the offset the query started at, so a
+    /// keystroke can filter what is already on screen without asking again.
+    private var suggestions: [LSP.CompletionItem] = []
+    private var suggestionOrigin: Int?
+
+    init(document: OpenDocument, root: URL, store: WorkspaceStore?) {
+        self.document = document
+        self.root = root
+        self.store = store
+    }
+
+    /// What the server calls this file.
+    private var uri: String { document.url.absoluteString }
+
+    /// Every server this file is open with. The companion gets the same text and
+    /// the same edits, and is asked nothing.
+    private var targets: [LanguageService] { [service, companion].compactMap(\.self) }
+
+    // MARK: - Lifecycle
+
+    func prepareCoordinator(controller: TextViewController) {
+        MainActor.assumeIsolated {
+            self.controller = controller
+            start()
+        }
+    }
+
+    @MainActor
+    private func start() {
+        // A minified bundle is not a file anyone is editing, and `didOpen` sends
+        // the whole text — see `OpenDocument.largeFileNote`.
+        guard !document.isLargeFile, !isRunning else { return }
+
+        let registry = LanguageServerRegistry.shared
+        guard let service = registry.service(
+            for: document.url,
+            language: document.language,
+            root: root
+        ) else { return }
+
+        isRunning = true
+        self.service = service
+        self.companion = registry.companionService(for: document.url, root: root)
+
+        service.addDiagnosticObserver(self) { [weak self] uri, diagnostics in
+            guard let self, self.isOurs(uri) else { return }
+            self.document.diagnostics = diagnostics
+        }
+
+        observeStatus()
+        observeSaves()
+
+        let text = document.text
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for target in self.targets {
+                await target.open(uri: self.uri, text: text)
+            }
+            guard self.isRunning else { return }
+            self.isOpen = true
+            // Anything typed while the server was starting was held back rather
+            // than sent — see ``flush()`` — so the file is restated now that it
+            // will be listened to.
+            if self.needsFullText || !self.pending.isEmpty {
+                await self.flush()
+            }
+            await self.refreshSymbols()
+        }
+    }
+
+    func destroy() {
+        MainActor.assumeIsolated {
+            isRunning = false
+            isOpen = false
+            flushTask?.cancel()
+            flushTask = nil
+            pending.removeAll()
+            service?.removeDiagnosticObserver(self)
+
+            let closing = targets
+            let uri = self.uri
+            service = nil
+            companion = nil
+            controller = nil
+            document.languageServerStatus = ""
+
+            Task {
+                for target in closing { await target.close(uri: uri) }
+            }
+        }
+    }
+
+    /// Whether a URI the server sent back names this file.
+    ///
+    /// Compared as a path and not as a string: servers spell the same file
+    /// differently — `rust-analyzer` and `vtsls` percent-encode where we do not
+    /// — and a diagnostic keyed under a spelling we do not recognise is a
+    /// diagnostic silently dropped.
+    private func isOurs(_ incoming: String) -> Bool {
+        incoming == uri
+            || URL(string: incoming)?.standardizedFileURL == document.url.standardizedFileURL
+    }
+
+    // MARK: - Status and saves
+
+    /// Mirrors the server's state into the status bar, and keeps mirroring it.
+    ///
+    /// `LanguageService` is `@Observable`, so this re-registers itself on every
+    /// change rather than polling — a server can sit in "starting…" for the best
+    /// part of a minute, and that minute is exactly when the user wants to know.
+    @MainActor
+    private func observeStatus() {
+        guard isRunning, let service else { return }
+        document.languageServerStatus = "\(service.definition.displayName) — \(service.status.label)"
+        withObservationTracking {
+            _ = service.status
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.observeStatus() }
+        }
+    }
+
+    /// Tells the server when the file is written.
+    ///
+    /// Not a nicety: plenty of servers only re-check a project on save —
+    /// `rust-analyzer` runs `cargo check` then, and nothing before it — so
+    /// without this the diagnostics for a Rust file never change.
+    @MainActor
+    private func observeSaves() {
+        guard isRunning else { return }
+        withObservationTracking {
+            _ = document.saveRevision
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self, self.isRunning else { return }
+                let text = self.document.text
+                for target in self.targets {
+                    await target.save(uri: self.uri, text: text)
+                }
+                await self.refreshSymbols()
+                self.observeSaves()
+            }
+        }
+    }
+
+    // MARK: - Document sync
+
+    /// The pre-edit range, which is the whole reason this conforms to
+    /// `TextViewDelegate` instead of settling for `textViewDidChangeText`.
+    ///
+    /// `textDocument/didChange` states each edit against the document as the
+    /// server last saw it. By the time the text has changed that document is
+    /// gone and the range cannot be recovered — so it is read here, before the
+    /// replacement is applied, and queued.
+    func textView(_ textView: TextView, willReplaceContentsIn range: NSRange, with string: String) {
+        MainActor.assumeIsolated {
+            guard isRunning else { return }
+            guard let lsp = lspRange(range, in: textView) else {
+                needsFullText = true
+                scheduleFlush()
+                return
+            }
+            queue(LSP.TextChange(range: lsp, text: string))
+        }
+    }
+
+    @MainActor
+    private func queue(_ change: LSP.TextChange) {
+        pending.append(change)
+        scheduleFlush()
+    }
+
+    /// Coalesces a burst of edits into one notification, at most one every
+    /// 250 ms.
+    ///
+    /// Typing is not one edit but dozens, and a server handed each keystroke
+    /// separately spends the whole burst re-analysing text that is already
+    /// stale. The edits are *batched, not merged* — every one still travels, in
+    /// order, because each states its range against the document the ones before
+    /// it produced.
+    @MainActor
+    private func scheduleFlush() {
+        guard flushTask == nil else { return }
+        flushTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard let self else { return }
+            self.flushTask = nil
+            await self.flush()
+        }
+    }
+
+    @MainActor
+    private func flush() async {
+        guard isRunning else { return }
+        // Nothing is sent before `didOpen` has landed, and the handshake behind
+        // it can take the best part of a minute — `sourcekit-lsp` prepares the
+        // whole package first. An edit sent now would be dropped by the service's
+        // own open-document guard and the server would hold text that never
+        // catches up, so the ranges are given up and the file restated instead
+        // once it is really open.
+        guard isOpen else {
+            needsFullText = true
+            pending.removeAll()
+            return
+        }
+
+        let batch = pending
+        pending.removeAll()
+        let wantsFullText = needsFullText
+        needsFullText = false
+        guard wantsFullText || !batch.isEmpty else { return }
+
+        let text = document.text
+        for target in targets {
+            // A server that never advertised incremental sync gets the file.
+            // Ranges it did not ask for would leave it holding text that quietly
+            // diverges from what is on screen, and every answer after that is
+            // about a document nobody is looking at.
+            if wantsFullText || target.syncKind != .incremental {
+                await target.change(uri: uri, text: text)
+            } else {
+                await target.change(uri: uri, changes: batch)
+            }
+        }
+    }
+
+    // MARK: - Symbols
+
+    @MainActor
+    private func refreshSymbols() async {
+        guard isRunning, let service else { return }
+        let found = await service.symbols(uri: uri)
+        guard isRunning, !found.isEmpty else { return }
+        document.symbols = found
+    }
+
+    // MARK: - Offsets
+
+    /// A UTF-16 offset as the protocol wants it: a zero-based line, and a
+    /// zero-based offset within that line.
+    ///
+    /// Through the layout manager's line store rather than by counting newlines:
+    /// that is a tree lookup, and this runs on every edit of every file — the
+    /// scan it replaces is the kind of per-keystroke walk over the whole
+    /// document that made the old editor stall.
+    @MainActor
+    private func position(of offset: Int, in textView: TextView) -> LSP.Position? {
+        guard let line = textView.layoutManager.textLineForOffset(offset) else { return nil }
+        return LSP.Position(line: line.index, character: offset - line.range.location)
+    }
+
+    @MainActor
+    private func lspRange(_ range: NSRange, in textView: TextView) -> LSP.Range? {
+        guard let start = position(of: range.location, in: textView),
+              let end = position(of: range.upperBound, in: textView) else { return nil }
+        return LSP.Range(start: start, end: end)
+    }
+
+    /// The other direction, for a range a server named.
+    @MainActor
+    private func offset(of position: LSP.Position, in textView: TextView) -> Int? {
+        guard let line = textView.layoutManager.textLineForIndex(position.line) else { return nil }
+        // Clamped: a server may name a column past the end of a line it has not
+        // caught up with, and an offset outside the text would trap.
+        return min(line.range.location + position.character, textView.textStorage.length)
+    }
+}
+
+// MARK: - Go to definition
+
+/// ⌘-click, and the ⌘-hover underline that arms it, are the package's; what it
+/// has no way to know is where the symbol is defined.
+extension LanguageServerCoordinator: JumpToDefinitionDelegate {
+    @MainActor
+    func queryLinks(forRange range: NSRange, textView: TextViewController) async -> [JumpToDefinitionLink]? {
+        guard isRunning, let service,
+              let view = controller?.textView,
+              let start = position(of: range.location, in: view) else { return nil }
+
+        let label = (view.textStorage.string as NSString).substring(with: range)
+        // Nil, not empty, when the server never answered. sourcekit-lsp can
+        // spend the best part of a minute preparing a package before its first
+        // reply, and "no answer yet" must not read to the package as "there is
+        // no definition" — that would show the user a wrong, final answer.
+        guard let locations = await service.definitions(uri: uri, position: start) else { return nil }
+
+        return locations.compactMap { location in
+            guard let target = location.fileURL else { return nil }
+            let isHere = target.standardizedFileURL == document.url.standardizedFileURL
+            return JumpToDefinitionLink(
+                url: isHere ? nil : target,
+                targetRange: CursorPosition(
+                    line: location.range.start.line + 1,
+                    column: location.range.start.character + 1
+                ),
+                typeName: label.isEmpty ? target.lastPathComponent : label,
+                sourcePreview: preview(of: location, isHere: isHere) ?? "",
+                documentation: nil
+            )
+        }
+    }
+
+    func openLink(link: JumpToDefinitionLink) {
+        MainActor.assumeIsolated {
+            guard let url = link.url else {
+                // Same file: move the caret rather than reopening the pane.
+                controller?.setCursorPositions([link.targetRange], scrollToVisible: true)
+                return
+            }
+            // The app counts lines from zero, `CursorPosition` from one.
+            store?.openFile(url, revealLine: link.targetRange.start.line - 1)
+        }
+    }
+
+    /// The target's own line, for the list the package shows when a symbol has
+    /// more than one definition.
+    ///
+    /// Read from disk for another file, and only up to a point: a definition can
+    /// land in a generated file of any size, and this is one line of preview.
+    @MainActor
+    private func preview(of location: LSP.Location, isHere: Bool) -> String? {
+        let line = location.range.start.line
+        if isHere, let view = controller?.textView {
+            guard let found = view.layoutManager.textLineForIndex(line) else { return nil }
+            return (view.textStorage.string as NSString)
+                .substring(with: found.range)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard let url = location.fileURL,
+              let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size < 2_000_000,
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard line < lines.count else { return nil }
+        return lines[line].trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - Completions
+
+/// The list, its window and its keyboard are the package's. What it asks of the
+/// app is what to put in it, and what to do when one is chosen.
+extension LanguageServerCoordinator: CodeSuggestionDelegate {
+    /// Characters that open the list without ⌃Space. The common ones across the
+    /// languages here rather than the server's own set — the server is asked for
+    /// its trigger characters during `initialize`, which is a capability we do
+    /// not read back yet.
+    func completionTriggerCharacters() -> Set<String> { [".", ":", "->", "@", "<"] }
+
+    @MainActor
+    func completionSuggestionsRequested(
+        textView: TextViewController,
+        cursorPosition: CursorPosition
+    ) async -> (windowPosition: CursorPosition, items: [CodeSuggestionEntry])? {
+        guard isRunning, let service, let view = controller?.textView else { return nil }
+
+        let caret = cursorPosition.range.location
+        guard let caretPosition = position(of: caret, in: view) else { return nil }
+
+        let items = await service.completions(uri: uri, position: caretPosition)
+        guard isRunning, !items.isEmpty else { return nil }
+
+        // Where the word being completed starts, which is both what the list
+        // filters on and where its window belongs.
+        let origin = wordStart(before: caret, in: view)
+        suggestions = items
+        suggestionOrigin = origin
+
+        guard let windowPosition = position(of: origin, in: view) else { return nil }
+        return (
+            CursorPosition(line: windowPosition.line + 1, column: windowPosition.character + 1),
+            filtered(items, prefix: prefix(from: origin, to: caret, in: view)).map(CompletionEntry.init)
+        )
+    }
+
+    /// Filtering only, no request: the package calls this on every cursor move
+    /// while the list is open, and a round trip per keystroke is what makes a
+    /// completion list feel broken.
+    @MainActor
+    func completionOnCursorMove(
+        textView: TextViewController,
+        cursorPosition: CursorPosition
+    ) -> [CodeSuggestionEntry]? {
+        guard let origin = suggestionOrigin, let view = controller?.textView else { return nil }
+        let caret = cursorPosition.range.location
+        // Moved off the word being completed — the list no longer describes
+        // where the caret is.
+        guard caret >= origin else { return nil }
+        return filtered(suggestions, prefix: prefix(from: origin, to: caret, in: view))
+            .map(CompletionEntry.init)
+    }
+
+    @MainActor
+    func completionWindowDidClose() {
+        suggestions = []
+        suggestionOrigin = nil
+    }
+
+    @MainActor
+    func completionWindowApplyCompletion(
+        item: CodeSuggestionEntry,
+        textView: TextViewController,
+        cursorPosition: CursorPosition?
+    ) {
+        guard let entry = item as? CompletionEntry,
+              let view = controller?.textView else { return }
+
+        // A `CursorPosition` built from line and column carries no range — it
+        // reads as `NSNotFound` until the controller fills it in — so the text
+        // view's own selection is the reliable answer.
+        let offered = cursorPosition?.range.location
+        let caret = (offered == nil || offered == NSNotFound)
+            ? view.selectedRange().location
+            : offered!
+        // The server's own edit range where it gave one — it knows things the
+        // editor cannot guess, such as that `foo.ba|` should become `foo.bar`
+        // and not `foo.bafoo.bar`. Failing that, the word under the caret.
+        let target: NSRange
+        if let edit = entry.item.editRange,
+           let start = offset(of: edit.start, in: view),
+           let end = offset(of: edit.end, in: view),
+           start <= end {
+            target = NSRange(location: start, length: end - start)
+        } else {
+            let start = wordStart(before: caret, in: view)
+            target = NSRange(location: start, length: caret - start)
+        }
+
+        view.replaceCharacters(in: target, with: entry.item.text)
+    }
+
+    // MARK: Word under the caret
+
+    /// Where the identifier the caret sits in began.
+    ///
+    /// Walked back over the line's own text, never the document's: the line is
+    /// bounded, and this runs on every keystroke while the list is open.
+    @MainActor
+    private func wordStart(before caret: Int, in view: TextView) -> Int {
+        guard let line = view.layoutManager.textLineForOffset(caret) else { return caret }
+        let text = view.textStorage.string as NSString
+        var start = caret
+        while start > line.range.location {
+            let character = text.character(at: start - 1)
+            guard let scalar = Unicode.Scalar(character),
+                  CharacterSet.alphanumerics.contains(scalar) || character == UInt16(0x5F) else { break }
+            start -= 1
+        }
+        return start
+    }
+
+    @MainActor
+    private func prefix(from origin: Int, to caret: Int, in view: TextView) -> String {
+        guard caret > origin, caret <= view.textStorage.length else { return "" }
+        return (view.textStorage.string as NSString)
+            .substring(with: NSRange(location: origin, length: caret - origin))
+    }
+
+    /// Case-insensitive prefix match on whichever text the server said to filter
+    /// on. Not fuzzy: the ordering the server sent is a considered one, and
+    /// re-ranking it here would throw that away.
+    private func filtered(_ items: [LSP.CompletionItem], prefix: String) -> [LSP.CompletionItem] {
+        guard !prefix.isEmpty else { return items }
+        let needle = prefix.lowercased()
+        return items.filter { ($0.filterText ?? $0.label).lowercased().hasPrefix(needle) }
+    }
+}
+
+/// One row in the completion list.
+///
+/// A wrapper rather than a conformance on ``LSP/CompletionItem`` itself: the
+/// protocol wants SwiftUI's `Image` and `Color`, and the protocol slice has no
+/// business knowing about either.
+private struct CompletionEntry: CodeSuggestionEntry {
+    let item: LSP.CompletionItem
+
+    var label: String { item.label }
+    var detail: String? { item.detail }
+    var documentation: String? { nil }
+    var pathComponents: [String]? { nil }
+    var targetPosition: CursorPosition? { nil }
+    var sourcePreview: String? { nil }
+    var deprecated: Bool { false }
+
+    var image: Image {
+        switch item.kindLabel {
+        case "func", "init": Image(systemName: "function")
+        case "class", "struct": Image(systemName: "c.square")
+        case "protocol": Image(systemName: "p.square")
+        case "enum": Image(systemName: "e.square")
+        case "var", "const", "property", "field": Image(systemName: "v.square")
+        case "module": Image(systemName: "shippingbox")
+        case "keyword": Image(systemName: "k.square")
+        case "snippet": Image(systemName: "note.text")
+        case "type": Image(systemName: "t.square")
+        default: Image(systemName: "circle")
+        }
+    }
+
+    var imageColor: Color { Color(NSColor.secondaryLabelColor) }
+}

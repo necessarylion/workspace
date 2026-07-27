@@ -27,6 +27,44 @@ enum LSP {
         var fileURL: URL? { URL(string: uri) }
     }
 
+    // MARK: - Document sync
+
+    /// One edit: the span of the document *as the server last saw it*, and the
+    /// text that replaced it.
+    ///
+    /// The range being pre-edit is the whole difficulty of incremental sync.
+    /// Several edits in a row are only meaningful applied in order, each one to
+    /// the document the ones before it produced — which is why these travel as
+    /// an ordered batch and never get reordered or merged.
+    struct TextChange: Hashable, Sendable {
+        var range: Range
+        var text: String
+    }
+
+    /// How a server wants a changed document, from its `initialize` reply.
+    ///
+    /// Worth asking rather than assuming: sending ranges to a server that only
+    /// advertised `full` leaves it holding text that silently diverges from the
+    /// file, and every answer it gives afterwards is about a document nobody is
+    /// looking at.
+    enum SyncKind: Int, Sendable {
+        case none = 0, full = 1, incremental = 2
+
+        /// `textDocumentSync` is either the number itself or an object with the
+        /// number under `change` — both spellings are current, and servers use
+        /// both. Absent means the server said nothing, and the safe reading of
+        /// silence is full text.
+        static func from(capabilities: Any?) -> SyncKind {
+            guard let capabilities = capabilities as? [String: Any],
+                  let sync = capabilities["textDocumentSync"] else { return .full }
+            if let raw = sync as? Int { return SyncKind(rawValue: raw) ?? .full }
+            if let options = sync as? [String: Any], let raw = options["change"] as? Int {
+                return SyncKind(rawValue: raw) ?? .full
+            }
+            return .full
+        }
+    }
+
     // MARK: - Diagnostics
 
     enum Severity: Int, Codable, Sendable, Comparable {

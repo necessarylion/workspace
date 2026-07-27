@@ -7,14 +7,13 @@ import SwiftUI
 /// CodeEditSourceEditor.
 ///
 /// The editor used to be ours — an `NSTextView` subclass on TextKit 1, a
-/// hand-written gutter, our own tree-sitter highlighter and an LSP conversation
-/// wired to text offsets. All of that is gone; the package is used with its own
-/// defaults, so highlighting, the gutter, find and replace, bracket matching and
-/// the minimap are its business now.
+/// hand-written gutter and our own tree-sitter highlighter. All of that is gone;
+/// the package is used with its own defaults, so highlighting, the gutter, find
+/// and replace, bracket matching and the minimap are its business now.
 ///
-/// What is left here is only the join to the app: the document's text, the
-/// caret position it shows in the status bar, and the requests it makes to
-/// reload or scroll somewhere.
+/// What is left here is the join to the app: the document's text, the caret
+/// position it shows in the status bar, the requests it makes to reload or scroll
+/// somewhere, and the language server — see ``LanguageServerCoordinator``.
 struct CodeEditorView: View {
     let document: OpenDocument
     var wrapsLines: Bool
@@ -22,10 +21,58 @@ struct CodeEditorView: View {
     /// read here, so the pane above decides when they change.
     var theme: SyntaxTheme
 
+    @Environment(WorkspaceStore.self) private var store
+
+    /// The identity is on this wrapper rather than on the editor inside it, and
+    /// that placement is load-bearing.
+    ///
+    /// A different file in the same pane is a different editor: the package keeps
+    /// cursor and scroll position in its state, and carrying the last file's over
+    /// would open this one part-way down at a line that means nothing here. Put
+    /// here, the change also resets the `@State` below — which is what keeps a
+    /// language server conversation from outliving the file it was about.
+    ///
+    /// The revision is in the identity as well, and that is the only way it could
+    /// be. `SourceEditor`'s text binding runs one way — the text view writes to
+    /// it, and a value written *into* it is never read back — so a file that
+    /// changed on disk cannot be pushed into the editor at all. Rebuilding it is
+    /// what reload means here; the cost is that the caret goes back to the top,
+    /// where it used to be kept.
+    var body: some View {
+        EditorPane(
+            document: document,
+            wrapsLines: wrapsLines,
+            theme: theme,
+            store: store
+        )
+        .id("\(document.url.absoluteString)#\(document.externalRevision)")
+    }
+}
+
+private struct EditorPane: View {
+    let document: OpenDocument
+    var wrapsLines: Bool
+    var theme: SyntaxTheme
+
     @State private var state = SourceEditorState()
     /// Held rather than made in `body`: a coordinator is handed over by
     /// reference and has to outlive the render that passed it.
     @State private var clipping = ClipFloatingSubviews()
+    @State private var languageServer: LanguageServerCoordinator?
+
+    init(document: OpenDocument, wrapsLines: Bool, theme: SyntaxTheme, store: WorkspaceStore) {
+        self.document = document
+        self.wrapsLines = wrapsLines
+        self.theme = theme
+        // A file outside every added repository has no root to start a server
+        // in, and a large one is deliberately left alone.
+        let root = store.project(containing: document.url)?.url
+        _languageServer = State(
+            initialValue: document.isLargeFile ? nil : root.map {
+                LanguageServerCoordinator(document: document, root: $0, store: store)
+            }
+        )
+    }
 
     var body: some View {
         SourceEditor(
@@ -43,20 +90,10 @@ struct CodeEditorView: View {
             // be parsed after all, while the status bar said highlighting was
             // off. An empty array is how the package is told to colour nothing.
             highlightProviders: document.isLargeFile ? [] : nil,
-            coordinators: [clipping]
+            coordinators: coordinators,
+            completionDelegate: languageServer,
+            jumpToDefinitionDelegate: languageServer
         )
-        // A different file in the same pane is a different editor: the package
-        // keeps cursor and scroll position in `state`, and carrying the last
-        // file's over would open this one part-way down at a line that means
-        // nothing here.
-        //
-        // The revision is in the identity as well, and that is the only way it
-        // could be. `SourceEditor`'s text binding runs one way — the text view
-        // writes to it, and a value written *into* it is never read back — so a
-        // file that changed on disk cannot be pushed into the editor at all.
-        // Rebuilding it is what reload means here; the cost is that the caret
-        // goes back to the top, where it used to be kept.
-        .id("\(document.url.absoluteString)#\(document.externalRevision)")
         .onChange(of: state.cursorPositions) { _, positions in
             // `start` is (-1, -1) for a position given as a plain range, which
             // is what the reveal below hands over before the editor has resolved
@@ -74,6 +111,14 @@ struct CodeEditorView: View {
                 state.cursorPositions = [CursorPosition(line: line + 1, column: 1)]
             }
         }
+    }
+
+    /// Spelled out rather than built from a literal: the two have no type in
+    /// common but the protocol, and an array literal of them infers the wrong one.
+    private var coordinators: [any TextViewCoordinator] {
+        var list: [any TextViewCoordinator] = [clipping]
+        if let languageServer { list.append(languageServer) }
+        return list
     }
 
     private var configuration: SourceEditorConfiguration {

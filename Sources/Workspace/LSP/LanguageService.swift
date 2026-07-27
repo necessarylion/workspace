@@ -35,6 +35,9 @@ final class LanguageService {
     private(set) var status: Status = .notStarted
     /// Diagnostics per document URI, replaced whenever the server republishes.
     private(set) var diagnostics: [String: [LSP.Diagnostic]] = [:]
+    /// What the server asked for in its `initialize` reply. Read by the editor's
+    /// coordinator to decide whether it may send ranges or must send the file.
+    private(set) var syncKind: LSP.SyncKind = .full
 
     @ObservationIgnored private let connection: LSPConnection
     @ObservationIgnored private var versions: [String: Int] = [:]
@@ -92,7 +95,7 @@ final class LanguageService {
             }
 
             do {
-                _ = try await connection.request(
+                let reply = try await connection.request(
                     "initialize",
                     params: InitializeParams(
                         rootURI: root.absoluteString,
@@ -100,6 +103,12 @@ final class LanguageService {
                         initializationOptions: options
                     ),
                     timeout: 30
+                )
+                // The reply used to be thrown away. It carries the one thing the
+                // editor cannot guess — see ``LSP/SyncKind``.
+                let decoded = reply.flatMap { try? JSONSerialization.jsonObject(with: $0) }
+                syncKind = LSP.SyncKind.from(
+                    capabilities: (decoded as? [String: Any])?["capabilities"]
                 )
                 await connection.notify("initialized", params: EmptyParams())
                 // Pushed as well as answered on request: vtsls reads its plugin
@@ -150,15 +159,36 @@ final class LanguageService {
     }
 
     /// Full-text sync: simple, and correct for every server.
+    ///
+    /// Still the route for a server that only advertised `full`, and for the
+    /// cases where the editor cannot say what changed — a reload from disk, or
+    /// an edit whose pre-edit range it could not resolve.
     func change(uri: String, text: String) async {
         guard status.isHealthy, openCount[uri] != nil else { return }
+        await send(uri: uri, changes: [DidChangeParams.Change(range: nil, text: text)])
+    }
+
+    /// Incremental sync: only the spans that changed.
+    ///
+    /// Ordered, and sent in one notification, because each range is stated
+    /// against the document the edits before it produced — see
+    /// ``LSP/TextChange``. Dropped rather than downgraded if the server never
+    /// asked for ranges; the caller checks ``syncKind`` and sends full text
+    /// instead, since one wrong range poisons every later answer.
+    func change(uri: String, changes: [LSP.TextChange]) async {
+        guard status.isHealthy, openCount[uri] != nil, !changes.isEmpty else { return }
+        guard syncKind == .incremental else { return }
+        await send(uri: uri, changes: changes.map { .init(range: $0.range, text: $0.text) })
+    }
+
+    private func send(uri: String, changes: [DidChangeParams.Change]) async {
         let version = (versions[uri] ?? 1) + 1
         versions[uri] = version
         await connection.notify(
             "textDocument/didChange",
             params: DidChangeParams(
                 textDocument: .init(uri: uri, version: version),
-                contentChanges: [.init(text: text)]
+                contentChanges: changes
             )
         )
     }
@@ -422,7 +452,11 @@ final class LanguageService {
     }
 
     private struct DidChangeParams: Encodable, Sendable {
+        /// No `range` is how the protocol spells "this is the whole document";
+        /// with one, only that span changed. The key has to be absent rather
+        /// than null, which is what `Encodable` does with a nil optional.
         struct Change: Encodable, Sendable {
+            var range: LSP.Range?
             let text: String
         }
         let textDocument: VersionedIdentifier
