@@ -33,9 +33,16 @@ struct CodeEditorView: View {
                 get: { document.text },
                 set: { document.applyEditorText($0) }
             ),
-            language: CodeLanguage.forFile(url: document.url),
+            // Plain text for a file the stack should only show, so no grammar is
+            // loaded and nothing is parsed even if a provider appears.
+            language: document.isLargeFile ? .default : CodeLanguage.forFile(url: document.url),
             configuration: configuration,
             state: $state,
+            // Empty, not nil. Nil is "use the default", and the default is a
+            // `TreeSitterClient` — which is how a 3.5 MB minified bundle came to
+            // be parsed after all, while the status bar said highlighting was
+            // off. An empty array is how the package is told to colour nothing.
+            highlightProviders: document.isLargeFile ? [] : nil,
             coordinators: [clipping]
         )
         // A different file in the same pane is a different editor: the package
@@ -102,7 +109,15 @@ struct CodeEditorView: View {
             // No minimap. The pane is one of three and already narrow, and the
             // scaled-down picture of the file it draws down the right edge costs
             // more width than it gives back.
-            peripherals: .init(showMinimap: false)
+            //
+            // The folding ribbon goes for a large file as well: what it can fold
+            // comes from the syntax tree, and there is no tree for one of those —
+            // so it is a column of nothing, drawn per line, over a document with
+            // a great many of them.
+            peripherals: .init(
+                showMinimap: false,
+                showFoldingRibbon: !document.isLargeFile
+            )
         )
     }
 }
