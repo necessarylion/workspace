@@ -72,40 +72,83 @@ struct ClaudeSessionListView: View {
                             close: { store.closeClaudeChat(chat, in: project) }
                         )
                     }
-                    sectionHeader("Past")
                 }
 
-                if isLoading && sessions.isEmpty {
-                    HStack(spacing: 7) {
-                        ProgressView().controlSize(.small)
-                        Text("Reading past conversations…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                // Always drawn, whether or not anything is open above it: it is
+                // the switch for the section below, and a switch that only
+                // appears once a conversation is running would be unreachable
+                // exactly when the list is nothing but history.
+                pastHeader
+
+                if store.showsPastClaudeConversations {
+                    if isLoading && sessions.isEmpty {
+                        HStack(spacing: 7) {
+                            ProgressView().controlSize(.small)
+                            Text("Reading past conversations…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                    } else if past.isEmpty {
+                        Text(
+                            sessions.isEmpty
+                                ? "No conversations about this repository yet."
+                                : "Every conversation on disk is already open."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                } else if past.isEmpty {
-                    Text(
-                        sessions.isEmpty
-                            ? "No conversations about this repository yet."
-                            : "Every conversation on disk is already open."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                }
 
-                ForEach(past) { past in
-                    ClaudeSessionRow(
-                        past: past,
-                        open: { open(past) },
-                        delete: { delete(past) }
-                    )
+                    ForEach(past) { past in
+                        ClaudeSessionRow(
+                            past: past,
+                            open: { open(past) },
+                            delete: { delete(past) }
+                        )
+                    }
                 }
             }
             .padding(8)
         }
+    }
+
+    /// The Past heading, and the way to put the whole section away. The chevron
+    /// turns and the count comes forward when it is closed, so a hidden list
+    /// still says how much is behind it rather than looking like an empty one.
+    private var pastHeader: some View {
+        Button {
+            store.showsPastClaudeConversations.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .bold))
+                    .rotationEffect(.degrees(store.showsPastClaudeConversations ? 90 : 0))
+                Text("Past")
+                    .textCase(.uppercase)
+                if !store.showsPastClaudeConversations, !past.isEmpty {
+                    Text("\(past.count)")
+                        .monospacedDigit()
+                }
+                Spacer(minLength: 0)
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .help(
+            store.showsPastClaudeConversations
+                ? "Hide the conversations on disk"
+                : "Show the conversations on disk"
+        )
+        .animation(.easeOut(duration: 0.15), value: store.showsPastClaudeConversations)
     }
 
     /// The conversations on disk that no open chat is already showing.

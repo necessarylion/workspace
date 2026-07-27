@@ -32,7 +32,12 @@ struct ViewerView: View {
         // editor and the comment boxes keep their own escapes — see
         // `onEscapeKey` — and while the ⌃⇥ row is up, ⎋ belongs to it.
         .onEscapeKey(
-            when: store.current != nil && !store.showsDashboard && !store.isSwitchingProjects
+            when: store.current != nil
+                && !store.showsDashboard
+                && !store.isSwitchingProjects
+                // While the find bar is up, ⎋ is its own — closing the file out
+                // from under a search is never what was meant by it.
+                && !store.editorFind.isShowing
         ) {
             store.closeCurrent()
         }
@@ -61,7 +66,10 @@ struct ViewerView: View {
             let project = store.project(withID: projectID)
             ForEach(item.claudes, id: \.id) { session in
                 let isOnScreen = showsClaude && session.id == item.claude?.id
-                ClaudeChatView(session: session, project: project)
+                // The chat is told whether it is the one being looked at, not
+                // left to work it out from being drawn: it is never taken out
+                // of the tree, so `onAppear` fires once and never again.
+                ClaudeChatView(session: session, project: project, isOnScreen: isOnScreen)
                     .id(session.id)
                     .opacity(isOnScreen ? 1 : 0)
                     .allowsHitTesting(isOnScreen)
@@ -359,6 +367,14 @@ struct ViewerView: View {
         }
     }
 
+    /// What the find bar is looking for, or nil when it is closed or empty —
+    /// in which case whatever the file search marked stays marked.
+    private var findQuery: String? {
+        guard store.editorFind.isShowing else { return nil }
+        let query = store.editorFind.query
+        return query.isEmpty ? nil : query
+    }
+
     @ViewBuilder
     private func fileContent(_ item: ViewerItem) -> some View {
         if let document = item.document {
@@ -375,11 +391,44 @@ struct ViewerView: View {
                         wrapsLines: store.wrapsLines,
                         theme: AppearanceSettings.shared.editorTheme,
                         takesFocusOnAppear: store.editorTakesFocus,
-                        searchHighlight: store.searchHighlight,
+                        // Worked out here rather than inside the representable,
+                        // and that is the whole point: reading the query from
+                        // *this* body is what makes SwiftUI re-run it on every
+                        // keystroke, and only then does the editor hear about
+                        // the letter that was typed. Left to the bar's own body,
+                        // the bar redrew and the text below it never moved.
+                        searchHighlight: findQuery ?? store.searchHighlight,
+                        find: store.editorFind,
                         onOpenLocation: { url, line in
                             store.openFile(url, revealLine: line)
                         }
                     )
+                    .overlay(alignment: .topTrailing) {
+                        if store.editorFind.isShowing {
+                            EditorFindBar(find: store.editorFind)
+                        }
+                    }
+                    // Only while a file is on screen, so ⌘F belongs to nothing
+                    // else. A monitor rather than a `keyboardShortcut`: the
+                    // editor answers `keyDown` itself, and a shortcut owned by a
+                    // view never reaches it — see `onWindowKeyEvent`.
+                    .onWindowKeyEvent { event, _ in
+                        if event.modifierFlags.contains(.command),
+                           event.charactersIgnoringModifiers?.lowercased() == "f" {
+                            store.editorFind.open()
+                            return true
+                        }
+                        // ⎋ closes the bar before it closes the file. The bar's
+                        // box keeps its own ⎋ while it has the keyboard, which
+                        // is what `EscapeKey` already arranges for a text field.
+                        if event.isEscape, store.editorFind.isShowing {
+                            store.editorFind.close()
+                            return true
+                        }
+                        return false
+                    }
+                    // A different file is a different search.
+                    .onChange(of: document.url) { store.editorFind.close() }
                 }
             case .image:
                 imagePreview(document.url)
@@ -488,25 +537,34 @@ struct WelcomeView: View {
     /// How many commits the folded list shows.
     private let collapsedCommitCount = 8
 
+    /// What the Open PRs counter scrolls to.
+    private static let pullRequestAnchor = "dashboard.pullRequests"
+
     var body: some View {
-        ScrollView {
-            if let project = store.selectedProject {
-                projectOverview(project)
-            } else {
-                emptyWorkspace
+        // The reader is here for the Open PRs counter: the pull requests are on
+        // this same page now, so the tile scrolls down to them instead of
+        // switching a pane that no longer has them.
+        ScrollViewReader { scroll in
+            ScrollView {
+                if let project = store.selectedProject {
+                    projectOverview(project, scroll: scroll)
+                } else {
+                    emptyWorkspace
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Ports come and go while the app is open, so rescan every time the
-        // dashboard is shown rather than trusting the last scan. The history
-        // moves just as often — a commit made in the terminal belongs here the
-        // moment the dashboard comes back.
+        // The board is torn out of the tree while anything else is in the
+        // centre pane, so this runs on every landing as well as on every change
+        // of repository — which is the point. Nothing on the dashboard holds
+        // still while it is off screen: ports come and go, a commit is made in
+        // the terminal, a branch is checked out, a pull request is merged by
+        // somebody else. What the board reads at the moment it appears is the
+        // only thing that can be trusted, so it reads all of it. See
+        // ``Project/refreshDashboard()`` for what that costs.
         .task(id: store.selectedProject?.id) {
             showsEveryCommit = false
-            await store.selectedProject?.refreshPorts()
-        }
-        .task(id: store.selectedProject?.id) {
-            await store.selectedProject?.refreshCommits()
+            await store.selectedProject?.refreshDashboard()
         }
     }
 
@@ -535,7 +593,7 @@ struct WelcomeView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private func projectOverview(_ project: Project) -> some View {
+    private func projectOverview(_ project: Project, scroll: ScrollViewProxy) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             // The name itself is in the header bar above. What is left is where
             // the repository lives and which branch it is on — and, at the end
@@ -566,7 +624,9 @@ struct WelcomeView: View {
                     value: "\(project.pullRequests.count)",
                     symbol: "arrow.triangle.pull",
                     tint: .accentColor
-                ) { store.showNavigator(.pullRequests) }
+                ) {
+                    withAnimation { scroll.scrollTo(Self.pullRequestAnchor, anchor: .top) }
+                }
 
                 StatTile(
                     title: "Changed files",
@@ -597,32 +657,13 @@ struct WelcomeView: View {
                 ) { store.showNavigator(.files) }
             }
 
-            if !project.pullRequests.isEmpty {
+            // Drawn for a repository with a remote whether or not anything is
+            // open: this is the only place pull requests are listed now, so an
+            // empty table saying so beats the section vanishing.
+            if project.host != .unknown {
                 sectionDivider
-
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text("Open pull requests")
-                            .font(.headline)
-                        Text("\(project.pullRequests.count)")
-                            .font(.subheadline.monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                    }
-                    // Same tile grid as the stats above it, so the dashboard
-                    // reads as one board rather than a board and a list. The
-                    // tiles are wider than the stats': a title, a branch pair
-                    // and a diff stat all have to fit across one.
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 300), spacing: 12)],
-                        spacing: 12
-                    ) {
-                        ForEach(project.pullRequests) { pr in
-                            PullRequestTile(pr: pr) {
-                                store.openPullRequest(pr, project: project)
-                            }
-                        }
-                    }
-                }
+                PullRequestTable(project: project)
+                    .id(Self.pullRequestAnchor)
             }
 
             // The history draws nothing at all for a folder with no commits yet,
@@ -880,174 +921,6 @@ struct RepositoryCommitRow: View {
                 NSPasteboard.general.setString(message, forType: .string)
             }
         }
-    }
-}
-
-/// One open pull request on the dashboard, as a tile.
-///
-/// A tile is meant to be read top to bottom in one glance: what state the
-/// request is in and when it last moved, what it is called, then who is taking
-/// what where and how big it is. The stripe down the left says the state in
-/// colour alone, so a wall of tiles can be scanned without reading a word.
-struct PullRequestTile: View {
-    let pr: PullRequest
-    let open: () -> Void
-
-    @State private var isHovering = false
-
-    private let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
-
-    /// The colour the whole tile is keyed to: green once it is approved, orange
-    /// while it is waiting on the author, grey while it is only a draft, and the
-    /// accent for a plain open request nobody has ruled on yet.
-    private var accent: Color {
-        if pr.isDraft { return .secondary }
-        switch pr.reviewLabel {
-        case "Approved": return .green
-        case "Changes requested": return .orange
-        case "Review required": return .blue
-        default: return .accentColor
-        }
-    }
-
-    var body: some View {
-        Button(action: open) {
-            HStack(spacing: 0) {
-                Rectangle()
-                    .fill(accent.opacity(pr.isDraft ? 0.45 : 0.9))
-                    .frame(width: 3)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    statusRow
-                    title
-                    Divider().opacity(0.4)
-                    footerRow
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 11)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary.opacity(isHovering ? 0.38 : 0.22))
-            .clipShape(shape)
-            // The border only appears under the pointer, in the tile's own
-            // colour, so hovering reads as "this one" rather than as a change of
-            // brightness that every tile could have made.
-            .overlay {
-                shape.strokeBorder(accent.opacity(isHovering ? 0.5 : 0), lineWidth: 1)
-            }
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovering = $0 }
-        .help(pr.title)
-        .pointerCursor()
-        .contextMenu {
-            Button("Open Pull Request", action: open)
-            if let url = pr.url {
-                Button("Open in Browser") { NSWorkspace.shared.open(url) }
-                Button("Copy Link") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(url.absoluteString, forType: .string)
-                }
-            }
-            Button("Copy Branch Name") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(pr.sourceBranch, forType: .string)
-            }
-        }
-    }
-
-    private var statusRow: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            PullRequestNumber(pr: pr)
-            if pr.isDraft {
-                Pill(text: "draft", color: .secondary)
-            }
-            if let review = pr.reviewLabel {
-                Pill(text: review, color: accent)
-            }
-            Spacer(minLength: 4)
-            if let updated = pr.updatedAt {
-                Text(updated.formatted(.relative(presentation: .named)))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-        }
-    }
-
-    /// Two lines' worth of room whether the title needs them or not, so a row of
-    /// tiles keeps one baseline instead of stepping up and down.
-    private var title: some View {
-        Text(pr.title)
-            .font(.callout.weight(.medium))
-            .multilineTextAlignment(.leading)
-            .lineLimit(2, reservesSpace: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var footerRow: some View {
-        HStack(spacing: 6) {
-            AuthorAvatar(name: pr.author, url: pr.avatarURL)
-            Text(pr.author)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .layoutPriority(1)
-
-            Spacer(minLength: 6)
-
-            branches
-
-            if let additions = pr.additions, let deletions = pr.deletions {
-                DiffStat(additions: additions, deletions: deletions)
-                    .layoutPriority(1)
-            }
-        }
-    }
-
-    /// Where the work is going. The source branch is the one that can be long
-    /// and the one a reviewer already knows, so it is the one that gives way.
-    private var branches: some View {
-        HStack(spacing: 3) {
-            Text(pr.sourceBranch)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Image(systemName: "arrow.right").imageScale(.small)
-            Text(pr.targetBranch)
-                .lineLimit(1)
-                .fixedSize()
-        }
-        .font(.caption2.monospaced())
-        .foregroundStyle(.tertiary)
-    }
-}
-
-/// Added and removed lines, with a bar in the proportion they landed in — the
-/// numbers say how much, the bar says which way, and the bar is the faster read.
-struct DiffStat: View {
-    let additions: Int
-    let deletions: Int
-
-    private let barWidth: CGFloat = 26
-
-    private var addedShare: CGFloat {
-        let total = additions + deletions
-        guard total > 0 else { return 0.5 }
-        return CGFloat(additions) / CGFloat(total)
-    }
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Text("+\(additions)").foregroundStyle(.green)
-            Text("−\(deletions)").foregroundStyle(.red)
-            HStack(spacing: 1) {
-                Capsule().fill(.green).frame(width: max(2, barWidth * addedShare))
-                Capsule().fill(.red)
-            }
-            .frame(width: barWidth, height: 4)
-        }
-        .font(.caption2.monospacedDigit())
-        .help("\(additions) lines added, \(deletions) removed")
     }
 }
 

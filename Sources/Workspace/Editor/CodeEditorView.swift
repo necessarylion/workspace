@@ -18,6 +18,9 @@ struct CodeEditorView: NSViewControllerRepresentable {
     var takesFocusOnAppear = true
     /// What the file search is looking for, marked wherever it occurs here.
     var searchHighlight: String?
+    /// The find bar, when one is up. Its query outranks the file search's: it
+    /// is the more recent thing the reader asked to see.
+    var find: EditorFind?
     var onOpenLocation: ((URL, Int) -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -86,7 +89,22 @@ struct CodeEditorView: NSViewControllerRepresentable {
 
         // After `load`, so a file opened from a search result is marked once its
         // text is there rather than while the controller still holds the last.
+        // The find bar's query arrives as `searchHighlight`, worked out by the
+        // view above — see the note there. All this needs is the handle back,
+        // so ⏎ can move the selection directly.
+        find?.controller = controller
         controller.searchHighlight = searchHighlight
+
+        // Setting the query above has already re-scanned the file, so the count
+        // is the fresh one. Handed back a runloop turn later: this is the middle
+        // of a view update, and the bar reading it is a view.
+        if let find, find.isShowing, find.matchCount != controller.searchMatchCount {
+            let count = controller.searchMatchCount
+            Task { @MainActor in
+                find.matchCount = count
+                if find.current > count { find.current = 0 }
+            }
+        }
 
         if let line = document.revealLine {
             // Clearing the request is a state change, so it waits a runloop turn.

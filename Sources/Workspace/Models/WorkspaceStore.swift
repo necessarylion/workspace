@@ -10,15 +10,19 @@ import Foundation
 @Observable
 final class WorkspaceStore {
     /// Which list the left sidebar is showing.
+    /// The panes the navigator switches between. There was a PRs tab here too,
+    /// listing the open pull requests as cards; the dashboard's table says
+    /// everything it said and four columns more, in a pane wide enough for
+    /// them, so a second list of the same thing was only a place to lose track
+    /// of which one you were looking at.
     enum NavigatorTab: String, CaseIterable, Identifiable {
-        case files, pullRequests, changes, terminals, claude, info
+        case files, changes, terminals, claude, info
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
             case .files: "Files"
-            case .pullRequests: "PRs"
             case .changes: "Changes"
             case .terminals: "Terminals"
             case .claude: "Claude"
@@ -29,7 +33,6 @@ final class WorkspaceStore {
         var symbol: String {
             switch self {
             case .files: "folder"
-            case .pullRequests: "arrow.triangle.pull"
             case .changes: "plusminus"
             case .terminals: "terminal"
             case .claude: "sparkles"
@@ -54,10 +57,30 @@ final class WorkspaceStore {
     /// when a result is opened, dropped when the search box is emptied.
     var searchHighlight: String?
 
+    /// ⌘F in the editor. One for the app, because there is one editor — and it
+    /// lives here rather than in the file view so ⎋ can tell "close the find
+    /// bar" from "close the file".
+    let editorFind = EditorFind()
+
     /// Whether the file tree lists what `.gitignore` covers. Off by default —
     /// build output and caches bury the files actually worked on — and the files
     /// pane has a toggle for the times one of them is wanted.
     var showsIgnoredFiles = false
+
+    /// Whether the Claude tab lists the conversations on disk under the ones
+    /// open in this window. On by default — resuming an old conversation is
+    /// most of what the tab is for — but a repository Claude has been used on
+    /// for months has a long tail of them, and someone working in one live
+    /// conversation should be able to put that tail away. Remembered between
+    /// launches: a list you closed should stay closed.
+    var showsPastClaudeConversations = true {
+        didSet {
+            UserDefaults.standard.set(
+                showsPastClaudeConversations,
+                forKey: pastClaudeConversationsDefaultsKey
+            )
+        }
+    }
 
     // Panel visibility, so the View menu can reach it too.
     var showsProjects = true
@@ -137,11 +160,19 @@ final class WorkspaceStore {
     private let pinnedProjectsDefaultsKey = "workspace.pinnedProjects"
     private let gitHubAccountsDefaultsKey = "workspace.githubAccounts"
     private let terminalsDefaultsKey = "workspace.terminals"
+    private let pastClaudeConversationsDefaultsKey = "workspace.showsPastClaudeConversations"
     private let historyLimit = 40
     /// Pending write of the terminal list, see `scheduleTerminalPersist`.
     @ObservationIgnored private var terminalPersistTask: Task<Void, Never>?
 
     init() {
+        // Read before the setter can write it back: an absent key means nobody
+        // has chosen, which is the default rather than false.
+        if UserDefaults.standard.object(forKey: pastClaudeConversationsDefaultsKey) != nil {
+            showsPastClaudeConversations = UserDefaults.standard.bool(
+                forKey: pastClaudeConversationsDefaultsKey
+            )
+        }
         restoreProjects()
         restoreTerminals()
     }
@@ -572,6 +603,28 @@ final class WorkspaceStore {
         showsDashboard = false
     }
 
+    /// Leaves one file open, and only one.
+    ///
+    /// The pane has always shown a single thing, but every file ever opened
+    /// stayed behind it: its whole text, its diagnostics and symbols, its place
+    /// in the history. A morning of clicking through a repository left dozens
+    /// of documents alive, and the app was slower for every one of them. The
+    /// editor is one slot now — opening a file closes the file before it, and
+    /// ⎋ or ✕ closes that one outright.
+    ///
+    /// **A file with unsaved edits is never dropped.** Nothing else in the app
+    /// would warn about them, so closing it here would be losing work without
+    /// saying so; it keeps its slot until it is saved or closed by hand. Only
+    /// files are touched — a shell and a Claude conversation have something
+    /// running behind them, and a diff or a pull request costs a title and a
+    /// patch rather than a live editor.
+    private func closeOtherFiles(keeping id: String) {
+        for (key, item) in items where key != id && item.isFile && !item.isDirty {
+            items[key] = nil
+            forgetItem(key)
+        }
+    }
+
     /// Drops a closed item from every repository's history.
     private func forgetItem(_ id: String) {
         for (projectID, var state) in viewerStates {
@@ -590,6 +643,7 @@ final class WorkspaceStore {
     /// Shows an item, remembering where we came from.
     private func present(_ item: ViewerItem) {
         items[item.id] = item
+        closeOtherFiles(keeping: item.id)
 
         // An item belongs to one repository, so showing it selects that
         // repository and the item joins that repository's own history.
@@ -786,8 +840,8 @@ final class WorkspaceStore {
         let item = items[kind.key] ?? ViewerItem(kind: kind, title: pr.title)
         item.pullRequest = pr
         present(item)
-        // The list beside a pull request belongs to the other pull requests.
-        navigatorTab = .pullRequests
+        // The navigator is left on whatever tab it was: the pull requests are
+        // listed on the dashboard now, so there is no list here to move to.
 
         if item.diff == nil {
             Task { await loadPullRequestDiff(item, project: project, pr: pr) }
@@ -828,7 +882,6 @@ final class WorkspaceStore {
         item.isLoading = true
         item.errorMessage = nil
         present(item)
-        navigatorTab = .pullRequests
 
         Task {
             guard let remote = project.remote, remote.kind != .unknown else {
@@ -877,6 +930,14 @@ final class WorkspaceStore {
     /// the pull request itself: the count of approvals belongs to the summary
     /// bar, which is on screen whichever tab is open.
     func loadReviewers(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        // The board already asked. Both hosts now hand the reviewers over with
+        // the list itself, so opening a pull request off it and immediately
+        // asking again was a call spent re-reading what was already on screen —
+        // and the panel would flash from the real list, to empty, and back.
+        if !pr.reviewers.isEmpty {
+            item.reviewers = pr.reviewers
+            return
+        }
         item.isLoadingReviewers = true
         item.reviewersError = nil
         do {

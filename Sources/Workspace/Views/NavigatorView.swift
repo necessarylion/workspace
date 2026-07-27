@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Left sidebar. One project at a time, seen through six tabs.
+/// The navigator pane. One project at a time, seen through five tabs.
 struct NavigatorView: View {
     @Environment(WorkspaceStore.self) private var store
 
@@ -76,8 +76,6 @@ struct NavigatorView: View {
         switch store.navigatorTab {
         case .files:
             FileListView(project: project)
-        case .pullRequests:
-            PullRequestListView(project: project)
         case .changes:
             ChangeListView(project: project)
         case .terminals:
@@ -701,137 +699,6 @@ struct CompactFileRow: View {
     }
 }
 
-// MARK: - Pull requests
-
-struct PullRequestListView: View {
-    @Environment(WorkspaceStore.self) private var store
-    let project: Project
-
-    var body: some View {
-        Group {
-            if project.isLoadingPullRequests && project.pullRequests.isEmpty {
-                ProgressView("Loading pull requests…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let error = project.pullRequestError {
-                ContentUnavailableView {
-                    Label("No pull requests", systemImage: "arrow.triangle.pull")
-                } description: {
-                    Text(error).font(.callout)
-                } actions: {
-                    Button("Try Again") { Task { await project.refreshPullRequests() } }
-                        .pointerCursor()
-                }
-            } else if project.pullRequests.isEmpty {
-                ContentUnavailableView(
-                    "No open pull requests",
-                    systemImage: "checkmark.circle",
-                    description: Text("Everything is merged.")
-                )
-            } else {
-                // Same card look as the repositories sidebar.
-                ScrollView {
-                    LazyVStack(spacing: 7) {
-                        ForEach(project.pullRequests) { pr in
-                            PullRequestCard(pr: pr, isSelected: isSelected(pr))
-                                .pointerCursor()
-                                .onTapGesture { store.openPullRequest(pr, project: project) }
-                                .contextMenu {
-                                    Button("Open") { store.openPullRequest(pr, project: project) }
-                                    if let url = pr.url {
-                                        Button("Open in Browser") { NSWorkspace.shared.open(url) }
-                                    }
-                                }
-                        }
-                    }
-                    .padding(10)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                Text("\(project.pullRequests.count) open")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if project.isLoadingPullRequests {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Button {
-                        Task { await project.refreshPullRequests() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.plain)
-                    .help("Reload pull requests")
-                    .pointerCursor()
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(.bar)
-        }
-    }
-
-    private func isSelected(_ pr: PullRequest) -> Bool {
-        guard case .pullRequest(_, let number) = store.current?.kind,
-              !store.showsDashboard else { return false }
-        return number == pr.number
-    }
-}
-
-/// One pull request, in the same card style as `ProjectCard`.
-struct PullRequestCard: View {
-    let pr: PullRequest
-    let isSelected: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                PullRequestNumber(pr: pr)
-                Text(pr.title)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(2)
-                Spacer(minLength: 0)
-            }
-
-            HStack(spacing: 5) {
-                AuthorAvatar(name: pr.author, url: pr.avatarURL, size: 14)
-                Text(pr.author)
-                    .lineLimit(1)
-                Image(systemName: "arrow.right").imageScale(.small)
-                Text(pr.targetBranch)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-
-            if pr.isDraft || pr.reviewLabel != nil {
-                HStack(spacing: 5) {
-                    if pr.isDraft {
-                        Pill(text: "draft", color: .secondary)
-                    }
-                    if let review = pr.reviewLabel {
-                        Pill(text: review, color: review == "Approved" ? .green : .orange)
-                    }
-                }
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 9)
-                .fill(isSelected ? AnyShapeStyle(.tint.opacity(0.14)) : AnyShapeStyle(.quaternary.opacity(0.22)))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 9)
-                .stroke(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 1.2)
-        )
-        .contentShape(Rectangle())
-    }
-}
-
 // MARK: - Changes
 
 struct ChangeListView: View {
@@ -847,6 +714,7 @@ struct ChangeListView: View {
     private var canCommit: Bool {
         !isBusy
             && !project.isWritingCommitMessage
+            && !project.hasConflicts
             && !project.stagedChanges.isEmpty
             && !project.commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -860,14 +728,20 @@ struct ChangeListView: View {
     var body: some View {
         Group {
             if let status = project.gitStatus {
-                if status.changes.isEmpty {
-                    ContentUnavailableView(
-                        "Working tree clean",
-                        systemImage: "checkmark.seal",
-                        description: Text("Nothing to commit on \(status.branch).")
-                    )
-                } else {
-                    changeList(status)
+                // The branch's last few commits sit above its uncommitted work,
+                // which is the order the two are actually read in: what just
+                // went out, then what is going out next.
+                VStack(spacing: 0) {
+                    recentCommits
+                    if status.changes.isEmpty {
+                        ContentUnavailableView(
+                            "Working tree clean",
+                            systemImage: "checkmark.seal",
+                            description: Text("Nothing to commit on \(status.branch).")
+                        )
+                    } else {
+                        changeList(status)
+                    }
                 }
             } else {
                 ContentUnavailableView(
@@ -891,24 +765,91 @@ struct ChangeListView: View {
             await project.refreshGitStatus()
         }
         .confirmationDialog(
-            pendingDiscard.map { "Discard changes to \(($0.path as NSString).lastPathComponent)?" } ?? "",
+            pendingDiscard.map(discardTitle) ?? "",
             isPresented: Binding(
                 get: { pendingDiscard != nil },
                 set: { if !$0 { pendingDiscard = nil } }
             ),
             presenting: pendingDiscard
         ) { change in
-            Button(change.label == "Untracked" ? "Delete File" : "Discard Changes", role: .destructive) {
+            Button(discardVerb(for: change), role: .destructive) {
                 discard(change)
             }
             Button("Cancel", role: .cancel) { pendingDiscard = nil }
         } message: { change in
-            Text(
-                change.label == "Untracked"
-                    ? "\(change.path) is not in git, so discarding deletes it. This cannot be undone."
-                    : "\(change.displayPath) goes back to its last committed state, staged edits included. This cannot be undone."
-            )
+            Text(discardExplanation(for: change))
         }
+    }
+
+    /// How many of the branch's own commits stand above the working tree. Five
+    /// is what "what have I just done" means — the dashboard is where a real
+    /// history is read, and this pane has a commit box to leave room for.
+    private static let recentCommitCount = 5
+
+    /// The last few commits on this branch. Clicking one opens its patch in the
+    /// centre, the same as clicking it on the dashboard does.
+    @ViewBuilder
+    private var recentCommits: some View {
+        let commits = Array(project.recentCommits.prefix(Self.recentCommitCount))
+        if !commits.isEmpty {
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Label("Recent commits", systemImage: "clock.arrow.circlepath")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    if project.isLoadingCommits {
+                        ProgressView().controlSize(.mini).scaleEffect(0.7)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 9)
+                .padding(.bottom, 4)
+
+                ForEach(commits) { commit in
+                    RecentCommitRow(commit: commit, isSelected: isShowingCommit(commit)) {
+                        store.openCommit(commit, project: project)
+                    }
+                }
+            }
+            .padding(.bottom, 7)
+            Divider()
+        }
+    }
+
+    /// Whether the centre is already showing this commit's patch.
+    private func isShowingCommit(_ commit: RepositoryCommit) -> Bool {
+        guard !store.showsDashboard,
+              case .commit(_, let sha) = store.current?.kind
+        else { return false }
+        return sha == commit.sha
+    }
+
+    /// Discarding a conflict is not the same promise as discarding an edit: it
+    /// throws away the whole merge of that file and leaves the side that was
+    /// there before it started, so it says so rather than talking about
+    /// "changes" the user never made.
+    private func discardTitle(for change: GitStatus.Change) -> String {
+        let name = (change.path as NSString).lastPathComponent
+        if change.isConflicted { return "Discard the merge of \(name)?" }
+        return "Discard changes to \(name)?"
+    }
+
+    private func discardVerb(for change: GitStatus.Change) -> String {
+        if change.isConflicted { return "Discard Merge" }
+        return change.label == "Untracked" ? "Delete File" : "Discard Changes"
+    }
+
+    private func discardExplanation(for change: GitStatus.Change) -> String {
+        if change.isConflicted {
+            return "\(change.path) goes back to the version this branch had before the merge, "
+                + "dropping what the other side brought in. This cannot be undone."
+        }
+        if change.label == "Untracked" {
+            return "\(change.path) is not in git, so discarding deletes it. This cannot be undone."
+        }
+        return "\(change.displayPath) goes back to its last committed state, staged edits included. "
+            + "This cannot be undone."
     }
 
     private func discard(_ change: GitStatus.Change) {
@@ -941,6 +882,22 @@ struct ChangeListView: View {
                 store.openWorkingDiff(project: project, change: change)
             }
         )) {
+            // Conflicts sit above both piles: they are what has to be dealt
+            // with before anything below them can be committed.
+            if !project.conflictedChanges.isEmpty {
+                Section {
+                    ForEach(project.conflictedChanges) { row($0) }
+                } header: {
+                    header(
+                        "Conflicts",
+                        count: project.conflictedChanges.count,
+                        action: "Resolve All"
+                    ) {
+                        let paths = project.conflictedChanges.flatMap(\.gitPaths)
+                        Task { await project.markResolved(paths) }
+                    }
+                }
+            }
             if !project.stagedChanges.isEmpty {
                 Section {
                     ForEach(project.stagedChanges) { row($0) }
@@ -1003,32 +960,51 @@ struct ChangeListView: View {
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .disabled(isBusy)
-            .help(change.label == "Untracked" ? "Delete this untracked file" : "Discard this file's changes")
+            .help(discardHelp(for: change))
             .pointerCursor(!isBusy)
             // The label this replaces is in the row's tooltip, and the coloured
-            // symbol already says what kind of change it is.
+            // symbol already says what kind of change it is. A conflict gets a
+            // third verb: staging it is what tells git it is settled, so the
+            // button says that instead of pretending the pile is the same one.
             Button {
                 let paths = change.gitPaths
                 Task {
-                    if change.isStaged {
+                    if change.isConflicted {
+                        await project.markResolved(paths)
+                    } else if change.isStaged {
                         await project.unstage(paths)
                     } else {
                         await project.stage(paths)
                     }
                 }
             } label: {
-                Image(systemName: change.isStaged ? "minus.circle" : "plus.circle")
+                Image(systemName: stageSymbol(for: change))
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .disabled(isBusy)
-            .help(change.isStaged ? "Unstage this file" : "Stage this file")
+            .help(stageHelp(for: change))
             .pointerCursor(!isBusy)
         }
         .contentShape(Rectangle())
         .help("\(change.label) · \(change.displayPath)")
         .pointerCursor()
         .tag(change.path)
+    }
+
+    private func discardHelp(for change: GitStatus.Change) -> String {
+        if change.isConflicted { return "Discard this file's merge, keeping our side" }
+        return change.label == "Untracked" ? "Delete this untracked file" : "Discard this file's changes"
+    }
+
+    private func stageSymbol(for change: GitStatus.Change) -> String {
+        if change.isConflicted { return "checkmark.circle" }
+        return change.isStaged ? "minus.circle" : "plus.circle"
+    }
+
+    private func stageHelp(for change: GitStatus.Change) -> String {
+        if change.isConflicted { return "Mark this file resolved" }
+        return change.isStaged ? "Unstage this file" : "Stage this file"
     }
 
     private func header(
@@ -1062,6 +1038,20 @@ struct ChangeListView: View {
                     .lineLimit(4)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            // The Commit button is simply dead while a merge is half-done, and
+            // a dead button explains nothing on its own.
+            if project.hasConflicts {
+                Label(
+                    project.conflictedChanges.count == 1
+                        ? "1 file is still conflicted."
+                        : "\(project.conflictedChanges.count) files are still conflicted.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             if project.changeCount > 0 {
@@ -1164,9 +1154,13 @@ struct ChangeListView: View {
         }
     }
 
-    /// What git has: staged, unstaged, and commits waiting to go out.
+    /// What git has: conflicts first, since they hold the Commit button shut,
+    /// then staged, unstaged, and commits waiting to go out.
     private var summary: String {
         var parts: [String] = []
+        if !project.conflictedChanges.isEmpty {
+            parts.append("\(project.conflictedChanges.count) conflicted")
+        }
         if !project.stagedChanges.isEmpty { parts.append("\(project.stagedChanges.count) staged") }
         if !project.unstagedChanges.isEmpty { parts.append("\(project.unstagedChanges.count) changed") }
         if parts.isEmpty { parts.append("clean") }
@@ -1179,14 +1173,93 @@ struct ChangeListView: View {
     }
 
     private func color(for change: GitStatus.Change) -> Color {
+        if change.isConflicted { return .red }
         switch change.label {
-        case "Added": .green
-        case "Deleted": .red
-        case "Renamed": .blue
-        case "Untracked": .secondary
-        case "Conflict": .orange
-        default: .orange
+        case "Added": return .green
+        case "Deleted": return .red
+        case "Renamed": return .blue
+        case "Untracked": return .secondary
+        default: return .orange
         }
+    }
+}
+
+/// One commit above the working tree, in a pane too narrow for the dashboard's
+/// version of the same row.
+///
+/// One line, and the subject gets all of it: the hash is a chip at the front
+/// because that is what a commit is named by, and everything else about it —
+/// who, when, the rest of the message — is in the tooltip rather than competing
+/// for a sidebar's worth of width.
+private struct RecentCommitRow: View {
+    let commit: RepositoryCommit
+    let isSelected: Bool
+    let open: () -> Void
+
+    @State private var isHovering = false
+
+    private let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 7) {
+                Text(commit.shortSHA)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1.5)
+                    .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
+                    // Held at its own size, so a long subject squeezes itself
+                    // rather than the hash.
+                    .fixedSize()
+
+                Text(commit.headline)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(background, in: shape)
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .pointerCursor()
+        .help(tooltip)
+        .padding(.horizontal, 6)
+        .contextMenu {
+            Button("Open Commit", action: open)
+            Button("Copy Hash") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(commit.sha, forType: .string)
+            }
+            Button("Copy Message") {
+                NSPasteboard.general.clearContents()
+                let message = commit.body.isEmpty
+                    ? commit.headline
+                    : "\(commit.headline)\n\n\(commit.body)"
+                NSPasteboard.general.setString(message, forType: .string)
+            }
+        }
+    }
+
+    private var background: Color {
+        if isSelected { return Color.accentColor.opacity(0.18) }
+        return isHovering ? Color.primary.opacity(0.07) : .clear
+    }
+
+    /// Who made it and when, over the subject — the row itself only has room
+    /// for the last of the three.
+    private var tooltip: String {
+        var parts = [commit.displayAuthor]
+        if let date = commit.date {
+            parts.append(date.formatted(date: .abbreviated, time: .shortened))
+        }
+        return "\(parts.joined(separator: " · "))\n\(commit.headline)"
     }
 }
 

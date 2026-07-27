@@ -10,47 +10,73 @@ struct GitStatus: Sendable, Hashable {
         var originalPath: String?
         var id: String { path }
 
+        /// The seven codes git writes for a path it could not merge. They have
+        /// to be read as a pair: "AA" and "DD" carry no `U`, so a per-letter
+        /// test called them a plain add and a plain delete.
+        private static let conflictCodes: Set<String> = ["DD", "AU", "UD", "UA", "DU", "AA", "UU"]
+
+        /// A merge left this path with its three stages still in the index.
+        var isConflicted: Bool { Self.conflictCodes.contains(code) }
+
         var isStaged: Bool {
-            guard let first = code.first else { return false }
+            // A conflict is neither staged nor unstaged, whatever its first
+            // letter looks like. Calling it staged put it in the pile whose
+            // buttons are `git restore --staged` and `git commit` — the first
+            // drops the merge stages and silently keeps our side, the second
+            // git refuses outright.
+            guard !isConflicted, let first = code.first else { return false }
             return first != " " && first != "?"
         }
 
         /// Which of the two porcelain letters describes this row: the index side
         /// when the change is staged, the working tree side otherwise. Reading
         /// the pair as a whole missed the mixed codes — "RM", "AM", "MD" — and
-        /// left the raw letters on screen.
+        /// left the raw letters on screen. Conflicts never reach here; they are
+        /// named by the pair.
         private var statusLetter: Character? {
             guard let index = code.first else { return nil }
-            let worktree = code.dropFirst().first ?? " "
             if index == "?" { return "?" }
-            if index == "U" || worktree == "U" { return "U" }
-            return isStaged ? index : worktree
+            return isStaged ? index : code.dropFirst().first ?? " "
+        }
+
+        /// Who did what, in git's own words. A conflict is two changes, not
+        /// one, so "Added" alone would not say whose side added.
+        private var conflictLabel: String {
+            switch code {
+            case "DD": "Both Deleted"
+            case "AA": "Both Added"
+            case "AU": "Added by Us"
+            case "UA": "Added by Them"
+            case "DU": "Deleted by Us"
+            case "UD": "Deleted by Them"
+            default: "Both Modified"
+            }
         }
 
         var label: String {
+            if isConflicted { return conflictLabel }
             switch statusLetter {
-            case "M": "Modified"
-            case "A": "Added"
-            case "D": "Deleted"
-            case "R": "Renamed"
-            case "C": "Copied"
-            case "T": "Type Changed"
-            case "?": "Untracked"
-            case "U": "Conflict"
-            default: code.trimmingCharacters(in: .whitespaces)
+            case "M": return "Modified"
+            case "A": return "Added"
+            case "D": return "Deleted"
+            case "R": return "Renamed"
+            case "C": return "Copied"
+            case "T": return "Type Changed"
+            case "?": return "Untracked"
+            default: return code.trimmingCharacters(in: .whitespaces)
             }
         }
 
         var symbol: String {
+            if isConflicted { return "exclamationmark.triangle.fill" }
             switch label {
-            case "Modified": "pencil.circle.fill"
-            case "Added": "plus.circle.fill"
-            case "Deleted": "minus.circle.fill"
-            case "Renamed", "Copied": "arrow.right.circle.fill"
-            case "Type Changed": "arrow.triangle.2.circlepath.circle.fill"
-            case "Untracked": "questionmark.circle.fill"
-            case "Conflict": "exclamationmark.triangle.fill"
-            default: "circle.fill"
+            case "Modified": return "pencil.circle.fill"
+            case "Added": return "plus.circle.fill"
+            case "Deleted": return "minus.circle.fill"
+            case "Renamed", "Copied": return "arrow.right.circle.fill"
+            case "Type Changed": return "arrow.triangle.2.circlepath.circle.fill"
+            case "Untracked": return "questionmark.circle.fill"
+            default: return "circle.fill"
             }
         }
 

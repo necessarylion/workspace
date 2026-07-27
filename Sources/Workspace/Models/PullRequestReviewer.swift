@@ -275,19 +275,8 @@ extension PullRequestService {
         }
 
         struct Response: Decodable {
-            /// A user asked to review has a login; a team has a name and a slug.
-            struct Request: Decodable {
-                let login: String?
-                let name: String?
-                let slug: String?
-            }
-            struct Review: Decodable {
-                struct Author: Decodable { let login: String? }
-                let author: Author?
-                let state: String?
-            }
-            let reviewRequests: [Request]?
-            let latestReviews: [Review]?
+            let reviewRequests: [GitHubReviewRequest]?
+            let latestReviews: [GitHubReview]?
         }
 
         guard let response = try? JSONDecoder().decode(
@@ -297,39 +286,13 @@ extension PullRequestService {
             throw PullRequestError.commandFailed("Could not read gh's list of reviewers.")
         }
 
-        var reviewers: [PullRequestReviewer] = []
-        for review in response.latestReviews ?? [] {
-            guard let login = review.author?.login, !login.isEmpty else { continue }
-            reviewers.append(
-                PullRequestReviewer(
-                    handle: login,
-                    name: login,
-                    avatarURL: AvatarURL.gitHub(login: login, host: pr.url?.host),
-                    state: .parse(review.state)
-                )
-            )
-        }
-        // Anyone still on the request list has not answered — and someone whose
-        // review was asked for again is on both lists, where being asked again
-        // is the newer fact of the two.
-        for request in response.reviewRequests ?? [] {
-            guard let handle = [request.login, request.slug, request.name]
-                .compactMap({ $0 })
-                .first(where: { !$0.isEmpty })
-            else { continue }
-            let isTeam = request.login == nil
-            reviewers.removeAll { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }
-            reviewers.append(
-                PullRequestReviewer(
-                    handle: handle,
-                    name: request.login ?? request.name ?? handle,
-                    avatarURL: isTeam ? nil : AvatarURL.gitHub(login: handle, host: pr.url?.host),
-                    state: .pending,
-                    isGroup: isTeam
-                )
-            )
-        }
-        return reviewers
+        // The author is dropped by the caller, so this one is asked not to.
+        return gitHubReviewers(
+            requested: response.reviewRequests,
+            reviewed: response.latestReviews,
+            author: nil,
+            host: pr.url?.host
+        )
     }
 
     private static func gitHubCandidates(
@@ -402,6 +365,20 @@ extension PullRequestService {
         for pr: PullRequest,
         in directory: URL
     ) async throws -> [PullRequestReviewer] {
+        // The API first, and asked for the two lists alone: `bkt pr view`
+        // fetches the whole pull request — a description of a few thousand
+        // characters among it — to be read for the names of three people. It is
+        // still underneath, because Data Center has no `/2.0/` to answer.
+        if let repository = pr.bitbucketRepository,
+           let object = await PullRequestService.bitbucketAPIObject(
+               "/2.0/repositories/\(repository)/pullrequests/\(pr.number)",
+               params: ["fields=reviewers,participants"],
+               in: directory
+           ),
+           let reviewers = decodeBitbucketReviewers(from: object) {
+            return reviewers
+        }
+
         var attempts: [[String]] = []
         let base = ["bkt", "pr", "view", "\(pr.number)", "--json"]
         if !pr.repositoryOwner.isEmpty, !pr.repositorySlug.isEmpty {
@@ -426,18 +403,6 @@ extension PullRequestService {
             return reviewers
         }
 
-        // Cloud's own payload, for the flavours whose `pr view` carries neither
-        // list. It is the same shape the reviewers decoder already reads.
-        if !pr.repositoryOwner.isEmpty, !pr.repositorySlug.isEmpty {
-            let path = "/2.0/repositories/\(pr.repositoryOwner)/\(pr.repositorySlug)"
-                + "/pullrequests/\(pr.number)"
-            let result = await Shell.run(["bkt", "api", path], in: directory, timeout: 60)
-            if result.isSuccess,
-               let object = try? JSONSerialization.jsonObject(with: Data(result.stdout.utf8)),
-               let reviewers = decodeBitbucketReviewers(from: object) {
-                return reviewers
-            }
-        }
         throw PullRequestError.commandFailed(lastMessage)
     }
 
@@ -448,7 +413,7 @@ extension PullRequestService {
     /// Cloud, what they said. Reading both and letting a verdict win over its
     /// absence covers either flavour. Nil means neither list was there at all,
     /// which is not the same as an empty one — the caller then tries elsewhere.
-    private static func decodeBitbucketReviewers(from object: Any) -> [PullRequestReviewer]? {
+    static func decodeBitbucketReviewers(from object: Any) -> [PullRequestReviewer]? {
         guard let lists = bitbucketReviewerLists(in: object) else { return nil }
 
         var reviewers: [PullRequestReviewer] = []

@@ -48,7 +48,20 @@ final class Project: Identifiable {
     var pullRequests: [PullRequest] = []
     var pullRequestError: String?
     var isLoadingPullRequests = false
-    var hasLoadedPullRequests = false
+
+    /// When the host was last asked for the pull requests. `nil` until the first
+    /// read, which is what makes a repository restored from the last launch fill
+    /// its table the first time its board is looked at. The dashboard reads
+    /// them again every time it comes back on screen, and unlike the git reads
+    /// beside it that costs a call to GitHub or Bitbucket — so a glance that
+    /// lands within `pullRequestRefreshInterval` of the last one keeps what is
+    /// already listed. Escape out of a file and straight back in should not
+    /// spend a call.
+    @ObservationIgnored private var lastPullRequestRead: Date?
+
+    /// How stale the pull requests may be before landing on the dashboard reads
+    /// them again.
+    private static let pullRequestRefreshInterval: TimeInterval = 10
 
     var ports: [ListeningPort] = []
     var isScanningPorts = false
@@ -115,6 +128,37 @@ final class Project: Identifiable {
         gitStatus = await GitStatus.load(for: url)
         await refreshCommits()
         startWatchingGitIfNeeded()
+    }
+
+    /// Everything the dashboard shows, read again. Called every time the board
+    /// comes back on screen: the branch may have been checked out, a commit
+    /// made, a server started and a pull request merged while something else
+    /// was in the centre pane, and the board that reappears should not be the
+    /// one that was left behind.
+    ///
+    /// The reads run together rather than one after another — they are separate
+    /// processes and the slowest of them is the host call — and each writes what
+    /// it owns as it lands, so the board fills in piece by piece instead of
+    /// sitting still until the last one returns. Nothing here blanks what is
+    /// already drawn.
+    func refreshDashboard() async {
+        async let status: Void = refreshGitStatus()
+        async let ports: Void = refreshPorts()
+        async let requests: Void = refreshPullRequestsIfStale()
+        _ = await (status, ports, requests)
+    }
+
+    /// The pull requests, unless they were read a moment ago. See
+    /// ``lastPullRequestRead``.
+    private func refreshPullRequestsIfStale() async {
+        // A read already running counts as the fresh one: the stamp is only put
+        // down when it lands, so without this a slow host would be asked twice.
+        guard !isLoadingPullRequests else { return }
+        if let last = lastPullRequestRead,
+           Date().timeIntervalSince(last) < Self.pullRequestRefreshInterval {
+            return
+        }
+        await refreshPullRequests()
     }
 
     // MARK: - Git run outside the app
@@ -206,7 +250,7 @@ final class Project: Identifiable {
             pullRequestError = gitStatus == nil
                 ? "Not a git repository."
                 : "No GitHub or Bitbucket remote."
-            hasLoadedPullRequests = true
+            lastPullRequestRead = Date()
             return
         }
 
@@ -214,14 +258,90 @@ final class Project: Identifiable {
         pullRequestError = nil
         defer {
             isLoadingPullRequests = false
-            hasLoadedPullRequests = true
+            lastPullRequestRead = Date()
         }
 
         do {
             pullRequests = try await PullRequestService.loadOpen(for: remote, in: url)
+            fillPullRequestColumns()
         } catch {
             pullRequests = []
             pullRequestError = error.localizedDescription
+        }
+    }
+
+    /// The fill for the columns the list itself could not answer, kept so a
+    /// second refresh cancels the first rather than racing it.
+    @ObservationIgnored private var pullRequestColumnTask: Task<Void, Never>?
+
+    /// Fills in the reviewers and the CI verdict for the requests whose host
+    /// did not send them with the list.
+    ///
+    /// **Nothing to do in the ordinary case.** `gh pr list` answers for every
+    /// column, and so does Bitbucket Cloud's API — both set `hasLoadedDetails`,
+    /// and this returns without a single call. What is left is Bitbucket Data
+    /// Center, and a Cloud repository that reports its builds as commit
+    /// statuses rather than as pipelines: there a column still costs a call per
+    /// request, so it is made *after* the board is on screen, a few at a time,
+    /// and the columns fill in as the answers land. Nothing here can fail
+    /// loudly — a column that stays empty is the whole cost of not being told.
+    private func fillPullRequestColumns() {
+        pullRequestColumnTask?.cancel()
+        let pending = pullRequests.filter {
+            !$0.hasLoadedDetails && ($0.buildState == nil || $0.reviewers.isEmpty)
+        }
+        guard !pending.isEmpty else { return }
+        let directory = url
+
+        pullRequestColumnTask = Task { [weak self] in
+            // Four at a time: enough to fill a screen of rows quickly, few
+            // enough that a repository with fifty open requests does not open
+            // fifty shells at once.
+            let width = 4
+            var index = 0
+            while index < pending.count, !Task.isCancelled {
+                let batch = pending[index..<min(index + width, pending.count)]
+                index += width
+
+                let filled = await withTaskGroup(
+                    of: (Int, [PullRequestReviewer]?, PullRequestBuild.State?).self
+                ) { group in
+                    for pr in batch {
+                        group.addTask {
+                            var reviewers: [PullRequestReviewer]?
+                            if pr.reviewers.isEmpty {
+                                reviewers = try? await PullRequestService.reviewers(
+                                    for: pr,
+                                    in: directory
+                                )
+                            }
+                            var state: PullRequestBuild.State?
+                            if pr.buildState == nil {
+                                let builds = try? await PullRequestService.builds(
+                                    for: pr,
+                                    in: directory
+                                )
+                                // A request nothing has run against settles on
+                                // `.unknown`, which is what stops it being
+                                // asked again on the next refresh.
+                                state = builds.map { PullRequestService.rollUp($0) ?? .unknown }
+                            }
+                            return (pr.number, reviewers, state)
+                        }
+                    }
+                    var collected: [(Int, [PullRequestReviewer]?, PullRequestBuild.State?)] = []
+                    for await answer in group { collected.append(answer) }
+                    return collected
+                }
+
+                guard let self, !Task.isCancelled else { return }
+                for (number, reviewers, buildState) in filled {
+                    guard let row = self.pullRequests.firstIndex(where: { $0.number == number })
+                    else { continue }
+                    if let reviewers { self.pullRequests[row].reviewers = reviewers }
+                    if let buildState { self.pullRequests[row].buildState = buildState }
+                }
+            }
         }
     }
 
@@ -304,8 +424,21 @@ final class Project: Identifiable {
         }
     }
 
-    var stagedChanges: [GitStatus.Change] { gitStatus?.changes.filter(\.isStaged) ?? [] }
-    var unstagedChanges: [GitStatus.Change] { gitStatus?.changes.filter { !$0.isStaged } ?? [] }
+    var stagedChanges: [GitStatus.Change] {
+        gitStatus?.changes.filter(\.isStaged) ?? []
+    }
+
+    var unstagedChanges: [GitStatus.Change] {
+        gitStatus?.changes.filter { !$0.isStaged && !$0.isConflicted } ?? []
+    }
+
+    /// What a merge, a rebase or a cherry-pick left half-done. These get their
+    /// own pile: until each one is resolved, nothing here can be committed.
+    var conflictedChanges: [GitStatus.Change] {
+        gitStatus?.changes.filter(\.isConflicted) ?? []
+    }
+
+    var hasConflicts: Bool { !conflictedChanges.isEmpty }
 
     func stage(_ paths: [String]) async {
         await runGit(["add", "--"] + paths)
@@ -317,8 +450,51 @@ final class Project: Identifiable {
         await runGit(["restore", "--staged", "--"] + paths)
     }
 
+    /// Stages everything that is not still conflicted. `git add --all` would
+    /// sweep the conflicts up too and call them resolved with their `<<<<<<<`
+    /// markers still in the file, which is the one thing this button must never
+    /// do behind the user's back.
     func stageAll() async {
-        await runGit(["add", "--all"])
+        guard hasConflicts else {
+            await runGit(["add", "--all"])
+            return
+        }
+        let paths = unstagedChanges.flatMap(\.gitPaths)
+        guard !paths.isEmpty else { return }
+        await stage(paths)
+    }
+
+    /// Tells git the working tree copy is the resolution — `git add` is what
+    /// collapses the three merge stages into one entry. Refuses while the file
+    /// still holds conflict markers, because nothing later in the flow catches
+    /// that and the markers would go straight into the commit.
+    func markResolved(_ paths: [String]) async {
+        guard !paths.isEmpty, !isRunningGitCommand else { return }
+        let unfinished = paths.filter(hasConflictMarkers)
+        guard unfinished.isEmpty else {
+            gitError = unfinished.count == 1
+                ? "\(unfinished[0]) still has conflict markers in it."
+                : "\(unfinished.count) files still have conflict markers in them."
+            return
+        }
+        await stage(paths)
+    }
+
+    /// Whether the file on disk still has a merge marker at the start of a
+    /// line. Conflicted files are source files a person is editing, so this
+    /// reads them directly rather than paying for another `git` process.
+    private func hasConflictMarkers(_ path: String) -> Bool {
+        guard let text = try? String(contentsOf: url.appending(path: path), encoding: .utf8) else {
+            // A binary file, or one side of the merge deleted it: neither has
+            // markers to find, and git is the one to decide the rest.
+            return false
+        }
+        // Only the two arrow markers, not the `=======` between them: a row of
+        // equals signs is how markdown underlines a heading, and blocking on
+        // that would refuse to resolve a perfectly finished file.
+        return text.split(separator: "\n", omittingEmptySubsequences: false).contains {
+            $0.hasPrefix("<<<<<<<") || $0.hasPrefix(">>>>>>>")
+        }
     }
 
     /// Throws a file's changes away — staged and unstaged alike, because a file
@@ -383,6 +559,15 @@ final class Project: Identifiable {
         let message = commitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else {
             gitError = "Write a commit message first."
+            return false
+        }
+        // git refuses this itself, but with a wall of advice about paths it
+        // calls unmerged. Say which files, in the words the list uses.
+        let conflicts = conflictedChanges
+        guard conflicts.isEmpty else {
+            gitError = conflicts.count == 1
+                ? "Resolve the conflict in \(conflicts[0].path) first."
+                : "Resolve \(conflicts.count) conflicted files first."
             return false
         }
         guard await runGit(["commit", "-m", message]) else { return false }

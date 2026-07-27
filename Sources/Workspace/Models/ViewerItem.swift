@@ -229,6 +229,12 @@ final class ViewerItem: Identifiable {
         if case .claude = kind { true } else { false }
     }
 
+    /// A file in the editor. Only one of these is ever alive at a time — see
+    /// `WorkspaceStore.closeOtherFiles(keeping:)`.
+    nonisolated var isFile: Bool {
+        if case .file = kind { true } else { false }
+    }
+
     /// Whether closing the item should keep it alive. A shell and a Claude
     /// conversation both have something running behind them, so ✕ puts the
     /// dashboard back rather than throwing the session away.

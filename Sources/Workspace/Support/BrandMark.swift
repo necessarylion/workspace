@@ -78,27 +78,6 @@ struct GitHostIcon: View {
 
 // MARK: - Pull requests
 
-/// A pull request's number, led by the pull-request mark both hosts use on the
-/// web rather than a hash. Green while the request is live, grey once it is only
-/// a draft — the same reading as the pill beside it.
-struct PullRequestNumber: View {
-    let pr: PullRequest
-    var size: CGFloat = 11
-
-    var body: some View {
-        HStack(spacing: 3) {
-            BrandMark(
-                name: "pull-request",
-                size: size,
-                color: pr.isDraft ? .secondary : .green
-            )
-            Text("\(pr.number)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-        }
-    }
-}
-
 extension GitHostKind {
     var brand: String? {
         switch self {

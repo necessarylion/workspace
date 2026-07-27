@@ -272,6 +272,55 @@ final class CodeEditorController: NSViewController {
         view.window?.makeFirstResponder(textView)
     }
 
+    // MARK: - Find in file
+
+    /// How many places the current query occurs. The find bar counts with this
+    /// rather than searching the text a second time of its own.
+    var searchMatchCount: Int { searchMatches.count }
+
+    /// Selects the match after the caret — or the one before it — scrolls it
+    /// into view and flashes it. Returns which match that was, counted from 1,
+    /// or 0 when the file has none.
+    ///
+    /// It wraps at both ends: a file is searched by pressing ⏎ until the thing
+    /// you wanted goes past, and stopping dead at the last hit only makes that
+    /// take two hands.
+    @discardableResult
+    func goToSearchMatch(forward: Bool) -> Int {
+        guard isViewLoaded, !searchMatches.isEmpty else { return 0 }
+        let caret = textView.selectedRange()
+
+        let index: Int
+        if forward {
+            // Anything starting at or after the end of the selection. With the
+            // caret sitting on a match that is the *next* one, and with a plain
+            // caret it is the first hit from here down.
+            index = searchMatches.firstIndex { $0.location >= NSMaxRange(caret) } ?? 0
+        } else {
+            index = searchMatches.lastIndex { NSMaxRange($0) <= caret.location }
+                ?? searchMatches.count - 1
+        }
+
+        let match = searchMatches[index]
+        textView.setSelectedRange(match)
+        textView.scrollRangeToVisible(match)
+        // Centred, for the same reason `reveal(line:)` centres: a hit found at
+        // the very bottom of the pane is a hit with no context under it.
+        if let rect = textView.boundingRect(forOffset: match.location) {
+            let target = NSRect(
+                x: 0,
+                y: max(rect.midY - scrollView.contentSize.height / 2, 0),
+                width: 1,
+                height: scrollView.contentSize.height
+            )
+            textView.scrollToVisible(target)
+        }
+        // The system's own "here it is" bubble, which survives the yellow the
+        // other matches are already wearing.
+        textView.showFindIndicator(for: match)
+        return index + 1
+    }
+
     // MARK: - Language server
 
     private var uri: String { fileURL?.absoluteString ?? "" }

@@ -31,8 +31,12 @@ final class ClaudeSession: Identifiable {
 
     private(set) var settings: ClaudeSettings
 
+    /// When the turn now running started, or nil between turns. Stored as the
+    /// moment rather than a flag because the working line counts up from it,
+    /// and one truth cannot drift from the other.
+    private(set) var respondingSince: Date?
     /// Between sending a prompt and the reply ending.
-    private(set) var isResponding = false
+    var isResponding: Bool { respondingSince != nil }
     /// While the process is booting, which takes a beat the first time.
     private(set) var isStarting = false
     /// While an old conversation is being read back off disk.
@@ -190,7 +194,7 @@ final class ClaudeSession: Identifiable {
         messages.append(message)
         grew()
 
-        isResponding = true
+        respondingSince = Date()
         activity = nil
         await deliver(prompt(text: text, attachments: files))
     }
@@ -210,7 +214,7 @@ final class ClaudeSession: Identifiable {
             await startProcess()
         }
         guard let process, process.isRunning else {
-            isResponding = false
+            respondingSince = nil
             return
         }
         send(json: [
@@ -267,7 +271,7 @@ final class ClaudeSession: Identifiable {
         claudeSessionID = nil
         lastError = nil
         activity = nil
-        isResponding = false
+        respondingSince = nil
     }
 
     /// Ends the process for good — the repository is being removed, or the app
@@ -322,7 +326,7 @@ final class ClaudeSession: Identifiable {
         cli = info
         guard let executable = info.executable else {
             lastError = "Claude Code is not installed. Install it, or check Settings ▸ Requirements."
-            isResponding = false
+            respondingSince = nil
             return
         }
 
@@ -423,7 +427,7 @@ final class ClaudeSession: Identifiable {
             lastError = stderr.isEmpty
                 ? "Claude Code stopped unexpectedly (exit \(status))."
                 : stderr
-            isResponding = false
+            respondingSince = nil
         }
         process = nil
     }
@@ -535,6 +539,14 @@ final class ClaudeSession: Identifiable {
     /// know to follow it down — see ``ClaudeSession/growth``.
     private func grew() {
         growth &+= 1
+    }
+
+    /// Something already in the transcript got taller by itself: a tool row
+    /// works out how much diff it has to draw a beat after it appears, and by
+    /// then the transcript has parked on what it thought was the bottom. Said
+    /// by the row, and it means exactly what a new line arriving means.
+    func contentResized() {
+        grew()
     }
 
     /// The confirmed form of one block. These arrive one at a time, in order,
@@ -654,7 +666,7 @@ final class ClaudeSession: Identifiable {
     }
 
     private func handleResult(_ event: JSONValue) {
-        isResponding = false
+        respondingSince = nil
         activity = nil
         streamingMessageID = nil
         for message in messages { message.isStreaming = false }
@@ -700,7 +712,9 @@ final class ClaudeSession: Identifiable {
         // already reported itself finished — stopping one turn while another
         // is waiting is exactly that shape — so an answer arriving is what says
         // the session is busy again.
-        if process?.isRunning == true { isResponding = true }
+        // Left alone when a turn is already being timed: this is the same turn
+        // carrying on, not a new one, and the clock should not go back to zero.
+        if process?.isRunning == true, respondingSince == nil { respondingSince = Date() }
         if let existing = messagesByID[id] { return existing }
         let message = ClaudeMessage(id: id, role: .assistant)
         message.isStreaming = true

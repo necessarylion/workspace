@@ -178,14 +178,29 @@ extension PullRequestService {
 
     // MARK: - Bitbucket
 
-    /// Three ways, first answer wins: `bkt status pr` covers Data Center and
-    /// resolves the head commit itself; Cloud posts the same information as
-    /// commit statuses; and a Cloud pipeline that never posted a status is
-    /// still listed under its branch.
+    /// The pull request's own build statuses, and only if that fails, the older
+    /// roundabout ways to the same answer.
+    ///
+    /// Cloud has an endpoint for exactly this question —
+    /// `/pullrequests/{id}/statuses` — and it is one call: no `bkt status pr`
+    /// first, no head commit to resolve before the commit's statuses can be
+    /// asked for (which cost a **commit listing** of its own), no repository
+    /// pipeline list to filter down by branch afterwards. Four calls became
+    /// one, and the three below are what Data Center still needs.
     private static func bitbucketBuilds(
         for pr: PullRequest,
         in directory: URL
     ) async throws -> [PullRequestBuild] {
+        if let repository = pr.bitbucketRepository,
+           let json = await PullRequestService.bitbucketAPI(
+               "/2.0/repositories/\(repository)/pullrequests/\(pr.number)/statuses",
+               params: ["pagelen=50"],
+               in: directory
+           ) {
+            let builds = decodeBitbucketStatuses(json, pr: pr)
+            if !builds.isEmpty { return builds }
+        }
+
         let statuses = await Shell.run(
             ["bkt", "status", "pr", "\(pr.number)", "--json"],
             in: directory,
@@ -196,19 +211,26 @@ extension PullRequestService {
             if !builds.isEmpty { return builds }
         }
 
-        if let sha = await bitbucketHeadSHA(for: pr, in: directory),
-           !pr.repositoryOwner.isEmpty, !pr.repositorySlug.isEmpty {
-            let cloud = await Shell.run(
-                ["bkt", "api",
-                 "/2.0/repositories/\(pr.repositoryOwner)/\(pr.repositorySlug)/commit/\(sha)/statuses",
-                 "--param", "pagelen=50"],
-                in: directory,
-                timeout: 60
-            )
-            if cloud.isSuccess {
-                let builds = decodeBitbucketStatuses(cloud.stdout, pr: pr)
-                if !builds.isEmpty { return builds }
-            }
+        if let repository = pr.bitbucketRepository,
+           let sha = await bitbucketHeadSHA(for: pr, in: directory),
+           let json = await PullRequestService.bitbucketAPI(
+               "/2.0/repositories/\(repository)/commit/\(sha)/statuses",
+               params: ["pagelen=50"],
+               in: directory
+           ) {
+            let builds = decodeBitbucketStatuses(json, pr: pr)
+            if !builds.isEmpty { return builds }
+        }
+
+        // Last: a pipeline that never posted a status of its own is still
+        // listed under the branch it ran on.
+        if let repository = pr.bitbucketRepository,
+           let json = await PullRequestService.bitbucketAPI(
+               "/2.0/repositories/\(repository)/pipelines",
+               params: ["sort=-created_on", "pagelen=20"],
+               in: directory
+           ) {
+            return decodeBitbucketPipelines(json, pr: pr)
         }
 
         let pipelines = await Shell.run(

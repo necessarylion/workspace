@@ -25,11 +25,19 @@ enum ClaudeChatMetrics {
 struct ClaudeChatView: View {
     @Bindable var session: ClaudeSession
     let project: Project?
+    /// Whether this is the conversation on screen. Every open chat stays in the
+    /// view tree and the ones not being read are merely made transparent, so
+    /// this is the only signal that one has been come back to.
+    var isOnScreen = true
 
     @Environment(WorkspaceStore.self) private var store
 
     /// Where the scroll view parks itself as the reply grows.
     private let bottomAnchor = "claude-bottom"
+
+    /// Whether the transcript is still following the reply down. Kept for the
+    /// life of the view, and read only when something new arrives.
+    @State private var pin = ChatScrollPin()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -107,15 +115,21 @@ struct ClaudeChatView: View {
                             offersQuickReplies: message.id == session.messages.last?.id
                                 && !session.isResponding,
                             openFile: { path in store.openFile(URL(fileURLWithPath: path)) },
-                            answer: answer
+                            answer: answer,
+                            didResize: session.contentResized
                         )
                         .transition(ClaudeChatMetrics.appear)
                     }
+                    // Kept up for the whole turn, including while a paragraph is
+                    // being written. A turn spends most of itself between
+                    // paragraphs — thinking, or inside a tool — and a
+                    // transcript that ends on a finished row with nothing under
+                    // it reads as finished, when it is only busy.
                     if session.isStarting {
-                        statusLine("Starting Claude Code…")
+                        ClaudeWorkingLine(fixed: "Starting Claude Code…")
                             .transition(ClaudeChatMetrics.appear)
-                    } else if session.isResponding, !isWriting {
-                        statusLine(session.activity.map(Self.activityTitle) ?? "Working…")
+                    } else if session.isResponding {
+                        ClaudeWorkingLine(session: session)
                             .transition(ClaudeChatMetrics.appear)
                     }
                     if let error = session.lastError {
@@ -140,13 +154,35 @@ struct ClaudeChatView: View {
                 .padding(.horizontal, 24)
                 .padding(.vertical, 20)
                 .frame(maxWidth: .infinity, alignment: .top)
+                // Behind the whole transcript rather than in the overlay below:
+                // it has to be *inside* the scroll view to find it, and a
+                // background of the content is the one thing in there that is
+                // never scrolled out of existence.
+                .background(ChatScrollPinReporter(pin: pin))
             }
             // Following the reply down is done by a view of its own rather than
             // here. Watching the transcript grow from this level would mean this
             // body — every bubble in the conversation — is rebuilt on every
             // token; the follower draws nothing, so rebuilding it costs nothing.
             .overlay {
-                ChatScrollFollower(session: session, proxy: proxy, anchor: bottomAnchor)
+                ChatScrollFollower(
+                    session: session,
+                    proxy: proxy,
+                    anchor: bottomAnchor,
+                    pin: pin,
+                    isOnScreen: isOnScreen
+                )
+            }
+            // The way back down, shown only while there is a way back down to
+            // take. A view of its own, because it is the one thing on this page
+            // that reads the pin from a body — put in the transcript's own, it
+            // would rebuild every bubble each time the pointer moved the wheel.
+            .overlay(alignment: .bottomTrailing) {
+                ChatScrollToBottomButton(pin: pin) {
+                    withAnimation(.easeOut(duration: 0.22)) {
+                        proxy.scrollTo(bottomAnchor, anchor: .bottom)
+                    }
+                }
             }
         }
         .textSelection(.enabled)
@@ -165,22 +201,6 @@ struct ClaudeChatView: View {
         }
     }
 
-    /// Whether text is arriving right now, so the spinner does not sit under a
-    /// paragraph that is already being written.
-    private var isWriting: Bool {
-        session.messages.last?.isStreaming == true
-    }
-
-    private func statusLine(_ text: String) -> some View {
-        HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            Text(text)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.vertical, 2)
-    }
-
     private func errorNotice(_ text: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -193,20 +213,72 @@ struct ClaudeChatView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
     }
-
-    /// The CLI's one-word status, in words worth reading.
-    private static func activityTitle(_ status: String) -> String {
-        switch status {
-        case "requesting": "Thinking…"
-        case "tool_use", "tool_running": "Running a tool…"
-        default: status.replacingOccurrences(of: "_", with: " ").capitalized + "…"
-        }
-    }
 }
 
 // MARK: - Following the reply
 
-/// Keeps the transcript parked at the bottom while a reply is being written.
+/// Whether the transcript is parked at its bottom, and so whether it should
+/// follow the next thing that arrives.
+///
+/// Observable, but only just: the button that offers the way back down is the
+/// single view that reads this from a body, and so the single view rebuilt when
+/// it changes. The follower reads it at the moment it is deciding, which is not
+/// a read SwiftUI tracks — which matters, because that read happens on every
+/// token of every reply.
+@MainActor
+@Observable
+final class ChatScrollPin {
+    /// Starts true: a conversation opens on its newest message.
+    var isAtBottom = true
+}
+
+/// The way back to the newest message, floating over the transcript's bottom
+/// corner while the reader is anywhere else.
+///
+/// It is the whole indication that the transcript has stopped following: with
+/// the reply still landing out of sight, a reader scrolled up has nothing else
+/// to say the end has moved on.
+private struct ChatScrollToBottomButton: View {
+    let pin: ChatScrollPin
+    let scrollToBottom: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Group {
+            if !pin.isAtBottom {
+                Button {
+                    scrollToBottom()
+                    // Said here rather than waited for: the scroll reports back
+                    // as it travels, and the button should go the moment it is
+                    // pressed, not when the transcript arrives.
+                    pin.isAtBottom = true
+                } label: {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(isHovering ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                        .frame(width: 32, height: 32)
+                        .background(.regularMaterial, in: Circle())
+                        .overlay {
+                            Circle().strokeBorder(.quaternary)
+                        }
+                        .shadow(color: .black.opacity(0.18), radius: 5, y: 2)
+                }
+                .buttonStyle(.plain)
+                .onHover { isHovering = $0 }
+                .pointerCursor()
+                .help("Jump to the newest message")
+                .padding(.trailing, 20)
+                .padding(.bottom, 16)
+                .transition(.scale(scale: 0.8).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: pin.isAtBottom)
+    }
+}
+
+/// Keeps the transcript parked at the bottom while a reply is being written —
+/// unless the reader has scrolled up, which stops it until they come back.
 ///
 /// It draws nothing. The point is *where* it sits in the view tree: the counter
 /// it watches ticks on every token, and whichever view reads it is rebuilt that
@@ -218,20 +290,134 @@ private struct ChatScrollFollower: View {
     let session: ClaudeSession
     let proxy: ScrollViewProxy
     let anchor: String
+    let pin: ChatScrollPin
+    let isOnScreen: Bool
 
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
             .allowsHitTesting(false)
-            // A new turn always wins: sending a prompt means looking at what
-            // comes back, wherever the transcript happened to be left.
-            .onChange(of: session.messages.count) { follow() }
+            .onChange(of: session.messages.count) { follow(isNewTurn: true) }
             .onChange(of: session.isResponding) { follow() }
             .onChange(of: session.growth) { follow() }
+            // A conversation opens on its newest message, every time it is
+            // opened. The chat is never torn out of the view tree, so coming
+            // back to it otherwise means coming back to the exact scroll
+            // position it was left at — which, after reading back through an
+            // old answer, is nowhere near what has happened since.
+            //
+            // Twice, a beat apart: the first goes in while the pane may still
+            // be laying out — a transcript replayed off disk has barely any of
+            // itself built on the frame it is shown in — and the second lands
+            // once there is something to scroll to. The wait is too short to
+            // be seen, and is dropped if the reader has already scrolled.
+            .task(id: isOnScreen) {
+                guard isOnScreen else { return }
+                pin.isAtBottom = true
+                proxy.scrollTo(anchor, anchor: .bottom)
+                try? await Task.sleep(for: .milliseconds(60))
+                guard pin.isAtBottom else { return }
+                proxy.scrollTo(anchor, anchor: .bottom)
+            }
     }
 
-    private func follow() {
+    /// Follows only while the reader is at the bottom. Reading back through a
+    /// long answer meant being thrown to the end of it every time another
+    /// paragraph landed, which is the one thing that makes a transcript
+    /// unreadable while it is being written.
+    ///
+    /// The exception is a prompt you just sent: that is a turn *you* started,
+    /// and it re-parks the transcript wherever you had left it.
+    private func follow(isNewTurn: Bool = false) {
+        if isNewTurn, session.messages.last?.role == .user {
+            pin.isAtBottom = true
+        }
+        guard pin.isAtBottom else { return }
         proxy.scrollTo(anchor, anchor: .bottom)
+    }
+}
+
+/// Watches the transcript's scroll position and keeps ``ChatScrollPin`` up to
+/// date. Draws nothing and takes no clicks.
+///
+/// This is done in AppKit because the question — how far the content's bottom
+/// is from the bottom of the pane — is one `NSScrollView` answers exactly, and
+/// it answers it without SwiftUI having to redraw anything to ask. It listens
+/// for the clip view moving, which is what a scroll is; the content *growing*
+/// deliberately raises nothing, so a reply arriving never unpins the view by
+/// itself.
+private struct ChatScrollPinReporter: NSViewRepresentable {
+    let pin: ChatScrollPin
+
+    func makeNSView(context: Context) -> NSView {
+        let view = Reporter()
+        view.pin = pin
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? Reporter)?.pin = pin
+    }
+
+    final class Reporter: NSView {
+        /// How close to the end still counts as the end. Bigger than it looks
+        /// it needs to be: parking on the tail anchor still leaves the
+        /// transcript's own bottom padding below it, so "at the bottom" is
+        /// never zero to the pixel. Well under what scrolling back to read
+        /// anything costs — the empty stretch under the last message is 200.
+        private static let slack: CGFloat = 48
+
+        var pin: ChatScrollPin?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observe()
+        }
+
+        /// Target/action rather than a block: the centre drops a dead observer
+        /// registered this way by itself, which spares this view a `deinit` it
+        /// could not write anyway — a view's is not on the main actor.
+        private func observe() {
+            NotificationCenter.default.removeObserver(
+                self,
+                name: NSView.boundsDidChangeNotification,
+                object: nil
+            )
+            guard window != nil, let clip = enclosingScrollView?.contentView else { return }
+            clip.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(scrolled),
+                name: NSView.boundsDidChangeNotification,
+                object: clip
+            )
+            // Whatever the position is on the way in — a conversation replayed
+            // from disk opens somewhere already.
+            update()
+        }
+
+        @objc private func scrolled() {
+            update()
+        }
+
+        private func update() {
+            guard let pin,
+                  let scrollView = enclosingScrollView,
+                  let document = scrollView.documentView
+            else { return }
+            let visible = scrollView.contentView.bounds
+            // A transcript shorter than the pane is at its bottom by default.
+            let distance = document.frame.height - visible.maxY
+            let isAtBottom = distance <= Self.slack
+            // Only on a change. A scroll raises this many times a second, and
+            // the observation behind the pin fires on every write, not on every
+            // difference — so writing the same answer over and over would
+            // rebuild the button all the way down the page.
+            guard pin.isAtBottom != isAtBottom else { return }
+            pin.isAtBottom = isAtBottom
+        }
     }
 }
 
@@ -370,6 +556,9 @@ private struct ClaudeMessageView: View {
     /// Opens a file a tool touched, in the editor next door.
     let openFile: (String) -> Void
     let answer: (ClaudeQuickReply) -> Void
+    /// Passed down to the tool rows, which find out how tall they are a beat
+    /// after they appear — see ``ClaudeToolRow/didResize``.
+    var didResize: () -> Void = {}
 
     /// The choices this reply ends with, when it ends with a question that has
     /// any — see ``ClaudeQuickReplies``, which is deliberately hard to trigger.
@@ -441,7 +630,7 @@ private struct ClaudeMessageView: View {
                     case .thinking(let text):
                         ThinkingRow(text: text)
                     case .tool(let call):
-                        ClaudeToolRow(call: call, openFile: openFile)
+                        ClaudeToolRow(call: call, openFile: openFile, didResize: didResize)
                     }
                 }
                 .transition(ClaudeChatMetrics.appear)
@@ -522,6 +711,7 @@ private struct ClaudeQuickReplyButton: View {
             }
         }
         .buttonStyle(.plain)
+        .textSelection(.disabled)
         .onHover { isHovering = $0 }
         .pointerCursor()
         .help("Answer with “\(reply.text)”")
@@ -548,6 +738,9 @@ private struct ThinkingRow: View {
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .contentShape(Rectangle())
+                // Selectable text swallows the click meant for the button
+                // under it — see `ClaudeToolRow.header`.
+                .textSelection(.disabled)
             }
             .buttonStyle(.plain)
             .pointerCursor()
@@ -561,140 +754,6 @@ private struct ThinkingRow: View {
                     .padding(.leading, 18)
             }
         }
-    }
-}
-
-/// One tool call: a row that says what ran, and unfolds into what it was given
-/// and what came back.
-private struct ClaudeToolRow: View {
-    @Bindable var call: ClaudeToolCall
-    let openFile: (String) -> Void
-
-    /// A tool can return a whole file; the row shows the head of it and says so.
-    private let resultLineLimit = 24
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            if call.isExpanded {
-                details
-            }
-        }
-        .background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(call.isError ? .red.opacity(0.4) : .clear, lineWidth: 1)
-        }
-    }
-
-    private var header: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.14)) { call.isExpanded.toggle() }
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: call.symbol)
-                    .font(.caption)
-                    .foregroundStyle(call.isError ? .red : .secondary)
-                    .frame(width: 14)
-                Text(call.name)
-                    .font(.caption.weight(.medium))
-                if !summary.isEmpty {
-                    Text(summary)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Spacer(minLength: 4)
-                if call.isRunning {
-                    ProgressView().controlSize(.small).scaleEffect(0.7)
-                } else {
-                    Image(systemName: call.isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .pointerCursor()
-    }
-
-    /// The first line only: a heredoc or a long prompt would otherwise push the
-    /// row's own name off the side.
-    private var summary: String {
-        call.summary.split(separator: "\n").first.map(String.init) ?? ""
-    }
-
-    private var details: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Divider()
-            if let arguments = argumentText, !arguments.isEmpty {
-                block(title: "Input", text: arguments)
-            }
-            if let result = call.result, !result.isEmpty {
-                block(title: call.isError ? "Error" : "Result", text: result)
-            }
-            if let path = openablePath {
-                Button {
-                    openFile(path)
-                } label: {
-                    Label("Open \((path as NSString).lastPathComponent)", systemImage: "arrow.up.forward.square")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-                .pointerCursor()
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.bottom, 9)
-    }
-
-    /// What the tool was called with — the confirmed arguments once they are
-    /// parsed, and the half-written JSON while they are still arriving.
-    private var argumentText: String? {
-        if case .object(let fields) = call.input, !fields.isEmpty {
-            return fields
-                .sorted { $0.key < $1.key }
-                .map { "\($0.key): \($0.value.displayText)" }
-                .joined(separator: "\n")
-        }
-        return call.partialInput.isEmpty ? nil : call.partialInput
-    }
-
-    /// The file this call is about, when it is about one, so the row can open it
-    /// in the editor next door.
-    private var openablePath: String? {
-        guard let path = call.input["file_path"]?.stringValue ?? call.input["path"]?.stringValue,
-              FileManager.default.fileExists(atPath: path) else { return nil }
-        return path
-    }
-
-    private func block(title: String, text: String) -> some View {
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        let shown = lines.prefix(resultLineLimit).joined(separator: "\n")
-        let hidden = max(0, lines.count - resultLineLimit)
-
-        return VStack(alignment: .leading, spacing: 4) {
-            Text(title.uppercased())
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.tertiary)
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(shown)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(title == "Error" ? .red : .secondary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if hidden > 0 {
-                Text("\(hidden) more lines")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -936,16 +995,40 @@ private struct ClaudeComposer: View {
         .pointerCursor()
     }
 
+    /// Where the attach panel last had something picked from it, kept across
+    /// launches. Attachments come from the same handful of folders — screenshots
+    /// out of Downloads, a log off the Desktop — and none of them is the
+    /// repository, so opening on the repository every time means walking back
+    /// to the same folder on every attachment.
+    @AppStorage("claude.attachDirectory") private var lastAttachDirectory = ""
+
     private func browseForFiles() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
-        panel.directoryURL = session.directory
+        // The remembered folder, but only while it is still there — a panel
+        // pointed at a folder that has been moved or thrown away opens
+        // wherever AppKit decides, which is worse than the repository.
+        panel.directoryURL = Self.existingDirectory(lastAttachDirectory) ?? session.directory
         panel.prompt = "Attach"
         panel.message = "Attach files for Claude to read."
         guard panel.runModal() == .OK else { return }
+        // The folder the files came from rather than the panel's own — those
+        // differ the moment the picking is done from a search or a favourite.
+        if let folder = panel.urls.first?.deletingLastPathComponent() {
+            lastAttachDirectory = folder.path
+        }
         session.attach(panel.urls)
+    }
+
+    private static func existingDirectory(_ path: String) -> URL? {
+        guard !path.isEmpty else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+              isDirectory.boolValue
+        else { return nil }
+        return URL(fileURLWithPath: path)
     }
 
     /// Stop and Send are both here while an answer is running: the CLI takes
