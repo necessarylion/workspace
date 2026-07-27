@@ -1,3 +1,4 @@
+import CodeEditLanguages
 import Foundation
 
 /// The `initializationOptions` a server is handed, for the ones that need more
@@ -6,23 +7,24 @@ import Foundation
 /// Almost every server we ship needs nothing here — it reads the project's own
 /// configuration off disk and gets on with it. Vue is the exception, and the
 /// reason this exists.
+///
+/// What it needs is much smaller than it was, because the arrangement changed:
+/// the Vue server now runs in **hybrid mode**, keeping no TypeScript project of
+/// its own and forwarding every typed question to the `tsserver` vtsls is
+/// already running for the repository. Finding a TypeScript for it to *load* is
+/// therefore no longer this file's problem — that is
+/// ``LanguageServerConfiguration``' job, on the vtsls side.
 @MainActor
 enum LanguageServerOptions {
     /// What went wrong before the server was even started.
     enum Failure: LocalizedError {
-        case typeScriptNotFound
-        case vueServerTooNew(String)
+        case typeScriptServerMissing(String)
 
         var errorDescription: String? {
             switch self {
-            case .typeScriptNotFound:
-                "No usable TypeScript for the Vue server — it needs 5.x. "
-                    + "Install one in the project (`npm install -D typescript@5`) "
-                    + "or globally (`npm install -g typescript@5`)."
-            case .vueServerTooNew(let version):
-                "vue-language-server \(version) cannot work here — it answers only through a "
-                    + "tsserver this editor does not run. Install 2.x: "
-                    + "`npm install -g @vue/language-server@2`."
+            case .typeScriptServerMissing(let executable):
+                "The Vue server cannot answer anything about types without \(executable). "
+                    + "Install it from Settings → Language Servers."
             }
         }
     }
@@ -34,43 +36,50 @@ enum LanguageServerOptions {
     ) async throws -> LSP.Value? {
         guard definition.language == LanguageServerCatalog.vue else { return nil }
 
-        // Asked outright, because the alternative is a 45-second wait on a
-        // request the 3.x server was never going to answer, reported as though
-        // it were still indexing.
-        if let version = await vueServerVersion(definition.executable),
-           let major = Int(version.prefix(while: \.isNumber)), major > 2 {
-            throw Failure.vueServerTooNew(version)
-        }
+        // Asked outright, because the alternative is every hover and completion
+        // in a `.vue` file hanging until it times out: in hybrid mode the Vue
+        // server asks the client, and a client with no TypeScript server behind
+        // it has nothing to answer with.
+        let typescript = typeScriptExecutable
+        guard await isAvailable(typescript) else { throw Failure.typeScriptServerMissing(typescript) }
 
-        guard let tsdk = await typeScriptSDK(near: root) else { throw Failure.typeScriptNotFound }
-        return .object([
-            // Where to load the TypeScript that types the `<script>` block.
-            "typescript": .object(["tsdk": .string(tsdk)]),
-            // Hybrid mode — the server's default — answers nothing itself. It
-            // forwards every question to a `tsserver` the *client* is expected
-            // to be running with `@vue/typescript-plugin` loaded, over
-            // `tsserver/request` notifications that are not part of the
-            // protocol. We run no such process, so those questions would never
-            // be answered and every hover, completion and diagnostic would hang
-            // for ever. Turned off, the server keeps its own TypeScript project
-            // and replies on its own, which is what this editor can use.
-            "vue": .object(["hybridMode": .bool(false)])
-        ])
+        var options: [String: LSP.Value] = [
+            // Saying so is what makes the server forward `tsserver/request` at
+            // all, rather than deciding the client cannot cope.
+            "vue": .object(["hybridMode": .bool(true)])
+        ]
+        // Still wanted, and still only for the server's own template checking —
+        // it is not what answers the `<script>` block any more. Left out
+        // entirely when there is none, since an empty path is worse than no
+        // path: the server would try to load it.
+        if let tsdk = await typeScriptSDK(near: root) {
+            options["typescript"] = .object(["tsdk": .string(tsdk)])
+        }
+        return .object(options)
     }
 
-    /// The `lib` directory of the TypeScript the Vue server should load.
+    private static var typeScriptExecutable: String {
+        LanguageServerCatalog.shared.entries
+            .first { $0.language == TreeSitterLanguage.typescript.rawValue }?
+            .executable ?? "vtsls"
+    }
+
+    private static func isAvailable(_ executable: String) async -> Bool {
+        if ManagedLanguageServers.shared.isInstalled(executable) { return true }
+        return await Shell.isAvailable(executable)
+    }
+
+    /// The `lib` directory of a TypeScript the Vue server can load.
     ///
-    /// The project's own copy comes first, and not only out of politeness: it is
-    /// the version the code was written against, and a Vue project has one
-    /// nearly always. A workspace keeps its `node_modules` at the top rather
-    /// than in each package, so the parent folders are tried too before falling
-    /// back to whatever is installed globally.
+    /// The project's own copy comes first: it is the version the code was
+    /// written against, and a Vue project has one nearly always. A workspace
+    /// keeps its `node_modules` at the top rather than in each package, so the
+    /// parent folders are tried too, and the app's own copy is the last resort.
     ///
     /// What is looked for is `typescript.js` rather than the directory, because
     /// that file is also what tells a usable version from the rest: the 7.x
     /// package is the Go rewrite, and ships a `lib` holding little more than
-    /// `tsc.js`. Passing that one on is what turns into "the Vue server died on
-    /// its first request"; skipping it gives the plain message above instead.
+    /// `tsc.js`.
     private static func typeScriptSDK(near root: URL) async -> String? {
         var directory = root.standardizedFileURL
         while true {
@@ -82,12 +91,18 @@ enum LanguageServerOptions {
             if parent == directory { break }
             directory = parent
         }
+        if let managed = ManagedLanguageServers.shared.packageDirectory(for: "vtsls", package: "typescript") {
+            let lib = managed.appendingPathComponent("lib")
+            if FileManager.default.fileExists(atPath: lib.appendingPathComponent("typescript.js").path) {
+                return lib.path
+            }
+        }
         return await globalTypeScriptSDK()
     }
 
     /// `npm root -g`, asked once — it costs a shell and does not change while
-    /// the app is open. The box holds the answer even when that answer is "none",
-    /// so a machine without a global TypeScript is not asked again and again.
+    /// the app is open. The box holds the answer even when that answer is
+    /// "none", so a machine without a global TypeScript is not asked again.
     private static func globalTypeScriptSDK() async -> String? {
         if let cached = cachedGlobalSDK { return cached }
         let result = await Shell.run(["npm", "root", "-g"], timeout: 20)
@@ -104,14 +119,4 @@ enum LanguageServerOptions {
     }
 
     private static var cachedGlobalSDK: String??
-
-    /// `vue-language-server --version`, which both 2.x and 3.x answer with a
-    /// bare version and nothing else. Nil when it cannot be asked — then the
-    /// server is given the benefit of the doubt and started anyway.
-    private static func vueServerVersion(_ executable: String) async -> String? {
-        let result = await Shell.run([executable, "--version"], timeout: 20)
-        guard result.isSuccess else { return nil }
-        let version = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        return version.isEmpty ? nil : version
-    }
 }

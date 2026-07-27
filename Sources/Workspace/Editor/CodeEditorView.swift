@@ -68,7 +68,12 @@ struct CodeEditorView: NSViewControllerRepresentable {
         coordinator.onOpenLocation = onOpenLocation
 
         if controller.fileURL != document.url {
-            controller.load(url: document.url, text: document.text, projectRoot: projectRoot)
+            controller.load(
+                url: document.url,
+                text: document.text,
+                projectRoot: projectRoot,
+                isLarge: document.isLargeFile
+            )
             coordinator.revision = document.externalRevision
             coordinator.saveRevision = document.saveRevision
         } else if coordinator.revision != document.externalRevision {

@@ -71,6 +71,30 @@ final class LanguageServerCatalog {
         return entries.first { $0.language == language }
     }
 
+    /// Which server each file extension wants — the whole catalog, turned
+    /// round, for ``LanguageServerRegistry/prewarm(root:)``.
+    ///
+    /// A repository's file list is matched on extension alone and never on
+    /// ``CodeLanguage/forFile(url:)``: that reads the *contents* of every file
+    /// with no extension looking for a shebang, and a repository holds
+    /// thousands of them. The languages with no grammar are folded in the same
+    /// way ``entry(forFile:)`` does it, so a `.vue` file still asks for the Vue
+    /// server rather than the HTML one.
+    var entriesByFileExtension: [String: LanguageServerEntry] {
+        var map: [String: LanguageServerEntry] = [:]
+        for entry in entries {
+            guard let language = Self.codeLanguage(for: entry.language) else { continue }
+            for fileExtension in language.extensions {
+                map[fileExtension.lowercased()] = entry
+            }
+        }
+        for (fileExtension, language) in Self.languagesByExtension {
+            guard let entry = entries.first(where: { $0.language == language }) else { continue }
+            map[fileExtension] = entry
+        }
+        return map
+    }
+
     func isBuiltIn(_ entry: LanguageServerEntry) -> Bool {
         Self.builtIn.contains { $0.language == entry.language }
     }
@@ -147,8 +171,8 @@ final class LanguageServerCatalog {
 
     // MARK: - Installed check
 
-    /// Asks the login shell whether each server is on `$PATH` — the same PATH
-    /// the editor will look on when it starts one.
+    /// Whether each server can be started: either the app installed it itself,
+    /// or it is on the same `$PATH` the editor will look on.
     func refresh() async {
         guard !isChecking else { return }
         isChecking = true
@@ -157,7 +181,7 @@ final class LanguageServerCatalog {
         let executables = Set(entries.map(\.executable))
         let found = await withTaskGroup(of: (String, Bool).self) { group in
             for executable in executables {
-                group.addTask { (executable, await Shell.isAvailable(executable)) }
+                group.addTask { (executable, await Self.isPresent(executable)) }
             }
             var result: [String: Bool] = [:]
             for await pair in group { result[pair.0] = pair.1 }
@@ -168,7 +192,13 @@ final class LanguageServerCatalog {
 
     /// Re-checks one server, after an install.
     func refresh(_ executable: String) async {
-        installed[executable] = await Shell.isAvailable(executable)
+        installed[executable] = await Self.isPresent(executable)
+    }
+
+    /// The app's own copy counts as installed — it is what the editor starts.
+    private static func isPresent(_ executable: String) async -> Bool {
+        if ManagedLanguageServers.shared.isInstalled(executable) { return true }
+        return await Shell.isAvailable(executable)
     }
 
     // MARK: - Storage
@@ -283,47 +313,49 @@ final class LanguageServerCatalog {
         ),
         .init(
             language: TreeSitterLanguage.typescript.rawValue,
-            executable: "typescript-language-server",
-            command: "typescript-language-server --stdio",
+            executable: "vtsls",
+            command: "vtsls --stdio",
             languageID: "typescript",
-            installCommand: "npm install -g typescript typescript-language-server"
+            installCommand: "npm install -g typescript @vtsls/language-server"
         ),
         .init(
             language: TreeSitterLanguage.tsx.rawValue,
-            executable: "typescript-language-server",
-            command: "typescript-language-server --stdio",
+            executable: "vtsls",
+            command: "vtsls --stdio",
             languageID: "typescriptreact",
-            installCommand: "npm install -g typescript typescript-language-server"
+            installCommand: "npm install -g typescript @vtsls/language-server"
         ),
         .init(
             language: TreeSitterLanguage.javascript.rawValue,
-            executable: "typescript-language-server",
-            command: "typescript-language-server --stdio",
+            executable: "vtsls",
+            command: "vtsls --stdio",
             languageID: "javascript",
-            installCommand: "npm install -g typescript typescript-language-server"
+            installCommand: "npm install -g typescript @vtsls/language-server"
         ),
         .init(
             language: TreeSitterLanguage.jsx.rawValue,
-            executable: "typescript-language-server",
-            command: "typescript-language-server --stdio",
+            executable: "vtsls",
+            command: "vtsls --stdio",
             languageID: "javascriptreact",
-            installCommand: "npm install -g typescript typescript-language-server"
+            installCommand: "npm install -g typescript @vtsls/language-server"
         ),
-        // Pinned to 2.x on purpose. From 3.0 the server answers nothing on its
-        // own: every request is forwarded to a `tsserver` the editor is expected
-        // to run alongside it with `@vue/typescript-plugin` loaded, and there is
-        // no switch to turn that off. 2.x still has one, and
-        // ``LanguageServerOptions`` throws it — see there.
+        // Hybrid mode, which is what 3.x does and all it does: this server
+        // answers the template and the styles, and forwards everything needing
+        // a type to the one `tsserver` vtsls is already running for the
+        // repository. The editor carries those questions across — see
+        // ``LanguageService/relayToTypeScript(_:)`` — and vtsls is told to load
+        // `@vue/typescript-plugin` by ``LanguageServerSettings``.
+        //
+        // The 2.x pin this replaces was the other way round: hybrid mode turned
+        // *off*, so the server kept a TypeScript project of its own and a Vue
+        // repository paid for TypeScript twice.
         .init(
             language: vue,
             executable: "vue-language-server",
             command: "vue-language-server --stdio",
             languageID: "vue",
-            // The server only, no TypeScript: it loads the project's own, and
-            // pulling a global `typescript` in here would quietly change the
-            // `tsc` on the user's PATH as a side effect of pressing Install.
-            // ``LanguageServerOptions`` says what to do when a project has none.
-            installCommand: "npm install -g @vue/language-server@2"
+            // No TypeScript alongside it any more: it no longer loads one.
+            installCommand: "npm install -g @vue/language-server"
         ),
         .init(
             language: TreeSitterLanguage.python.rawValue,
@@ -347,11 +379,14 @@ final class LanguageServerCatalog {
             installCommand: "brew install rust-analyzer"
         ),
         .init(
+            // Shopify's, not solargraph: solargraph slows to a crawl on a large
+            // repository and can hang outright on a symbol search, which is
+            // exactly the size of project this app is pointed at.
             language: TreeSitterLanguage.ruby.rawValue,
-            executable: "solargraph",
-            command: "solargraph stdio",
+            executable: "ruby-lsp",
+            command: "ruby-lsp",
             languageID: "ruby",
-            installCommand: "gem install solargraph"
+            installCommand: "gem install ruby-lsp"
         ),
         .init(
             language: TreeSitterLanguage.php.rawValue,
@@ -374,11 +409,14 @@ final class LanguageServerCatalog {
             installCommand: "brew install lua-language-server"
         ),
         .init(
+            // JetBrains', built on IntelliJ's own analysis. The community
+            // `kotlin-language-server` it replaces is a project its author has
+            // said he no longer uses Kotlin to maintain.
             language: TreeSitterLanguage.kotlin.rawValue,
-            executable: "kotlin-language-server",
-            command: "kotlin-language-server",
+            executable: "kotlin-lsp",
+            command: "kotlin-lsp --stdio",
             languageID: "kotlin",
-            installCommand: "brew install kotlin-language-server"
+            installCommand: "brew install JetBrains/utils/kotlin-lsp"
         ),
         .init(
             language: TreeSitterLanguage.json.rawValue,

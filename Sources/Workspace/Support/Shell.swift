@@ -232,6 +232,18 @@ enum Shell {
         "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    /// The `PATH` the user's own prompt has, resolved once.
+    ///
+    /// For the callers that spawn a process themselves instead of going through
+    /// ``run`` — ``LSPConnection`` is the one, because a language server is a
+    /// long-lived process on a pipe rather than a command with an answer. They
+    /// have the same problem every other command has and need the same `PATH`:
+    /// a login shell alone still misses everything nvm, gvm and pyenv add from
+    /// ~/.zshrc, which is where most language servers are installed.
+    static func resolvedPath() async -> String? {
+        await InteractivePath.shared.value()
+    }
+
     /// Whether a tool is on the resolved PATH.
     ///
     /// A `PATH` walk rather than a `command -v` in a shell, which is the same

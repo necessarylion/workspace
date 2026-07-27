@@ -222,15 +222,71 @@ extension LSP {
     indirect enum Value: Encodable, Hashable, Sendable {
         case string(String)
         case bool(Bool)
+        case int(Int)
+        case double(Double)
+        case null
         case object([String: Value])
+        case array([Value])
 
         func encode(to encoder: Encoder) throws {
             var container = encoder.singleValueContainer()
             switch self {
             case .string(let value): try container.encode(value)
             case .bool(let value): try container.encode(value)
+            case .int(let value): try container.encode(value)
+            case .double(let value): try container.encode(value)
+            case .null: try container.encodeNil()
             case .object(let value): try container.encode(value)
+            case .array(let value): try container.encode(value)
             }
+        }
+
+        /// Foundation JSON turned into this, so a payload one server produced
+        /// can be handed to another. `Sendable`, which is the point: `Any`
+        /// cannot cross to the connection actor, and this can.
+        ///
+        /// `Bool` is checked before the numbers on purpose — `JSONSerialization`
+        /// hands back `true` as an `NSNumber` that casts happily to `Int`, and
+        /// a `true` relayed as `1` is a different question to ask a compiler.
+        static func from(json: Any) -> Value {
+            switch json {
+            case let value as String: .string(value)
+            case let value as NSNumber where CFGetTypeID(value) == CFBooleanGetTypeID(): .bool(value.boolValue)
+            case let value as Int: .int(value)
+            case let value as Double: .double(value)
+            case let value as [String: Any]: .object(value.mapValues(Value.from(json:)))
+            case let value as [Any]: .array(value.map(Value.from(json:)))
+            default: .null
+            }
+        }
+
+        /// The same value as Foundation JSON, for the places that have to hand
+        /// it to `JSONSerialization` rather than to an `Encoder` — answering
+        /// `workspace/configuration` is one, since that reply is assembled as a
+        /// dictionary alongside an id whose type the server chose.
+        var json: Any {
+            switch self {
+            case .string(let value): value
+            case .bool(let value): value
+            case .int(let value): value
+            case .double(let value): value
+            case .null: NSNull()
+            case .object(let value): value.mapValues(\.json)
+            case .array(let value): value.map(\.json)
+            }
+        }
+
+        /// Walks a dotted settings path — `workspace/configuration` asks for
+        /// `vtsls.tsserver`, and what it wants back is the subtree, not the
+        /// whole thing.
+        func child(atPath path: String) -> Value? {
+            guard !path.isEmpty else { return self }
+            var current = self
+            for step in path.split(separator: ".") {
+                guard case .object(let fields) = current, let next = fields[String(step)] else { return nil }
+                current = next
+            }
+            return current
         }
     }
 }

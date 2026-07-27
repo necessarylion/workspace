@@ -18,6 +18,11 @@ final class OpenDocument: Identifiable {
     /// Contents as last read from / written to disk, used to detect edits.
     private var savedText: String
 
+    /// Why this file is more than the editing stack should take on in full, or
+    /// nil for an ordinary one. See ``largeFileNote(for:)``.
+    private(set) var largeFileNote: String?
+    var isLargeFile: Bool { largeFileNote != nil }
+
     // Editor feedback, filled in by the editor controller.
     var diagnostics: [LSP.Diagnostic] = []
     var symbols: [LSP.Symbol] = []
@@ -116,10 +121,44 @@ final class OpenDocument: Identifiable {
         if let data = try? Data(contentsOf: url), let string = String(data: data, encoding: .utf8) {
             self.content = .text(string)
             self.savedText = string
+            self.largeFileNote = Self.largeFileNote(for: string)
         } else {
             self.content = .unsupported(reason: "Not a UTF-8 text file.")
             self.savedText = ""
         }
+    }
+
+    /// Why a text file cannot be given the full editing stack, or nil.
+    ///
+    /// Two shapes are out of reach, and the second matters as much as the first:
+    /// sheer length, and a single very long line. A minified bundle is both —
+    /// `mermaid.min.js` is 3.5 MB on one 324,000-character line, comfortably
+    /// under the 4 MB ceiling above and still enough to take the window down.
+    /// Unwrapped, that one line asks AppKit for a text view two million points
+    /// wide and lays the whole document out before it can know that width; on
+    /// top of which tree-sitter parses the bundle and the language server is
+    /// handed it, both on the main thread, before the first frame is drawn.
+    ///
+    /// Measured in UTF-8 bytes, which `String` already has: a byte count is at
+    /// least the character count, so nothing pathological slips through, and it
+    /// costs no walk over the text to ask for.
+    private static func largeFileNote(for text: String) -> String? {
+        let bytes = text.utf8
+        guard bytes.count <= 1_000_000 else {
+            return "Large file — highlighting, code intelligence and editing are off."
+        }
+        var run = 0
+        for byte in bytes {
+            if byte == 0x0A {
+                run = 0
+                continue
+            }
+            run += 1
+            if run > 5_000 {
+                return "Very long lines — highlighting, code intelligence and editing are off."
+            }
+        }
+        return nil
     }
 
     func save() throws {
@@ -135,15 +174,19 @@ final class OpenDocument: Identifiable {
               let string = String(data: data, encoding: .utf8) else { return }
         savedText = string
         content = .text(string)
+        largeFileNote = Self.largeFileNote(for: string)
         isDirty = false
         externalRevision += 1
     }
 
     // MARK: - Stats shown in the info sidebar
 
+    /// Counted rather than split: the status bar asks for this on every redraw,
+    /// and splitting a multi-megabyte file allocates a substring per line each
+    /// time it does.
     var lineCount: Int {
-        guard case .text(let value) = content else { return 0 }
-        return value.isEmpty ? 0 : value.split(separator: "\n", omittingEmptySubsequences: false).count
+        guard case .text(let value) = content, !value.isEmpty else { return 0 }
+        return value.utf8.reduce(1) { $1 == 0x0A ? $0 + 1 : $0 }
     }
 
     var wordCount: Int {

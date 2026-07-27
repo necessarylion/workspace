@@ -54,6 +54,15 @@ enum ClaudeSessionsIndex {
         }.value
     }
 
+    /// What one conversation is called, by id — for the ones running right now,
+    /// where reading the whole folder the list above walks would be far more
+    /// work than the single file this needs. Nil until its first prompt has
+    /// landed and the CLI has written the transcript.
+    static func title(of id: String, in project: URL) async -> String? {
+        let file = directory(for: project).appendingPathComponent("\(id).jsonl")
+        return await Task.detached(priority: .utility) { title(of: file) }.value
+    }
+
     /// Throws a conversation away: the transcript **and** the folder of tool
     /// output the CLI keeps beside it under the same name.
     ///

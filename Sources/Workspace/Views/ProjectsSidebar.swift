@@ -292,7 +292,7 @@ struct HomeTerminalButton: View {
     @Environment(WorkspaceStore.self) private var store
 
     var body: some View {
-        let count = store.terminals(in: .home).count
+        let count = store.shellTerminals(in: .home).count
 
         return Button {
             store.openGlobalTerminal()

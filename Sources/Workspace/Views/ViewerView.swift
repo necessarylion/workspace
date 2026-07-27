@@ -198,7 +198,7 @@ struct ViewerView: View {
         // The terminal has no tab bar of its own, so the breadcrumb is what
         // names the shell on screen.
         let title = item.isTerminal
-            ? (item.selectedTerminal?.title ?? item.title)
+            ? (item.selectedTerminal?.displayTitle ?? item.title)
             : item.title
 
         return HStack(spacing: 7) {
@@ -360,6 +360,11 @@ struct ViewerView: View {
                     .onWindowKeyEvent { event, _ in
                         if event.modifierFlags.contains(.command),
                            event.charactersIgnoringModifiers?.lowercased() == "f" {
+                            // Not on a large file: marking every hit means an
+                            // attribute run per match over the whole buffer,
+                            // which is exactly the work this mode exists to
+                            // avoid. The text view keeps its own find bar.
+                            guard !document.isLargeFile else { return false }
                             store.editorFind.open()
                             return true
                         }
@@ -451,7 +456,13 @@ struct StatusBar: View {
                     .foregroundStyle(.orange)
             }
             Spacer()
-            if !document.languageServerStatus.isEmpty {
+            // Why the file looks plain, in the one place that already explains
+            // what the editor is and is not doing with it.
+            if let note = document.largeFileNote {
+                Label(note, systemImage: "exclamationmark.triangle")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else if !document.languageServerStatus.isEmpty {
                 Text(document.languageServerStatus)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -509,6 +520,12 @@ struct WelcomeView: View {
         // ``Project/refreshDashboard()`` for what that costs.
         .task(id: store.selectedProject?.id) {
             showsEveryCommit = false
+            // Before the reads, not after them: the servers are the slow thing
+            // to start and the dashboard's own reads are not waiting on them.
+            // It returns at once — the walk and the launches are its own work.
+            if let project = store.selectedProject {
+                LanguageServerRegistry.shared.prewarm(root: project.url)
+            }
             await store.selectedProject?.refreshDashboard()
         }
     }

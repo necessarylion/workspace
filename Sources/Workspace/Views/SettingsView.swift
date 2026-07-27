@@ -535,6 +535,7 @@ private struct LanguageServerSettings: View {
     /// Read straight from the shared catalog: `@Observable` tracks whatever the
     /// body touches, so no copy of it has to be kept here.
     private var catalog: LanguageServerCatalog { .shared }
+    private var servers: ManagedLanguageServers { .shared }
     /// The entry being added or edited in its own sheet.
     @State private var draft: ServerDraft?
     /// The install currently running in its own terminal.
@@ -584,7 +585,7 @@ private struct LanguageServerSettings: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Language Servers")
                     .font(.headline)
-                Text("Started from your PATH the first time you open a file in that language.")
+                Text("Started as soon as you select a repository, for the languages actually in it.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -614,19 +615,53 @@ private struct LanguageServerSettings: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 8) {
-            Text("A change takes effect the next time a file of that language is opened.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-            Spacer()
-            if catalog.hasCustomisations {
-                Button("Restore Defaults") { catalog.restoreAllDefaults() }
-                    .controlSize(.small)
-                    .pointerCursor()
+        VStack(alignment: .leading, spacing: 8) {
+            automaticInstalls
+            Divider()
+            HStack(spacing: 8) {
+                Text("A change takes effect the next time a file of that language is opened.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                if catalog.hasCustomisations {
+                    Button("Restore Defaults") { catalog.restoreAllDefaults() }
+                        .controlSize(.small)
+                        .pointerCursor()
+                }
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    /// The app's own copies: whether to fetch them, and how to be rid of them.
+    private var automaticInstalls: some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Toggle(
+                    "Download missing servers automatically",
+                    isOn: Binding(
+                        get: { servers.consent == .allowed },
+                        set: { servers.setConsent($0 ? .allowed : .denied) }
+                    )
+                )
+                .toggleStyle(.checkbox)
+                Text(
+                    "Into the app's own folder, never into Homebrew, your global npm packages "
+                        + "or your gems. The npm-published servers only — the rest keep the Install button above."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button("Remove Downloaded") {
+                servers.removeAll()
+                Task { await catalog.refresh() }
+            }
+            .controlSize(.small)
+            .pointerCursor()
+        }
     }
 }
 
@@ -680,10 +715,18 @@ private struct LanguageServerRow: View {
 
     @ViewBuilder
     private var pill: some View {
-        switch isInstalled {
-        case true?: Pill(text: "ready", color: .green)
-        case false?: Pill(text: "not installed", color: .orange)
-        case nil: Pill(text: "checking", color: .secondary)
+        if ManagedLanguageServers.shared.installing.contains(entry.executable) {
+            Pill(text: "downloading", color: .blue)
+        } else if ManagedLanguageServers.shared.isInstalled(entry.executable) {
+            // Worth saying apart from "ready": this one is the app's copy, and
+            // Remove Downloaded is what takes it away rather than Homebrew.
+            Pill(text: "downloaded", color: .green)
+        } else {
+            switch isInstalled {
+            case true?: Pill(text: "ready", color: .green)
+            case false?: Pill(text: "not installed", color: .orange)
+            case nil: Pill(text: "checking", color: .secondary)
+            }
         }
     }
 

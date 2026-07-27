@@ -41,6 +41,7 @@ final class LanguageService {
     @ObservationIgnored private var openCount: [String: Int] = [:]
     @ObservationIgnored private var diagnosticObservers: [ObjectIdentifier: (String, [LSP.Diagnostic]) -> Void] = [:]
     @ObservationIgnored private var startTask: Task<Bool, Never>?
+    @ObservationIgnored private var settings: LSP.Value?
 
     init(definition: LanguageServerDefinition, root: URL) {
         self.definition = definition
@@ -59,7 +60,12 @@ final class LanguageService {
         let task = Task { @MainActor [self] in
             status = .starting
 
-            guard await Shell.isAvailable(definition.executable) else {
+            // The app's own copy first: it is the one whose whereabouts are
+            // certain, and the user's `PATH` is only consulted when we did not
+            // install this server ourselves.
+            let managed = ManagedLanguageServers.shared.binDirectory(for: definition.executable)
+            let onPath = managed != nil ? true : await Shell.isAvailable(definition.executable)
+            guard onPath else {
                 status = .unavailable(definition.executable)
                 return false
             }
@@ -75,9 +81,11 @@ final class LanguageService {
             }
 
             do {
-                try await connection.start { [weak self] method, params in
+                let settings = await LanguageServerConfiguration.settings(for: definition, root: root)
+                try await connection.start(binPath: managed?.path, settings: settings) { [weak self] method, params in
                     Task { @MainActor in self?.handle(notification: method, params: params) }
                 }
+                self.settings = settings
             } catch {
                 status = .failed(error.localizedDescription)
                 return false
@@ -94,6 +102,15 @@ final class LanguageService {
                     timeout: 30
                 )
                 await connection.notify("initialized", params: EmptyParams())
+                // Pushed as well as answered on request: vtsls reads its plugin
+                // list from whichever arrives, and a server that never asks
+                // would otherwise start without the settings that matter.
+                if let settings {
+                    await connection.notify(
+                        "workspace/didChangeConfiguration",
+                        params: DidChangeConfigurationParams(settings: settings)
+                    )
+                }
                 status = .running
                 return true
             } catch {
@@ -237,6 +254,15 @@ final class LanguageService {
     }
 
     private func handle(notification method: String, params: Data?) {
+        // Not a protocol method: the Vue server's way of asking the *client* to
+        // put a question to the TypeScript server on its behalf. See
+        // ``relayToTypeScript(_:)``.
+        if method == "tsserver/request" {
+            let requests = params.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [[Any]] ?? []
+            for request in requests { relayToTypeScript(request) }
+            return
+        }
+
         guard method == "textDocument/publishDiagnostics",
               let params = params.flatMap({ try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any],
               let uri = params["uri"] as? String else { return }
@@ -251,6 +277,59 @@ final class LanguageService {
         for observer in diagnosticObservers.values {
             observer(uri, decoded)
         }
+    }
+
+    // MARK: - Hybrid mode
+
+    /// Carries one question from the Vue server to the TypeScript server and
+    /// the answer back.
+    ///
+    /// This is the join that makes hybrid mode work, and there is no way round
+    /// it: the Vue server deliberately keeps no TypeScript project of its own —
+    /// that is the whole point, one `tsserver` for the repository instead of
+    /// two — so anything needing a type is asked of whatever `tsserver` the
+    /// *client* is running. It arrives as `[id, command, payload]`, goes out as
+    /// the `typescript.tsserverRequest` command vtsls exposes for exactly this,
+    /// and the answer goes back as a `tsserver/response` notification carrying
+    /// the same id.
+    ///
+    /// A question that cannot be delivered is still answered, with null. The
+    /// Vue server waits on every id it issues, and one silently dropped is a
+    /// hover or a completion that never returns.
+    private func relayToTypeScript(_ request: [Any]) {
+        guard request.count >= 2, let id = request[0] as? Int, let command = request[1] as? String else { return }
+        let payload = request.count > 2 ? LSP.Value.from(json: request[2]) : .null
+
+        Task { @MainActor in
+            guard let typescript = LanguageServerRegistry.shared.typeScriptService(root: root),
+                  await typescript.startIfNeeded() else {
+                await answerTypeScript(id: id, body: .null)
+                return
+            }
+            let answer = await typescript.executeCommand(
+                "typescript.tsserverRequest",
+                arguments: [.string(command), payload]
+            )
+            // `{ body: … }` is the tsserver envelope vtsls hands back; the Vue
+            // server wants what is inside it.
+            let json = answer.flatMap { try? JSONSerialization.jsonObject(with: $0, options: [.fragmentsAllowed]) }
+            let body = (json as? [String: Any])?["body"] ?? json
+            await answerTypeScript(id: id, body: body.map(LSP.Value.from(json:)) ?? .null)
+        }
+    }
+
+    private func answerTypeScript(id: Int, body: LSP.Value) async {
+        await connection.notify(
+            "tsserver/response",
+            params: LSP.Value.array([.array([.int(id), body])])
+        )
+    }
+
+    /// `workspace/executeCommand`, for the commands a server defines itself.
+    /// Nil when it refused or never answered.
+    func executeCommand(_ command: String, arguments: [LSP.Value]) async -> Data? {
+        guard status.isHealthy else { return nil }
+        return await connection.executeCommand(command, arguments: arguments)
     }
 
     // MARK: - Parameter types
@@ -336,6 +415,10 @@ final class LanguageService {
             let text: String
         }
         let textDocument: Item
+    }
+
+    private struct DidChangeConfigurationParams: Encodable, Sendable {
+        let settings: LSP.Value
     }
 
     private struct DidChangeParams: Encodable, Sendable {

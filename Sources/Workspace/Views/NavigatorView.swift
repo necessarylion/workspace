@@ -1290,7 +1290,9 @@ struct TerminalListView: View {
         store.visibleTerminalScope ?? .project(project.id)
     }
 
-    private var terminals: [OpenTerminal] { store.terminals(in: scope) }
+    /// The shells only — a Claude Code conversation runs in a terminal tab too,
+    /// but it is listed in the Claude tab, not here.
+    private var terminals: [OpenTerminal] { store.shellTerminals(in: scope) }
 
     private var footerSummary: String {
         let running = terminals.count { $0.session.isRunning }
@@ -1312,7 +1314,9 @@ struct TerminalListView: View {
 
                 ForEach(terminals) { terminal in
                     TerminalCard(
-                        title: terminal.session.title,
+                        // A conversation is listed by what it is about; every
+                        // other shell by whatever its prompt renamed it to.
+                        title: terminal.session.displayTitle,
                         position: terminal.position,
                         isSelected: store.isShowing(terminal),
                         isRunning: terminal.session.isRunning,

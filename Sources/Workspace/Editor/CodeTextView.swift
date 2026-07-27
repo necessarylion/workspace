@@ -121,11 +121,31 @@ final class CodeTextView: NSTextView {
         }
     }
 
+    /// Cuts the editor back to a viewer for text the layout system should not
+    /// be asked to handle in full — see ``OpenDocument.largeFileNote``.
+    ///
+    /// Editing goes, and with it the undo stack that would otherwise keep a
+    /// second copy of a multi-megabyte buffer per change; the indent guides go,
+    /// because they walk every line on screen and a wrapped 300,000-character
+    /// line is a great many of them. Non-contiguous layout is the important
+    /// one: it lets the layout manager lay out the screenful being looked at
+    /// instead of everything above it.
+    var isLargeFileMode = false {
+        didSet {
+            guard isLargeFileMode != oldValue else { return }
+            isEditable = !isLargeFileMode
+            allowsUndo = !isLargeFileMode
+            layoutManager?.allowsNonContiguousLayout = isLargeFileMode
+            needsDisplay = true
+        }
+    }
+
     // MARK: - Caret line and indent guides
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
         drawCaretLine()
+        guard !isLargeFileMode else { return }
         drawIndentGuides(in: rect)
     }
 

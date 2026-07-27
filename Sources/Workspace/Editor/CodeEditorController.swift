@@ -25,6 +25,10 @@ final class CodeEditorController: NSViewController {
     private let hoverWindow = HoverInfoWindow()
 
     private var service: LanguageService?
+    /// A second server the file is kept open in but never questioned — see
+    /// ``LanguageServerRegistry/companionService(for:root:)``. Only `.vue` has
+    /// one, and everything asked of it is asked through ``service``.
+    private var companion: LanguageService?
     private var diagnostics: [LSP.Diagnostic] = []
 
     private var theme = SyntaxTheme.standard
@@ -36,11 +40,15 @@ final class CodeEditorController: NSViewController {
     /// worth seeing. Nil while no search is running.
     var searchHighlight: String? {
         didSet {
-            guard searchHighlight != oldValue else { return }
+            guard searchHighlight != oldValue, !isLargeFile else { return }
             findSearchMatches()
             applySearchHighlight(in: nil)
         }
     }
+
+    /// The open file is one the editing stack only shows, never colours or
+    /// edits — see ``OpenDocument.largeFileNote``.
+    private(set) var isLargeFile = false
 
     /// Where `searchHighlight` occurs, in order, found once per file rather than
     /// per re-colouring pass.
@@ -59,7 +67,11 @@ final class CodeEditorController: NSViewController {
 
     var wrapsLines: Bool {
         get { textView?.wrapsLines ?? false }
-        set { textView?.wrapsLines = newValue }
+        // A large file is always wrapped, whatever the window preference says:
+        // the width an unwrapped 300,000-character line asks for is the thing
+        // that takes the app down, so the preference cannot be allowed to
+        // reach it.
+        set { if !isLargeFile { textView?.wrapsLines = newValue } }
     }
 
     // MARK: - View
@@ -146,7 +158,12 @@ final class CodeEditorController: NSViewController {
 
     // MARK: - Loading a file
 
-    func load(url: URL, text: String, projectRoot: URL?) {
+    /// `isLarge` marks a file the editing stack can only show — see
+    /// ``OpenDocument.largeFileNote``. Everything that walks or lays out the
+    /// whole document is skipped for one: tree-sitter, the language server, the
+    /// search marks, and the indent guess. What is left is a wrapped, read-only
+    /// text view with line numbers, which is what the file is worth anyway.
+    func load(url: URL, text: String, projectRoot: URL?, isLarge: Bool = false) {
         guard fileURL != url else { return }
         detachService()
 
@@ -154,15 +171,24 @@ final class CodeEditorController: NSViewController {
         self.projectRoot = projectRoot
         language = CodeLanguage.forFile(url: url)
 
+        isLargeFile = isLarge
+        textView.isLargeFileMode = isLarge
+        // Before the text lands, so the first layout pass is already the
+        // wrapped one and no two-million-point width is ever computed.
+        if isLarge { textView.wrapsLines = true }
+
         isApplyingExternalText = true
         textView.string = text
         isApplyingExternalText = false
 
         // Follow the file's own indentation, so Tab, backtab and the indent
         // guides all line up with what is already there.
-        textView.indentWidth = Self.detectIndentWidth(in: text)
+        textView.indentWidth = isLarge ? 4 : Self.detectIndentWidth(in: text)
 
-        if let highlighter {
+        if isLarge {
+            highlighter = nil
+            searchMatches = []
+        } else if let highlighter {
             highlighter.setLanguage(language)
             highlighter.setText(text)
         } else {
@@ -171,13 +197,21 @@ final class CodeEditorController: NSViewController {
         }
 
         applyBaseAttributes()
-        findSearchMatches()
+        if !isLarge { findSearchMatches() }
         ruler.invalidateLines()
         ruler.updateThickness()
         highlightVisible()
         reportCaret()
 
-        attachService(text: text)
+        if isLarge {
+            // No language server for a file this size: the whole text goes over
+            // the wire in `didOpen`, and the answer would be a diagnostic per
+            // line of a bundle nobody is editing. The status bar says so itself,
+            // from the document — clear whatever the last file left here.
+            onStatusChange?("")
+        } else {
+            attachService(text: text)
+        }
     }
 
     /// The file's own indent step, from the gaps between the indentation of
@@ -217,14 +251,17 @@ final class CodeEditorController: NSViewController {
 
         highlighter?.setText(text)
         applyBaseAttributes()
-        findSearchMatches()
+        if !isLargeFile { findSearchMatches() }
         ruler.invalidateLines()
         ruler.updateThickness()
         highlightVisible()
 
         let length = (text as NSString).length
         textView.setSelectedRange(NSRange(location: min(caret.location, length), length: 0))
-        Task { await service?.change(uri: uri, text: text) }
+        Task {
+            await service?.change(uri: uri, text: text)
+            await companion?.change(uri: uri, text: text)
+        }
     }
 
     func updateTheme(_ theme: SyntaxTheme) {
@@ -337,10 +374,16 @@ final class CodeEditorController: NSViewController {
             self.apply(diagnostics: diagnostics)
         }
 
+        // Opened in the TypeScript server as well, for a `.vue` file. Nothing
+        // is ever asked of it directly — the Vue server does the asking — but
+        // it has to be holding the same text the editor is.
+        companion = LanguageServerRegistry.shared.companionService(for: fileURL, root: projectRoot)
+
         onStatusChange?("\(service.definition.displayName) starting…")
         Task { [weak self] in
             await service.open(uri: fileURL.absoluteString, text: text)
             guard let self else { return }
+            await self.companion?.open(uri: fileURL.absoluteString, text: text)
             self.onStatusChange?("\(service.definition.displayName) \(service.status.label)")
             self.refreshSymbols()
         }
@@ -350,8 +393,13 @@ final class CodeEditorController: NSViewController {
         guard let service, let fileURL else { return }
         service.removeDiagnosticObserver(self)
         let uri = fileURL.absoluteString
-        Task { await service.close(uri: uri) }
+        let companion = self.companion
+        Task {
+            await service.close(uri: uri)
+            await companion?.close(uri: uri)
+        }
         self.service = nil
+        self.companion = nil
         diagnostics = []
         onDiagnostics?([])
         onSymbols?([])
@@ -361,8 +409,9 @@ final class CodeEditorController: NSViewController {
     func documentSaved() {
         guard let service, let fileURL else { return }
         let text = textView.string
-        Task {
+        Task { [companion] in
             await service.save(uri: fileURL.absoluteString, text: text)
+            await companion?.save(uri: fileURL.absoluteString, text: text)
         }
         refreshSymbols()
     }
@@ -848,6 +897,14 @@ extension CodeEditorController: NSTextStorageDelegate {
     }
 
     private func handleEdit(range: NSRange, delta: Int, text: String) {
+        // Replacing the whole buffer comes through here too, and `load` and
+        // `replaceText` both re-parse, re-colour and re-index straight after
+        // doing it. Left to run, this would parse the file a second time — with
+        // the previous file's grammar, since the language is switched below the
+        // assignment — which is the difference between one pass over a 3.5 MB
+        // bundle and two.
+        guard !isApplyingExternalText else { return }
+
         highlighter?.apply(editedRange: range, changeInLength: delta, newText: text)
         ruler.invalidateLines()
         // An edit moves every match after it, and can make or unmake one. The
@@ -868,7 +925,6 @@ extension CodeEditorController: NSTextStorageDelegate {
             reportCaret()
         }
 
-        guard !isApplyingExternalText else { return }
         onTextChange?(text)
 
         // Debounce the server: one didChange per pause in typing.

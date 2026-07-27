@@ -230,9 +230,11 @@ private struct LiveClaudeRow: View {
 
     @State private var isHovering = false
 
-    /// The shell renames its own tab (OSC 0/2), so what `claude` calls the
-    /// conversation is what this says once it has settled on something.
-    private var title: String { terminal.session.title }
+    /// The conversation's own name, read off its transcript — the same thing
+    /// the Past rows are called, so one conversation reads the same whether it
+    /// is running or over. Until its first prompt has landed there is nothing
+    /// on disk to read, and the shell's own tab name stands in.
+    private var title: String { terminal.session.displayTitle }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -241,8 +243,16 @@ private struct LiveClaudeRow: View {
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
             HStack(spacing: 5) {
-                Image(systemName: "terminal")
-                Text(isOnScreen ? "on screen" : "running")
+                // The same wait the pane shows, said in a line: a conversation
+                // opened and then left for another tab is still coming up, and
+                // the row is the only place that says so.
+                if terminal.session.isStartingClaude {
+                    ProgressView().controlSize(.mini).scaleEffect(0.7).frame(width: 9, height: 9)
+                    Text("starting…")
+                } else {
+                    Image(systemName: "terminal")
+                    Text(isOnScreen ? "on screen" : "running")
+                }
             }
             .font(.caption2)
             .foregroundStyle(.tertiary)

@@ -1293,16 +1293,31 @@ final class WorkspaceStore {
         title: String?
     ) -> ViewerItem {
         let item = terminalItem(projectID: projectID)
-        if item.terminals.isEmpty || command != nil || title != nil {
+        // A conversation is a tab of this same item, so asking for a shell has
+        // to look past it: coming back to a Claude tab is the Claude tab's job,
+        // and reusing one here would answer "Open Terminal" with a chat.
+        let reusable = command == nil && title == nil ? plainShell(of: item) : nil
+        if let reusable {
+            selectTerminal(reusable, in: item)
+        } else {
             addTerminalTab(to: item, directory: directory, runningCommand: command, title: title)
-        } else if let session = item.selectedTerminal {
-            selectTerminal(session, in: item)
         }
         present(item)
         // The viewer shows one shell and has no tab bar, so the navigator
         // switches to the list of the rest.
         navigatorTab = .terminals
         return item
+    }
+
+    /// The shell this item should come back to when a plain terminal is asked
+    /// for: the tab it was left on when that is not a conversation, and
+    /// otherwise the shell used most recently. Nothing, when every tab it has
+    /// is a conversation — the caller starts one instead.
+    private func plainShell(of item: ViewerItem) -> TerminalSession? {
+        if let selected = item.selectedTerminal, !selected.runsClaude { return selected }
+        return item.terminals
+            .filter { !$0.runsClaude }
+            .max { $0.lastUsedAt < $1.lastUsedAt }
     }
 
     /// The one item that holds this scope's shell tabs, found or made.
@@ -1344,6 +1359,23 @@ final class WorkspaceStore {
         }
     }
 
+    /// The same list without the conversations, numbered from 1 again.
+    ///
+    /// A Claude Code conversation is a terminal tab like any other, but it is
+    /// the Claude tab's to list: showing it here too would offer a second way
+    /// into the same shell, and bury the shells you opened yourself among the
+    /// chats. Everything the user thinks of as "the terminals" — the list, the
+    /// counts, the shell a plain "Open Terminal" comes back to — reads this.
+    func shellTerminals(in scope: TerminalScope) -> [OpenTerminal] {
+        // Renumbered rather than filtered alone: the number is only there to
+        // tell same-named shells apart, and a list that ran 1, 3, 4 would read
+        // as though two of them had been lost.
+        terminals(in: scope)
+            .filter { !$0.session.runsClaude }
+            .enumerated()
+            .map { OpenTerminal(session: $1.session, item: $1.item, position: $0 + 1) }
+    }
+
     /// Which scope the Terminals tab is about: the shell on screen belongs to
     /// one, and with anything else open it is the selected repository's.
     var visibleTerminalScope: TerminalScope? {
@@ -1377,7 +1409,7 @@ final class WorkspaceStore {
     /// repository being switched away from — but a repository's own board
     /// should count its own.
     func terminalCount(in project: Project) -> Int {
-        openTerminals.count { $0.item.projectID == project.id }
+        shellTerminals(in: .project(project.id)).count
     }
 
     /// Opens one of the navigator's lists, unfolding the pane if it is away.
@@ -1397,8 +1429,7 @@ final class WorkspaceStore {
         showNavigator(.terminals)
         // The list itself no longer moves the last shell used to the top, so the
         // one to bring back is looked up by `lastUsedAt` here.
-        let recent = openTerminals
-            .filter { $0.item.projectID == project.id }
+        let recent = shellTerminals(in: .project(project.id))
             .max { $0.session.lastUsedAt < $1.session.lastUsedAt }
         if let recent { showTerminal(recent) }
     }
@@ -1483,7 +1514,10 @@ final class WorkspaceStore {
     ) {
         let session = makeSession(
             directory: directory,
-            title: title ?? "Shell \(item.terminals.count + 1)",
+            // Counted over the shells alone, to match the list they are named
+            // for: conversations are named after what they are about and sit
+            // in a list of their own.
+            title: title ?? "Shell \(item.terminals.count { !$0.runsClaude } + 1)",
             in: item
         )
         item.terminals.append(session)
@@ -1671,17 +1705,20 @@ final class WorkspaceStore {
         let item = openTerminal(in: project, title: "Claude")
         guard let session = item.selectedTerminal else { return }
         session.runsClaude = true
+        // Up before the question is even asked: what is behind it until the
+        // answer lands is a shell prompt this tab was never opened for.
+        session.beginClaudeStartup()
         navigatorTab = .claude
 
         Task {
             let cli = await ClaudeCLI.shared.info()
             guard cli.supportsSessionID else {
-                session.run("claude")
+                session.runClaude("claude")
                 return
             }
             let id = UUID().uuidString.lowercased()
             session.claudeSessionID = id
-            session.run("claude --session-id \(id)")
+            session.runClaude("claude --session-id \(id)")
         }
     }
 
@@ -1704,13 +1741,13 @@ final class WorkspaceStore {
         let title = past.title.count > 32
             ? String(past.title.prefix(32)) + "…"
             : past.title
-        let item = openTerminal(
-            in: project,
-            runningCommand: "claude --resume \(Shell.quote(past.id))",
-            title: title
-        )
-        item.selectedTerminal?.runsClaude = true
-        item.selectedTerminal?.claudeSessionID = past.id
+        let item = openTerminal(in: project, title: title)
+        guard let session = item.selectedTerminal else { return }
+        session.runsClaude = true
+        session.claudeSessionID = past.id
+        // Typed here rather than handed to the tab, so this start is covered
+        // by the same spinner a new conversation gets.
+        session.runClaude("claude --resume \(Shell.quote(past.id))")
         navigatorTab = .claude
     }
 

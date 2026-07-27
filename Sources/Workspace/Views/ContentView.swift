@@ -6,6 +6,7 @@ import SwiftUI
 struct ContentView: View {
     @Environment(WorkspaceStore.self) private var store
     @Environment(ToolInventory.self) private var tools
+    private var servers: ManagedLanguageServers { .shared }
 
     /// The panes are laid out by hand. `HSplitView` and `.inspector` are both
     /// AppKit-backed, and both pin their columns below the window's title bar
@@ -58,6 +59,24 @@ struct ContentView: View {
                 FileFinderOverlay()
             }
         }
+        // Put once, the first time a repository wants a server this Mac has not
+        // got. Whichever way it is answered, it is not asked again — Settings →
+        // Language Servers is where it is changed after that.
+        .alert(
+            "Install language servers for you?",
+            isPresented: Binding(
+                get: { servers.consentRequest != nil },
+                // Guarded, because pressing Install dismisses the alert too:
+                // without this, the dismissal would arrive after the answer and
+                // turn a yes into a no.
+                set: { if !$0, servers.consentRequest != nil { servers.answerConsent(allow: false) } }
+            )
+        ) {
+            Button("Install") { servers.answerConsent(allow: true) }
+            Button("Not Now", role: .cancel) { servers.answerConsent(allow: false) }
+        } message: {
+            Text(consentMessage)
+        }
         .animation(.easeOut(duration: 0.12), value: store.isSwitchingProjects)
         .animation(.easeOut(duration: 0.1), value: store.isFindingFiles)
         .onWindowKeyEvent(matching: [.keyDown, .flagsChanged]) { event, window in
@@ -73,6 +92,20 @@ struct ContentView: View {
         .sheet(item: $store.gitHubAccountPrompt) { prompt in
             GitHubAccountSheet(prompt: prompt)
         }
+    }
+
+    /// Names what would be installed, so the answer is given about something
+    /// concrete rather than about a policy.
+    private var consentMessage: String {
+        let wanted = servers.consentRequest ?? []
+        let names = wanted.sorted().joined(separator: ", ")
+        return """
+        This repository wants \(names).
+
+        They would be downloaded into the app's own folder in Application \
+        Support. Your Homebrew, your global npm packages and your gems are not \
+        touched, and removing them is one button in Settings.
+        """
     }
 
     // MARK: - Repository switcher (⌃⇥)
