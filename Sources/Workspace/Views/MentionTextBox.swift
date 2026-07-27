@@ -61,8 +61,11 @@ struct MentionToken: Equatable {
 ///
 /// Type `@`, and who can be named on this pull request appears above the box —
 /// faces and handles, ↑ ↓ to walk them, ⏎ or ⇥ to take one, ⎋ to close the list.
-/// What goes into the text is the form the host understands, which on Bitbucket
-/// Cloud is an id rather than a name.
+/// **What goes into the text is the name**, on every host. Bitbucket Cloud
+/// wants an id instead — `@{712020:297e58ad-…}` — but that is put on as the
+/// comment is sent (``BitbucketMarkup/encodingMentions(in:people:)``), not
+/// typed into the box: an id in the middle of a sentence you are still writing
+/// reads as a bug, and says nothing about who you just named.
 ///
 /// AppKit underneath (``ChatInputField``) rather than a `TextEditor`, because a
 /// completion list has to know where the caret is and be offered the arrow keys
@@ -153,7 +156,7 @@ struct MentionTextBox: View {
             .map { person in
                 ChatCompletion(
                     id: "person:" + person.handle,
-                    insert: person.mention(on: mentions.host),
+                    insert: person.mentionDisplay,
                     title: person.name,
                     detail: person.detail ?? "",
                     symbol: "at",

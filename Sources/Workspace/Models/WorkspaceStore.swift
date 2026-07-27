@@ -1223,7 +1223,7 @@ final class WorkspaceStore {
         item.commentError = nil
         do {
             try await PullRequestService.postComment(
-                body,
+                mentioning(body, on: item, pr: pr),
                 on: pr,
                 replyingTo: parent,
                 in: project.url
@@ -1250,7 +1250,7 @@ final class WorkspaceStore {
         item.commentError = nil
         do {
             try await PullRequestService.postInlineComment(
-                body,
+                mentioning(body, on: item, pr: pr),
                 on: pr,
                 at: anchor,
                 in: project.url
@@ -1261,6 +1261,20 @@ final class WorkspaceStore {
             item.commentError = error.localizedDescription
         }
         item.isPostingComment = false
+    }
+
+    /// A comment with its mentions in the form the host wants.
+    ///
+    /// The composer writes the **name**, because that is what the person typing
+    /// needs to see; Bitbucket Cloud notifies nobody unless the raw Markdown
+    /// carries an `@{account_id}`, so the swap happens here, at the one point
+    /// every comment — new, reply, and inline — passes through on its way out.
+    ///
+    /// GitHub is left alone: there the name and the login are the same string,
+    /// and what was typed is already right.
+    private func mentioning(_ body: String, on item: ViewerItem, pr: PullRequest) -> String {
+        guard pr.host == .bitbucket else { return body }
+        return BitbucketMarkup.encodingMentions(in: body, people: item.reviewerCandidates)
     }
 
     /// Where the shells that belong to no repository start.

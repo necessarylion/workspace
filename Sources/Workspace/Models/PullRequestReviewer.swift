@@ -85,6 +85,16 @@ struct ReviewerCandidate: Identifiable, Sendable, Hashable {
 
     var id: String { handle }
 
+    /// How this person is written **in the box you are typing in**: `@` and the
+    /// name, on every host.
+    ///
+    /// It is not always what the host is sent — see ``mention(on:)`` — because
+    /// on Bitbucket Cloud the two are not the same string, and the id is no use
+    /// to the person writing the comment. Picking a name out of a list only to
+    /// watch `@{712020:297e58ad-1233-…}` land in the text reads as a bug, and
+    /// leaves you unable to tell at a glance who you just named.
+    var mentionDisplay: String { "@\(name)" }
+
     /// How this person is written inside a comment for the host to turn into a
     /// real mention — and it is not the same thing as the handle that asks them
     /// to review.
@@ -93,6 +103,10 @@ struct ReviewerCandidate: Identifiable, Sendable, Hashable {
     /// `@{712020:297e58ad-…}`: its raw Markdown never carries a username, which
     /// is the whole reason ``BitbucketMarkup`` exists. Data Center has no ids
     /// and takes the username itself.
+    ///
+    /// This is applied on the way out, by
+    /// ``BitbucketMarkup/encodingMentions(in:people:)``, rather than typed —
+    /// so the box keeps the name and the host still gets the id.
     func mention(on host: GitHostKind) -> String {
         guard host == .bitbucket else { return "@\(handle)" }
         if let accountID, !accountID.isEmpty { return "@{\(accountID)}" }

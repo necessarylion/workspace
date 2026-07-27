@@ -1,7 +1,11 @@
 import Foundation
 
-/// Repairs the Markdown Bitbucket Cloud hands back, using the HTML it hands
-/// back beside it.
+/// Bitbucket Cloud's mentions, in both directions: names for reading, ids for
+/// the host.
+///
+/// **Coming in**, the Markdown is repaired using the HTML handed back beside
+/// it. **Going out**, the name you picked in the composer becomes the id that
+/// actually notifies somebody — see ``encodingMentions(in:people:)``.
 ///
 /// Every comment and description arrives twice: as the Markdown the author
 /// typed (`content.raw`) and as Bitbucket's own rendering of it
@@ -25,6 +29,80 @@ enum BitbucketMarkup {
         }
         return result
     }
+
+    // MARK: - On the way out
+
+    /// The other direction: `@dale` back to the `@{account_id}` Bitbucket Cloud
+    /// needs, for a comment on its way to the host.
+    ///
+    /// The box you write in keeps the name — see
+    /// ``ReviewerCandidate/mentionDisplay`` — so this is where a mention picked
+    /// out of the list becomes the thing that actually notifies somebody.
+    ///
+    /// Only people the host itself offered are translated, so a name that
+    /// merely looks like one is left as written. **Longest name first**: with
+    /// both `ada` and `adam` on the repository, `@adam` must not be read as
+    /// `@ada` with a stray `m` after it. Data Center needs nothing done — there
+    /// the name *is* the username, and no candidate carries an id.
+    static func encodingMentions(
+        in markdown: String,
+        people: [ReviewerCandidate]
+    ) -> String {
+        guard markdown.contains("@") else { return markdown }
+        let named = people
+            .filter { !($0.accountID ?? "").isEmpty && !$0.name.isEmpty }
+            .sorted { $0.name.count > $1.name.count }
+        guard !named.isEmpty else { return markdown }
+
+        var result = markdown
+        for person in named {
+            result = replacingMention(
+                person.mentionDisplay,
+                with: person.mention(on: .bitbucket),
+                in: result
+            )
+        }
+        return result
+    }
+
+    /// Replaces `needle` only where it stands as a mention of its own.
+    ///
+    /// Written out rather than done with a regular expression because the
+    /// needle is somebody's name: a `.` or a `+` in it would be pattern syntax,
+    /// and escaping a name to search for it literally is more code than this.
+    private static func replacingMention(
+        _ needle: String,
+        with replacement: String,
+        in text: String
+    ) -> String {
+        guard text.contains(needle) else { return text }
+
+        var result = ""
+        var index = text.startIndex
+        while let found = text.range(of: needle, range: index..<text.endIndex) {
+            // The `@` has to start a word — which is what keeps an email
+            // address out of it — and the name has to end where it ends,
+            // rather than partway through a longer one.
+            let opensWord = found.lowerBound == text.startIndex
+                || !isNameCharacter(text[text.index(before: found.lowerBound)])
+            let endsWord = found.upperBound == text.endIndex
+                || !isNameCharacter(text[found.upperBound])
+
+            result += text[index..<found.lowerBound]
+            result += opensWord && endsWord ? replacement : needle
+            index = found.upperBound
+        }
+        result += text[index...]
+        return result
+    }
+
+    private static func isNameCharacter(_ character: Character) -> Bool {
+        character.isLetter
+            || character.isNumber
+            || "-_.@".contains(character)
+    }
+
+    // MARK: - On the way in
 
     /// Account id → the text Bitbucket drew for it, `@Dale Chapman`.
     ///
