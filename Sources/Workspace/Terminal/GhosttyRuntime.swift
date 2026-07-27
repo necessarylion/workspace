@@ -209,6 +209,17 @@ final class GhosttyRuntime {
 
         case GHOSTTY_ACTION_RING_BELL:
             Task { @MainActor in NSSound.beep() }
+            onView(surfaceBits) { view in view.onBell?() }
+            return true
+
+        // OSC 9 / OSC 777 — a program asking the desktop to say something.
+        // The strings belong to ghostty and are only valid for the length of
+        // this call, so they are copied here rather than on the way over.
+        case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:
+            let notification = action.action.desktop_notification
+            let title = notification.title.map { String(cString: $0) }
+            let body = notification.body.map { String(cString: $0) } ?? ""
+            onView(surfaceBits) { view in view.onDesktopNotification?(title, body) }
             return true
 
         default:

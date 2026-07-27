@@ -49,7 +49,16 @@ final class WorkspaceStore {
     var projectSearchText = ""
 
     // Navigator (right sidebar)
-    var navigatorTab: NavigatorTab = .files
+    /// Which of the navigator's lists is showing. Kept per repository, next to
+    /// the viewer's own history: reading a file in one repository and a
+    /// terminal in another are two places to be, and switching between them
+    /// should land back where each was left rather than dragging one
+    /// repository's pane onto the other.
+    var navigatorTab: NavigatorTab {
+        get { viewer.navigatorTab }
+        set { viewer.navigatorTab = newValue }
+    }
+
     var fileSearchText = ""
 
     /// What the file search found, kept for the editor: a file opened from a
@@ -96,6 +105,8 @@ final class WorkspaceStore {
         var history: [String] = []
         var index = -1
         var showsDashboard = true
+        /// Which navigator list this repository was left on.
+        var navigatorTab: NavigatorTab = .files
     }
 
     private var viewerStates: [URL: ViewerState] = [:]
@@ -175,6 +186,11 @@ final class WorkspaceStore {
         }
         restoreProjects()
         restoreTerminals()
+        // Clicking a banner has to land on the shell it was about, and the
+        // notifier knows nothing but its id.
+        TerminalNotifier.shared.onOpen = { [weak self] id in
+            self?.revealTerminal(id: id)
+        }
     }
 
     // MARK: - Projects
@@ -1452,9 +1468,11 @@ final class WorkspaceStore {
 
     /// Whether this exact shell is what the viewer is showing.
     func isShowing(_ terminal: OpenTerminal) -> Bool {
-        !showsDashboard
-            && current?.id == terminal.item.id
-            && terminal.item.selectedTerminal?.id == terminal.session.id
+        isShowingTerminal(terminal.session, in: terminal.item)
+    }
+
+    private func isShowingTerminal(_ session: TerminalSession, in item: ViewerItem) -> Bool {
+        !showsDashboard && current?.id == item.id && item.selectedTerminal?.id == session.id
     }
 
     func closeTerminal(_ terminal: OpenTerminal) {
@@ -1546,7 +1564,37 @@ final class WorkspaceStore {
         session.onTitleChange = { [weak self] in
             self?.scheduleTerminalPersist()
         }
+        session.onAttention = { [weak self, weak item, weak session] body in
+            guard let self, let item, let session else { return }
+            announce(session, in: item, saying: body)
+        }
         return session
+    }
+
+    /// Puts a Notification Centre banner up for a shell that wants the user
+    /// back — unless the user is already looking straight at it, which is the
+    /// one case where a banner says nothing the screen does not.
+    private func announce(_ session: TerminalSession, in item: ViewerItem, saying body: String) {
+        guard !(NSApp.isActive && isShowingTerminal(session, in: item)) else { return }
+        TerminalNotifier.shared.notify(
+            title: session.notificationTitle,
+            // The repository the shell belongs to, or "Home" — with several
+            // conversations going the name alone rarely says which is which.
+            subtitle: item.subtitle,
+            body: body,
+            sessionID: session.id
+        )
+    }
+
+    /// Brings a shell back on screen from outside the app — a banner clicked
+    /// while Workspace was behind something else.
+    func revealTerminal(id: UUID) {
+        guard let terminal = openTerminals.first(where: { $0.session.id == id }) else { return }
+        showTerminal(terminal)
+        // The list the tab belongs to, so the rest of them are to hand too.
+        showNavigator(terminal.session.runsClaude ? .claude : .terminals)
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
     }
 
     /// Closes one tab; closing the last tab closes the terminal itself.
@@ -1755,6 +1803,14 @@ final class WorkspaceStore {
     /// started. What the Claude tab lists above the history.
     func runningClaudes(in project: Project) -> [OpenTerminal] {
         terminals(in: .project(project.id)).filter(\.session.runsClaude)
+    }
+
+    /// How many of this repository's conversations are mid-turn, for the badge
+    /// on its card. A turn can run for minutes with the window somewhere else
+    /// entirely, so the sidebar is where "something is still going" belongs —
+    /// the banner only arrives once it is over.
+    func workingClaudeCount(in project: Project) -> Int {
+        runningClaudes(in: project).count { $0.session.isWorking }
     }
 
     private func claudeTerminal(for sessionID: String, in project: Project) -> OpenTerminal? {

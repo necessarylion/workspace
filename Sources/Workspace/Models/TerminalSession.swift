@@ -46,6 +46,23 @@ final class TerminalSession: Identifiable {
     /// The name to put on this tab: the conversation, when there is one.
     var displayTitle: String { claudeName ?? title }
 
+    /// The same name for somewhere outside the terminal — a Notification Centre
+    /// banner — without Claude Code's state mark on the front. In the tab that
+    /// mark is live and says something; on a banner it is one frame of a
+    /// spinner, frozen, in front of the only words that matter.
+    var notificationTitle: String {
+        let name = displayTitle
+        guard let first = name.unicodeScalars.first,
+              (0x2800...0x28FF).contains(first.value) || first == "✳" else { return name }
+        let stripped = String(name.dropFirst()).trimmingCharacters(in: .whitespaces)
+        return stripped.isEmpty ? name : stripped
+    }
+
+    /// Whether the program in this tab is busy right now — for Claude Code,
+    /// whether the conversation is mid-turn. See ``readsAsBusy(_:)`` for how
+    /// that is known, and why the tab title is the only place it can be read.
+    private(set) var isWorking = false
+
     /// Whether `claude` is still being got going in this tab.
     ///
     /// Starting a conversation is a few seconds of machinery: the shell has to
@@ -68,6 +85,12 @@ final class TerminalSession: Identifiable {
     @ObservationIgnored var onExit: (() -> Void)?
     /// Called when the shell renames the tab, so the saved list can keep up.
     @ObservationIgnored var onTitleChange: (() -> Void)?
+    /// Called when the program in this tab wants the user back, with the line
+    /// to say. The store turns it into a Notification Centre banner.
+    @ObservationIgnored var onAttention: ((String) -> Void)?
+    /// When the last one went out, so a program that rings twice in a second
+    /// does not put up two banners.
+    @ObservationIgnored private var lastAttention = Date.distantPast
     @ObservationIgnored let view: GhosttySurfaceView
     private var hasStarted = false
     /// The look for ``claudeName``, while it is still going on.
@@ -83,17 +106,74 @@ final class TerminalSession: Identifiable {
         self.title = title
         self.view = GhosttySurfaceView()
         view.onTitleChange = { [weak self] title in
-            self?.title = title
-            self?.titleChanges += 1
-            self?.onTitleChange?()
+            guard let self else { return }
+            let wasWorking = isWorking
+            self.title = title
+            isWorking = Self.readsAsBusy(title)
+            titleChanges += 1
+            onTitleChange?()
             // `claude` renames the tab as it starts work on a prompt, which is
             // exactly when a conversation that had no transcript may have got
             // one — so a rename is the cue to go looking again.
-            self?.watchForClaudeName()
+            watchForClaudeName()
+            // The spinner going away is the turn ending: whatever was being
+            // waited for is done, and the person who set it going is very
+            // likely somewhere else by now.
+            if wasWorking, !isWorking {
+                raiseAttention("Finished — waiting for you")
+            }
         }
         view.onClose = { [weak self] in
+            self?.isWorking = false
             self?.onExit?()
         }
+        // `claude` rings the bell when it needs an answer — a permission
+        // prompt mid-turn, most of the time, which the title never mentions
+        // because the spinner is still going.
+        view.onBell = { [weak self] in
+            self?.raiseAttention("Waiting for you")
+        }
+        view.onDesktopNotification = { [weak self] title, body in
+            self?.raiseAttention(body.isEmpty ? (title ?? "Waiting for you") : body)
+        }
+    }
+
+    /// Whether a tab title reads as "the program in here is busy".
+    ///
+    /// There is no other way to know. The app drives a real terminal, so the
+    /// only thing that crosses back from `claude` is what it paints and what it
+    /// names the tab — and it names the tab with a **state mark in front of the
+    /// task**, which is exactly the state we want:
+    ///
+    /// ```
+    /// ✳ Claude Code           idle, at the prompt
+    /// ⠂ Claude Code           a turn is running
+    /// ⠐ Say the word done     …still running, and now it knows the task
+    /// ✳ Say the word done     the turn is over
+    /// ```
+    ///
+    /// So a turn is running exactly while the first character is a braille
+    /// spinner frame, and `✳` coming back is the turn ending. A shell that
+    /// renames itself after the command it is running matches neither, which is
+    /// what keeps this to the tabs it is meant for.
+    static func readsAsBusy(_ title: String) -> Bool {
+        guard let first = title.drop(while: \.isWhitespace).unicodeScalars.first else {
+            return false
+        }
+        // The Braille Patterns block — every frame of the spinner is one of
+        // these, and nothing else Claude Code puts there is.
+        return (0x2800...0x28FF).contains(first.value)
+    }
+
+    /// Asks for a banner, unless something says now is not the moment.
+    private func raiseAttention(_ body: String) {
+        // A tab still coming up is not asking for anything: `claude` renames
+        // the tab as it starts, and the cover is still over it either way.
+        guard hasStarted, !isStartingClaude else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastAttention) > 3 else { return }
+        lastAttention = now
+        onAttention?(body)
     }
 
     /// Starts the shell (ghostty runs the user's configured shell itself),
@@ -104,6 +184,10 @@ final class TerminalSession: Identifiable {
     func startIfNeeded(runningCommand command: String? = nil, autoRun: Bool = true) {
         guard !hasStarted else { return }
         hasStarted = true
+        // The first shell is where the system's permission dialog comes from:
+        // right after something the user did, and never for someone who only
+        // ever reads pull requests.
+        TerminalNotifier.shared.prepare()
         view.start(directory: directory, initialInput: nil)
 
         guard let command else { return }
@@ -201,6 +285,7 @@ final class TerminalSession: Identifiable {
     }
 
     func terminate() {
+        isWorking = false
         nameWatch?.cancel()
         nameWatch = nil
         claudeStartupWatch?.cancel()

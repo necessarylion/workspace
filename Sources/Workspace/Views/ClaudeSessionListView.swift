@@ -249,6 +249,12 @@ private struct LiveClaudeRow: View {
                 if terminal.session.isStartingClaude {
                     ProgressView().controlSize(.mini).scaleEffect(0.7).frame(width: 9, height: 9)
                     Text("starting…")
+                } else if terminal.session.isWorking {
+                    // The same thing the repository's card is badged with, said
+                    // in a line: which of several conversations is the one
+                    // still going.
+                    ProgressView().controlSize(.mini).scaleEffect(0.7).frame(width: 9, height: 9)
+                    Text(isOnScreen ? "working — on screen" : "working…")
                 } else {
                     Image(systemName: "terminal")
                     Text(isOnScreen ? "on screen" : "running")
