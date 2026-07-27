@@ -65,7 +65,13 @@ final class AppearanceSettings {
         /// A diff is denser than a file on purpose: two columns have to fit.
         static let diffSize: Double = 10
         static let terminalSize: Double = 13
-        static let lineHeight: Double = 1.0
+        /// A little air, now the editor is CodeEditSourceEditor. The old 1.0 was
+        /// the font's own leading and nothing added, chosen when the pane was
+        /// shared three ways and every point went to code. The package's own
+        /// default is 1.2 and CodeEdit ships that; this sits between the two —
+        /// enough to stop lines running together, not enough to cost a line of
+        /// what fits on screen.
+        static let lineHeight: Double = 1.1
     }
 
     static let sizeRange: ClosedRange<Double> = 8...28
@@ -183,7 +189,10 @@ final class AppearanceSettings {
     /// so a family also counts when a narrow and a wide letter measure the
     /// same. Symbol fonts are dropped, since those measure equal too.
     static let availableFaces: [String] = {
-        NSFontManager.shared.availableFontFamilies
+        // Belt and braces — the app registers this at launch, but this list is
+        // built on first use and that could come first.
+        SFMonoFont.register()
+        return NSFontManager.shared.availableFontFamilies
             .filter { !$0.hasPrefix(".") && isMonospaced($0) }
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }()

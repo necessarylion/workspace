@@ -2,6 +2,12 @@ import SwiftUI
 
 @main
 struct WorkspaceApp: App {
+    init() {
+        // Before anything asks for a font: the list of installed faces is built
+        // once and cached, and SF Mono has to be registered to be in it.
+        SFMonoFont.register()
+    }
+
     @State private var store = WorkspaceStore()
     /// Which external CLIs are installed and logged in. One instance for the
     /// whole app, so a sign-in done in Settings is what every window sees.
