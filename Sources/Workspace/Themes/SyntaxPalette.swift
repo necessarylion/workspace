@@ -21,6 +21,12 @@ struct SyntaxPalette: Equatable {
     var lineNumber: NSColor
     var currentLine: NSColor
     var indentGuide: NSColor
+    /// The selection band, and the caret. Both optional because they were added
+    /// for ``SyntaxPalette/codeEdit``, which is ported from a theme format that
+    /// names them; the palettes imported from VS Code do not, and fall back to
+    /// something derived from the foreground — see ``SyntaxTheme/editorTheme``.
+    var selection: NSColor?
+    var insertionPoint: NSColor?
     var styles: [String: SyntaxStyle]
 
     /// Captures are matched longest-first: `keyword.return` falls back to

@@ -131,17 +131,39 @@ final class AppearanceSettings {
         Self.swiftUIFont(named: name, size: size)
     }
 
-    /// The face itself, falling back to the system monospaced one whenever the
-    /// name is missing — a font can be uninstalled after it was chosen.
+    /// The face itself, falling back to SF Mono whenever the name is missing —
+    /// a font can be uninstalled after it was chosen.
     static func font(named name: String?, size: Double) -> NSFont {
         guard let name, let font = NSFont(name: name, size: size) else {
-            return .monospacedSystemFont(ofSize: size, weight: .regular)
+            return sfMono(size: size)
         }
         return font
     }
 
+    /// SF Mono, which is what Xcode sets code in.
+    ///
+    /// Asked for by name first, because a Mac that has it registered — Apple
+    /// gives it away with the developer fonts, and some people install it — then
+    /// uses the real thing. Most Macs do not: Apple ships SF Mono privately
+    /// inside Terminal and Xcode, so it is absent from `availableFontFamilies`
+    /// and `NSFont(name:)` cannot see it.
+    ///
+    /// `monospacedSystemFont` is the way in either way. It answers
+    /// `.AppleSystemUIFontMonospaced`, whose display name is `.SF NS Mono` — the
+    /// same face under the name Apple keeps for itself. So the fallback is not a
+    /// substitute for SF Mono; it *is* SF Mono.
+    static func sfMono(size: Double) -> NSFont {
+        NSFont(name: "SF Mono", size: size)
+            ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
     private static func swiftUIFont(named name: String?, size: Double) -> Font {
         guard let name, NSFont(name: name, size: size) != nil else {
+            // Matches `sfMono(size:)`: the named face when this Mac has it,
+            // otherwise the system monospaced design, which is the same face.
+            if NSFont(name: "SF Mono", size: size) != nil {
+                return .custom("SF Mono", fixedSize: size)
+            }
             return .system(size: size, design: .monospaced)
         }
         return .custom(name, fixedSize: size)
@@ -149,8 +171,10 @@ final class AppearanceSettings {
 
     // MARK: - The faces on offer
 
-    /// The name shown for "no face chosen".
-    static let systemFaceTitle = "System Monospaced"
+    /// The name shown for "no face chosen". Names SF Mono rather than "System
+    /// Monospaced", because that is the face it resolves to and Xcode's own —
+    /// the old label made the default look like a nondescript fallback.
+    static let systemFaceTitle = "SF Mono (system)"
 
     /// Every monospaced family installed on this Mac, sorted by name.
     ///

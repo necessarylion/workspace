@@ -23,7 +23,7 @@ enum EscapeKey {
     /// most of the app: there ⎋ closes what is open, the same as the ✕ in the
     /// header row.
     ///
-    /// Three things keep ⎋ instead.
+    /// Two things keep ⎋ instead.
     ///
     /// A **focused terminal**, because ⎋ is a key the program in it reads. It
     /// is `claude` that makes this matter: ⎋ interrupts a turn, clears the line
@@ -32,11 +32,9 @@ enum EscapeKey {
     /// already offer. It only applies while the shell actually has the
     /// keyboard: click the navigator beside it and ⎋ is the app's again.
     ///
-    /// A **completion list** in the editor: dismissing it is the only way out
-    /// of a suggestion you did not want, and closing the file instead would be
-    /// a poor trade too. And a **box you are writing in** — a comment, a reply,
-    /// a commit message, a search field — where ⎋ cancels what was typed, which
-    /// is what every other Mac app does with it.
+    /// And a **box you are writing in** — a comment, a reply, a commit message,
+    /// a search field, the editor's own find panel — where ⎋ cancels what was
+    /// typed, which is what every other Mac app does with it.
     ///
     /// Selectable-but-not-editable text is why this asks what a text view is
     /// for rather than what class it is: a diff line, a commit message and a
@@ -45,7 +43,6 @@ enum EscapeKey {
     static func leavesEscapeAlone(_ responder: NSResponder?) -> Bool {
         switch responder {
         case is GhosttySurfaceView: false
-        case let code as CodeTextView: !code.isShowingCompletions
         case let text as NSTextView: !text.isEditable
         case is NSText: false
         default: true

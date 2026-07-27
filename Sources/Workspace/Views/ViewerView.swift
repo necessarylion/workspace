@@ -24,9 +24,6 @@ struct ViewerView: View {
             when: store.current != nil
                 && !store.showsDashboard
                 && !store.isSwitchingProjects
-                // While the find bar is up, ⎋ is its own — closing the file out
-                // from under a search is never what was meant by it.
-                && !store.editorFind.isShowing
         ) {
             store.closeCurrent()
         }
@@ -313,14 +310,6 @@ struct ViewerView: View {
         }
     }
 
-    /// What the find bar is looking for, or nil when it is closed or empty —
-    /// in which case whatever the file search marked stays marked.
-    private var findQuery: String? {
-        guard store.editorFind.isShowing else { return nil }
-        let query = store.editorFind.query
-        return query.isEmpty ? nil : query
-    }
-
     @ViewBuilder
     private func fileContent(_ item: ViewerItem) -> some View {
         if let document = item.document {
@@ -331,55 +320,15 @@ struct ViewerView: View {
                 } else if document.isDrawio && store.drawioPreview {
                     DrawioPreview(xml: document.text)
                 } else {
+                    // ⌘F, the find bar, and marking every occurrence of the file
+                    // search's query are all the editor's own now — the package
+                    // ships a find and replace panel, so the app no longer puts
+                    // a bar of its own over the text or hands it a query.
                     CodeEditorView(
                         document: document,
-                        projectRoot: store.project(containing: document.url)?.url,
                         wrapsLines: store.wrapsLines,
-                        theme: AppearanceSettings.shared.editorTheme,
-                        takesFocusOnAppear: store.editorTakesFocus,
-                        // Worked out here rather than inside the representable,
-                        // and that is the whole point: reading the query from
-                        // *this* body is what makes SwiftUI re-run it on every
-                        // keystroke, and only then does the editor hear about
-                        // the letter that was typed. Left to the bar's own body,
-                        // the bar redrew and the text below it never moved.
-                        searchHighlight: findQuery ?? store.searchHighlight,
-                        find: store.editorFind,
-                        onOpenLocation: { url, line in
-                            store.openFile(url, revealLine: line)
-                        }
+                        theme: AppearanceSettings.shared.editorTheme
                     )
-                    .overlay(alignment: .topTrailing) {
-                        if store.editorFind.isShowing {
-                            EditorFindBar(find: store.editorFind)
-                        }
-                    }
-                    // Only while a file is on screen, so ⌘F belongs to nothing
-                    // else. A monitor rather than a `keyboardShortcut`: the
-                    // editor answers `keyDown` itself, and a shortcut owned by a
-                    // view never reaches it — see `onWindowKeyEvent`.
-                    .onWindowKeyEvent { event, _ in
-                        if event.modifierFlags.contains(.command),
-                           event.charactersIgnoringModifiers?.lowercased() == "f" {
-                            // Not on a large file: marking every hit means an
-                            // attribute run per match over the whole buffer,
-                            // which is exactly the work this mode exists to
-                            // avoid. The text view keeps its own find bar.
-                            guard !document.isLargeFile else { return false }
-                            store.editorFind.open()
-                            return true
-                        }
-                        // ⎋ closes the bar before it closes the file. The bar's
-                        // box keeps its own ⎋ while it has the keyboard, which
-                        // is what `EscapeKey` already arranges for a text field.
-                        if event.isEscape, store.editorFind.isShowing {
-                            store.editorFind.close()
-                            return true
-                        }
-                        return false
-                    }
-                    // A different file is a different search.
-                    .onChange(of: document.url) { store.editorFind.close() }
                 }
             case .image:
                 imagePreview(document.url)

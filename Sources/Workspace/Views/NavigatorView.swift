@@ -153,7 +153,7 @@ struct FileListView: View {
         if node.isDirectory {
             node.isExpanded.toggle()
         } else {
-            store.openFile(node.url, takingFocus: false)
+            store.openFile(node.url)
         }
     }
 
@@ -170,9 +170,6 @@ struct FileListView: View {
         guard !query.isEmpty else {
             searchResults = []
             isSearching = false
-            // Nothing is being looked for any more, so nothing stays marked in
-            // whatever file is open.
-            store.searchHighlight = nil
             return
         }
         isSearching = true
@@ -200,11 +197,8 @@ struct FileListView: View {
     private func openMatch(_ file: FileSearchFileResult, line: Int?) {
         keyboardClaims += 1
         store.renamingFile = nil
-        // The editor marks every occurrence, so the file reads as a set of hits
-        // rather than the single line that happened to be clicked.
-        store.searchHighlight = query
         store.selectFile(file.url, modifiers: [], visible: rowURLs)
-        store.openFile(file.url, revealLine: line.map { max($0 - 1, 0) }, takingFocus: false)
+        store.openFile(file.url, revealLine: line.map { max($0 - 1, 0) })
     }
 
     /// ⏎ renames, ⌘⌫ trashes, ↑↓ walk the rows and ⇧↑↓ extend the selection —
