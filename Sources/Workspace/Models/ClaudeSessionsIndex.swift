@@ -96,16 +96,27 @@ enum ClaudeSessionsIndex {
             guard let entry = JSONValue.parse(String(line)),
                   entry["type"]?.stringValue == "user",
                   entry["isSidechain"]?.boolValue != true,
-                  let blocks = entry["message"]?["content"]?.arrayValue else { continue }
+                  let content = entry["message"]?["content"] else { continue }
 
-            for block in blocks {
-                guard block["type"]?.stringValue == "text",
-                      let prompt = block["text"]?.stringValue else { continue }
+            for prompt in prompts(in: content) {
                 guard let headline = headline(of: prompt) else { continue }
                 return headline
             }
         }
         return nil
+    }
+
+    /// The text a user entry carries. The CLI writes a typed prompt **either**
+    /// way: as a plain string, which is what it does now, or as the blocks a
+    /// message is made of, which is what it did and still does whenever the
+    /// prompt is more than text — an image, a tool result. Reading only the
+    /// blocks left every conversation started by a recent CLI untitled.
+    private static func prompts(in content: JSONValue) -> [String] {
+        if let text = content.stringValue { return [text] }
+        guard let blocks = content.arrayValue else { return [] }
+        return blocks.compactMap { block in
+            block["type"]?.stringValue == "text" ? block["text"]?.stringValue : nil
+        }
     }
 
     /// A prompt as one line. The CLI puts its own bookkeeping through the same
