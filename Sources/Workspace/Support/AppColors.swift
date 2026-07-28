@@ -12,10 +12,15 @@ enum AppColors {
     /// The terminal is the same surface as everything else the centre pane
     /// shows, not a darker panel inside it: a shell opens in the same place a
     /// file does, and two shades made that one swap look like two panes.
-    static let terminalBackground = NSColor(rgb: viewerHex)
-
-    /// The same value in the form ghostty's config file wants.
-    static let terminalBackgroundHex = "282828"
+    ///
+    /// So it is **the theme's own background**, the one the editor draws on,
+    /// and the app's shade only where a theme names none. What SwiftUI draws
+    /// around the surface; ghostty is told the same colour by
+    /// ``TerminalPalette``.
+    @MainActor
+    static var terminalBackground: NSColor {
+        TerminalPalette.background(for: AppearanceSettings.shared.palette)
+    }
 }
 
 extension NSColor {

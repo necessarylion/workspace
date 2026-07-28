@@ -47,7 +47,15 @@ final class Project: Identifiable {
 
     var pullRequests: [PullRequest] = []
     var pullRequestError: String?
+    /// Whether a spinner should be up for the read that is running. **Not the
+    /// same as one running**: a read nobody asked for — the five-minute sweep
+    /// of the sidebar — leaves this alone, so the cards stay still. See
+    /// ``isReadingPullRequests`` for the one that answers "is a call in the
+    /// air", which is what stops two of them overlapping.
     var isLoadingPullRequests = false
+
+    /// Whether the host is being asked right now, spinner or no spinner.
+    @ObservationIgnored private var isReadingPullRequests = false
 
     /// When the host was last asked for the pull requests. `nil` until the first
     /// read, which is what makes a repository restored from the last launch fill
@@ -110,7 +118,12 @@ final class Project: Identifiable {
     }
 
     /// Loads remote, git status, head commit and pull requests.
-    func refresh(loadPullRequests: Bool = true) async {
+    ///
+    /// `quietly` is the read nobody asked for: everything lands the same way,
+    /// but no spinner goes up while it is happening. What is on screen was
+    /// right a moment ago and is about to be right again — a card that starts
+    /// twitching on a clock only reads as something going wrong.
+    func refresh(loadPullRequests: Bool = true, quietly: Bool = false) async {
         async let remoteTask = RemoteInfo.load(for: url)
         async let statusTask = GitStatus.load(for: url)
         async let commitTask = RepositoryCommit.load(in: url, limit: commitLimit)
@@ -120,7 +133,7 @@ final class Project: Identifiable {
         startWatchingGitIfNeeded()
 
         if loadPullRequests {
-            await refreshPullRequests()
+            await refreshPullRequests(quietly: quietly)
         }
     }
 
@@ -153,7 +166,7 @@ final class Project: Identifiable {
     private func refreshPullRequestsIfStale() async {
         // A read already running counts as the fresh one: the stamp is only put
         // down when it lands, so without this a slow host would be asked twice.
-        guard !isLoadingPullRequests else { return }
+        guard !isReadingPullRequests else { return }
         if let last = lastPullRequestRead,
            Date().timeIntervalSince(last) < Self.pullRequestRefreshInterval {
             return
@@ -244,7 +257,12 @@ final class Project: Identifiable {
         )
     }
 
-    func refreshPullRequests() async {
+    func refreshPullRequests(quietly: Bool = false) async {
+        // A sweep on a clock gives way to the read already running; a read the
+        // user asked for is the one that is allowed to double up, since it is
+        // answering a button that was just pressed.
+        guard !quietly || !isReadingPullRequests else { return }
+
         guard let remote, remote.kind != .unknown else {
             pullRequests = []
             pullRequestError = gitStatus == nil
@@ -254,9 +272,11 @@ final class Project: Identifiable {
             return
         }
 
-        isLoadingPullRequests = true
+        isReadingPullRequests = true
+        if !quietly { isLoadingPullRequests = true }
         pullRequestError = nil
         defer {
+            isReadingPullRequests = false
             isLoadingPullRequests = false
             lastPullRequestRead = Date()
         }

@@ -355,6 +355,7 @@ struct FileListView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer()
+                newItemMenu
                 Button {
                     store.showsIgnoredFiles.toggle()
                 } label: {
@@ -381,6 +382,39 @@ struct FileListView: View {
             .padding(.vertical, 6)
             .background(.bar)
         }
+    }
+
+    /// **+** in the footer: an empty file or folder, made in the folder that is
+    /// picked in the tree — or in the repository itself when nothing is. What it
+    /// makes arrives **with its name being edited**, so the name is typed on the
+    /// row rather than into a sheet, and ⎋ there leaves an "untitled" behind
+    /// rather than half a file.
+    private var newItemMenu: some View {
+        Menu {
+            Button {
+                store.createItem(.file, in: project)
+            } label: {
+                Label("New File", systemImage: "doc")
+            }
+            Button {
+                store.createItem(.folder, in: project)
+            } label: {
+                Label("New Folder", systemImage: "folder")
+            }
+        } label: {
+            Image(systemName: "plus")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("New file or folder in \(newItemFolderName)")
+        .pointerCursor()
+    }
+
+    /// What the **+** would put a new row into, for its tooltip.
+    private var newItemFolderName: String {
+        let folder = store.newItemFolder(in: project)
+        return folder == project.url ? project.name : folder.lastPathComponent
     }
 }
 
@@ -1403,8 +1437,8 @@ struct TerminalCard: View {
     /// named the same once their prompts have renamed them.
     let position: Int
     let isSelected: Bool
-    /// False for a tab brought back from the last run of the app, whose shell
-    /// starts the moment it is shown.
+    /// False for a tab whose shell has not been spawned yet — it starts the
+    /// moment the tab is shown.
     let isRunning: Bool
     let close: () -> Void
 

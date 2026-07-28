@@ -1,12 +1,13 @@
 import AppKit
 import Foundation
 
-/// Everything the Files tab does to the disk: dropping files into a folder,
-/// renaming one, and deleting one. Pure filesystem work with no UI and no state,
-/// so it can run off the main actor — a dropped folder can be large.
+/// Everything the Files tab does to the disk: making a file or a folder,
+/// dropping files into a folder, renaming one, and deleting one. Pure
+/// filesystem work with no UI and no state, so it can run off the main actor —
+/// a dropped folder can be large.
 ///
-/// `WorkspaceStore.importFiles`, `renameFile` and `deleteFiles` are the callers;
-/// they refresh the tree and put the outcome in the status bar.
+/// `WorkspaceStore.createItem`, `importFiles`, `renameFile` and `deleteFiles`
+/// are the callers; they refresh the tree and put the outcome in the status bar.
 enum FileOperations {
     /// A drag from outside the repository copies, a drag from inside it moves —
     /// the same rule Finder uses between and within a volume, and the one that
@@ -61,6 +62,44 @@ enum FileOperations {
             } catch {
                 result.errors.append("\(source.lastPathComponent): \(error.localizedDescription)")
             }
+        }
+        return result
+    }
+
+    /// What the Files tab's **+** makes.
+    enum NewItem: Sendable {
+        case file, folder
+
+        /// The name it is born with. Nothing is asked for up front — the row
+        /// arrives with its name already being edited, the way Finder's New
+        /// Folder does, so the name is typed once rather than into a sheet and
+        /// then again if it was wrong.
+        var placeholderName: String { self == .file ? "untitled" : "untitled folder" }
+        var title: String { self == .file ? "File" : "Folder" }
+    }
+
+    /// Makes an empty file or folder inside `folder`. The name is numbered past
+    /// anything already called that ("untitled 2"), so pressing **+** twice
+    /// gives two rows rather than an error.
+    static func create(_ kind: NewItem, in folder: URL) -> Result {
+        var result = Result()
+        let destination = uniqueURL(for: kind.placeholderName, in: folder)
+        do {
+            switch kind {
+            case .file:
+                // `createFile` reports a plain false rather than throwing, so it
+                // is turned into the same error the folder case produces.
+                guard FileManager.default.createFile(atPath: destination.path, contents: Data())
+                else { throw CocoaError(.fileWriteUnknown) }
+            case .folder:
+                try FileManager.default.createDirectory(
+                    at: destination,
+                    withIntermediateDirectories: false
+                )
+            }
+            result.finished.append(destination)
+        } catch {
+            result.errors.append("\(destination.lastPathComponent): \(error.localizedDescription)")
         }
         return result
     }

@@ -21,9 +21,6 @@ final class TerminalSession: Identifiable {
     /// conversation left working in the background is one click away. The
     /// Terminals list leaves exactly these out in return, so a shell belongs to
     /// one list or the other and never to both.
-    ///
-    /// Not saved with the tab: a restored tab has no process behind it yet, and
-    /// listing it as a running conversation would be a lie.
     var runsClaude = false
 
     /// Which conversation on disk this tab is running. What stops a second
@@ -87,8 +84,6 @@ final class TerminalSession: Identifiable {
 
     /// Called when the shell exits or ghostty asks to close the surface.
     @ObservationIgnored var onExit: (() -> Void)?
-    /// Called when the shell renames the tab, so the saved list can keep up.
-    @ObservationIgnored var onTitleChange: (() -> Void)?
     /// Called when the program in this tab wants the user back, with the line
     /// to say. The store turns it into a Notification Centre banner.
     @ObservationIgnored var onAttention: ((String) -> Void)?
@@ -100,9 +95,8 @@ final class TerminalSession: Identifiable {
     /// The look for ``claudeName``, while it is still going on.
     @ObservationIgnored private var nameWatch: Task<Void, Never>?
 
-    /// Whether the shell behind this tab exists yet. A tab restored from the
-    /// last run of the app is listed straight away but only starts its shell
-    /// when it is first shown.
+    /// Whether the shell behind this tab exists yet: a tab can be listed before
+    /// anything is spawned, and only starts its shell when it is first shown.
     var isRunning: Bool { hasStarted }
 
     init(directory: URL, title: String) {
@@ -115,7 +109,6 @@ final class TerminalSession: Identifiable {
             self.title = title
             isWorking = Self.readsAsBusy(title)
             titleChanges += 1
-            onTitleChange?()
             // `claude` renames the tab as it starts work on a prompt, which is
             // exactly when a conversation that had no transcript may have got
             // one — so a rename is the cue to go looking again.
