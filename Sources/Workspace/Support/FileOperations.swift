@@ -1,12 +1,13 @@
 import AppKit
 import Foundation
 
-/// Everything the Files tab does to the disk: dropping files into a folder,
-/// renaming one, and deleting one. Pure filesystem work with no UI and no state,
-/// so it can run off the main actor — a dropped folder can be large.
+/// Everything the Files tab does to the disk: making a file or a folder,
+/// dropping files into a folder, renaming one, and deleting one. Pure
+/// filesystem work with no UI and no state, so it can run off the main actor —
+/// a dropped folder can be large.
 ///
-/// `WorkspaceStore.importFiles`, `renameFile` and `deleteFiles` are the callers;
-/// they refresh the tree and put the outcome in the status bar.
+/// `WorkspaceStore.createItem`, `importFiles`, `renameFile` and `deleteFiles`
+/// are the callers; they refresh the tree and put the outcome in the status bar.
 enum FileOperations {
     /// A drag from outside the repository copies, a drag from inside it moves —
     /// the same rule Finder uses between and within a volume, and the one that
@@ -62,6 +63,57 @@ enum FileOperations {
                 result.errors.append("\(source.lastPathComponent): \(error.localizedDescription)")
             }
         }
+        return result
+    }
+
+    /// What the Files tab's **+** makes.
+    enum NewItem: Sendable {
+        case file, folder
+
+        /// The name it is born with. Nothing is asked for up front — the row
+        /// arrives with its name already being edited, the way Finder's New
+        /// Folder does, so the name is typed once rather than into a sheet and
+        /// then again if it was wrong.
+        var placeholderName: String { self == .file ? "untitled" : "untitled folder" }
+        var title: String { self == .file ? "File" : "Folder" }
+    }
+
+    /// Makes an empty file or folder inside `folder`. The name is numbered past
+    /// anything already called that ("untitled 2"), so pressing **+** twice
+    /// gives two rows rather than an error.
+    ///
+    /// Twice *quickly* is why the name is chosen in a loop. `uniqueURL` only
+    /// asks whether a name is free; the create is what takes it, and between
+    /// the two another one can take it first. Then the name is chosen again
+    /// rather than the second press failing — which is the behaviour the line
+    /// above promises. `Data.write(options: .withoutOverwriting)` rather than
+    /// `createFile(atPath:contents:)` for the same reason: the latter writes
+    /// straight through a file that is already there, and a lost file is worse
+    /// than a lost name.
+    static func create(_ kind: NewItem, in folder: URL) -> Result {
+        var result = Result()
+        for _ in 0..<8 {
+            let destination = uniqueURL(for: kind.placeholderName, in: folder)
+            do {
+                switch kind {
+                case .file:
+                    try Data().write(to: destination, options: .withoutOverwriting)
+                case .folder:
+                    try FileManager.default.createDirectory(
+                        at: destination,
+                        withIntermediateDirectories: false
+                    )
+                }
+                result.finished.append(destination)
+                return result
+            } catch let error as CocoaError where error.code == .fileWriteFileExists {
+                continue
+            } catch {
+                result.errors.append("\(destination.lastPathComponent): \(error.localizedDescription)")
+                return result
+            }
+        }
+        result.errors.append("\(kind.placeholderName): the name was taken every time")
         return result
     }
 

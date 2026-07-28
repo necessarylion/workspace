@@ -160,11 +160,11 @@ final class WorkspaceStore {
     private let projectsDefaultsKey = "workspace.projects"
     private let pinnedProjectsDefaultsKey = "workspace.pinnedProjects"
     private let gitHubAccountsDefaultsKey = "workspace.githubAccounts"
-    private let terminalsDefaultsKey = "workspace.terminals"
     private let pastClaudeConversationsDefaultsKey = "workspace.showsPastClaudeConversations"
+    /// The tab list older versions of the app saved. Only cleared now — see
+    /// `Saved terminals` below for why nothing comes back any more.
+    private let legacyTerminalsDefaultsKey = "workspace.terminals"
     private let historyLimit = 40
-    /// Pending write of the terminal list, see `scheduleTerminalPersist`.
-    @ObservationIgnored private var terminalPersistTask: Task<Void, Never>?
 
     init() {
         // Read before the setter can write it back: an absent key means nobody
@@ -174,8 +174,8 @@ final class WorkspaceStore {
                 forKey: pastClaudeConversationsDefaultsKey
             )
         }
+        UserDefaults.standard.removeObject(forKey: legacyTerminalsDefaultsKey)
         restoreProjects()
-        restoreTerminals()
         // Clicking a banner has to land on the shell it was about, and the
         // notifier knows nothing but its id.
         TerminalNotifier.shared.onOpen = { [weak self] id in
@@ -220,7 +220,6 @@ final class WorkspaceStore {
             item.terminals.forEach { $0.terminate() }
             items[key] = nil
         }
-        persistTerminals()
         for (key, item) in items {
             guard case .file(let url) = item.kind,
                   url.path.hasPrefix(project.url.path + "/") else { continue }
@@ -379,9 +378,62 @@ final class WorkspaceStore {
             .max { $0.url.path.count < $1.url.path.count }
     }
 
-    func refreshAll() {
+    /// Reads every repository again. `quietly` is the sweep on a clock: the same
+    /// reads, with no spinner put up for them — see `Project.refresh`.
+    func refreshAll(quietly: Bool = false) {
+        lastAutoRefresh = Date()
         for project in projects {
-            Task { await project.refresh() }
+            Task { await project.refresh(quietly: quietly) }
+        }
+    }
+
+    // MARK: - Refreshing on a clock
+
+    /// How often every repository in the sidebar is read again — the branch it
+    /// is on, how many files have changed, how many pull requests are open.
+    private static let autoRefreshInterval: TimeInterval = 5 * 60
+
+    /// Live for as long as the window is; see ``startAutomaticRefresh``.
+    @ObservationIgnored private var autoRefreshTask: Task<Void, Never>?
+    /// When the last sweep went out, by the clock rather than by the loop: a
+    /// tick skipped while the app was in the background must not push the next
+    /// one five minutes further away.
+    @ObservationIgnored private var lastAutoRefresh = Date()
+    /// Set by a due tick that found the app behind something else, so the sweep
+    /// it owed goes out on the first tick after the app is in front again.
+    @ObservationIgnored private var missedAutoRefresh = false
+
+    /// The five-minute sweep of the sidebar. Called once, from the window's
+    /// `task` — starting it from `init` would put a `gh` call per repository on
+    /// the launch, and would run in the throwaway store SwiftUI can build.
+    ///
+    /// **Only while the app is in front.** A pull request read costs a call to
+    /// GitHub or Bitbucket per repository, and a workspace left open for a week
+    /// behind a browser would spend a few thousand of them on a sidebar nobody
+    /// is looking at. What matters is that the numbers are right when the user
+    /// comes back, so a tick that fell due in the background is remembered and
+    /// paid on the first tick after the app is in front — however long it was
+    /// away, that is one sweep rather than one per five minutes missed.
+    func startAutomaticRefresh() {
+        guard autoRefreshTask == nil else { return }
+
+        autoRefreshTask = Task { [weak self] in
+            // The loop runs a minute at a time and decides by the clock, so a
+            // sweep the user asked for by hand pushes the next one out too.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard !Task.isCancelled, let self else { return }
+                let due = Date().timeIntervalSince(lastAutoRefresh) >= Self.autoRefreshInterval
+                guard due || missedAutoRefresh else { continue }
+                guard NSApp.isActive else {
+                    missedAutoRefresh = true
+                    continue
+                }
+                missedAutoRefresh = false
+                // Quietly: nobody asked for this one, so nothing on screen
+                // should start spinning to announce it.
+                refreshAll(quietly: true)
+            }
         }
     }
 
@@ -1493,14 +1545,11 @@ final class WorkspaceStore {
         present(terminal.item)
     }
 
-    /// Makes a tab the visible one and marks it as the newest in the list. This
-    /// is also where a tab restored from the last run of the app gets its shell:
-    /// they are listed on launch but nothing is spawned until one is looked at.
+    /// Makes a tab the visible one and marks it as the newest in the list.
     func selectTerminal(_ session: TerminalSession, in item: ViewerItem) {
         item.selectedTerminalID = session.id
         session.lastUsedAt = Date()
         session.startIfNeeded()
-        persistTerminals()
     }
 
     /// Whether this exact shell is what the viewer is showing.
@@ -1581,11 +1630,9 @@ final class WorkspaceStore {
         // new one is registered here rather than waiting to be presented.
         items[item.id] = item
         session.startIfNeeded(runningCommand: command)
-        persistTerminals()
     }
 
-    /// A tab wired into the store: it removes itself when its shell exits, and
-    /// keeps the saved list in step with the name the shell gives itself.
+    /// A tab wired into the store: it removes itself when its shell exits.
     private func makeSession(
         directory: URL,
         title: String,
@@ -1597,9 +1644,6 @@ final class WorkspaceStore {
         session.onExit = { [weak self, weak item, weak session] in
             guard let self, let item, let session else { return }
             self.closeTerminalTab(session, in: item)
-        }
-        session.onTitleChange = { [weak self] in
-            self?.scheduleTerminalPersist()
         }
         session.onAttention = { [weak self, weak item, weak session] body in
             guard let self, let item, let session else { return }
@@ -1643,7 +1687,6 @@ final class WorkspaceStore {
             let neighbour = min(index, item.terminals.count - 1)
             item.selectedTerminalID = neighbour >= 0 ? item.terminals[neighbour].id : nil
         }
-        persistTerminals()
 
         guard item.terminals.isEmpty else { return }
         items[item.id] = nil
@@ -1652,82 +1695,16 @@ final class WorkspaceStore {
     }
 
     // MARK: - Saved terminals
-
-    /// One shell tab as it is written to disk. The shell itself cannot be saved,
-    /// so what comes back is a tab in the same folder, with the same name,
-    /// waiting to be shown.
-    private struct StoredTerminal: Codable {
-        /// The repository it belongs to; `nil` is the window-wide terminal.
-        var projectPath: String?
-        var directory: String
-        var title: String
-        var lastUsedAt: Date
-        var isSelected: Bool
-    }
-
-    /// Titles arrive from the shell — a prompt can rename a tab on every
-    /// command — so those are collected up rather than written straight away.
-    private func scheduleTerminalPersist() {
-        terminalPersistTask?.cancel()
-        terminalPersistTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled else { return }
-            self?.persistTerminals()
-        }
-    }
-
-    private func persistTerminals() {
-        let stored: [StoredTerminal] = items.values.flatMap { item -> [StoredTerminal] in
-            guard case .terminal(let projectID) = item.kind else { return [] }
-            return item.terminals.map { session in
-                StoredTerminal(
-                    projectPath: projectID?.path,
-                    directory: session.directory.path,
-                    title: session.title,
-                    lastUsedAt: session.lastUsedAt,
-                    isSelected: session.id == item.selectedTerminalID
-                )
-            }
-        }
-        guard let data = try? JSONEncoder().encode(stored) else { return }
-        UserDefaults.standard.set(data, forKey: terminalsDefaultsKey)
-    }
-
-    /// Brings back the tabs of the last run, without starting a single shell:
-    /// they are listed in the Terminals tab, and each one starts when it is
-    /// first shown. Called after the projects, whose names these tabs borrow.
-    private func restoreTerminals() {
-        guard let data = UserDefaults.standard.data(forKey: terminalsDefaultsKey),
-              let stored = try? JSONDecoder().decode([StoredTerminal].self, from: data) else { return }
-
-        for entry in stored {
-            // A repository no longer in the workspace, or a folder that has
-            // moved, has nothing left to restore.
-            if let path = entry.projectPath, !projects.contains(where: { $0.url.path == path }) {
-                continue
-            }
-            guard FileManager.default.fileExists(atPath: entry.directory) else { continue }
-
-            let item = terminalItem(projectID: entry.projectPath.map { URL(fileURLWithPath: $0) })
-            items[item.id] = item
-            let session = makeSession(
-                directory: URL(fileURLWithPath: entry.directory),
-                title: entry.title,
-                in: item
-            )
-            session.lastUsedAt = entry.lastUsedAt
-            item.terminals.append(session)
-            if entry.isSelected { item.selectedTerminalID = session.id }
-        }
-
-        // Whatever was on screen last time may not have made it back.
-        for item in items.values where item.isTerminal && item.selectedTerminalID == nil {
-            item.selectedTerminalID = item.terminals.last?.id
-        }
-        // Deliberately no write here. Building a store must not touch what is
-        // saved: SwiftUI can build a second, throwaway one, and an empty store
-        // saving itself would wipe the list the live one is holding.
-    }
+    //
+    // There are none, on purpose. Tabs used to be written to `UserDefaults` and
+    // listed again on the next launch, but the shell behind them dies with the
+    // app, so what came back was an empty tab wearing the name of something
+    // that had gone — and a Claude Code tab came back worst of all: nothing on
+    // disk said it had been one, so a finished conversation reappeared in the
+    // Terminals list as a shell that had never run. A launch now starts with no
+    // terminals at all, and the past conversations that are still on disk are
+    // read from the transcripts themselves (see `ClaudeSessionsIndex`), which
+    // can say truthfully what they are.
 
     // MARK: - Document actions
 
@@ -1909,6 +1886,7 @@ final class WorkspaceStore {
             selectedFiles = [url]
             fileSelectionAnchor = url
         }
+        forgetJustCreatedIfDeselected()
     }
 
     /// ↑ and ↓ in the tree. With ⇧ the range grows from the anchor, without it
@@ -1925,16 +1903,19 @@ final class WorkspaceStore {
             selectedFiles = [url]
             fileSelectionAnchor = url
         }
+        forgetJustCreatedIfDeselected()
     }
 
     func selectFiles(_ urls: [URL]) {
         selectedFiles = Set(urls)
         fileSelectionAnchor = urls.last
+        forgetJustCreatedIfDeselected()
     }
 
     func clearFileSelection() {
         selectedFiles = []
         fileSelectionAnchor = nil
+        forgetJustCreatedIfDeselected()
     }
 
     /// What a menu item, a key or a drag started on `url` applies to.
@@ -2005,6 +1986,74 @@ final class WorkspaceStore {
         }
     }
 
+    /// Where the Files tab's **+** puts what it makes: the selected folder, the
+    /// folder of the selected file, or the repository itself. With several rows
+    /// picked the first one decides, which is the row the user clicked last
+    /// before reaching for the button.
+    func newItemFolder(in project: Project) -> URL {
+        guard let selected = selectedFiles.sorted(by: { $0.path < $1.path }).first else {
+            return project.url
+        }
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: selected.path, isDirectory: &isDirectory)
+        guard exists else { return project.url }
+        return isDirectory.boolValue ? selected : selected.deletingLastPathComponent()
+    }
+
+    /// The row the **+** just made, if it is still the one being worked on.
+    ///
+    /// The tree draws it **first inside its folder** rather than in alphabetical
+    /// order — a new `untitled` sorted into a long list is a row you have to go
+    /// looking for, and the box waiting for its name is at the top of the pane
+    /// where the button that made it was. It goes back into order as soon as the
+    /// selection moves off it.
+    private(set) var justCreatedFile: URL?
+
+    /// Makes an empty file or folder and **hands it straight to the rename box**,
+    /// so the name is typed on the row itself rather than into a sheet first.
+    /// The Files tab's **+** is the only caller.
+    func createItem(_ kind: FileOperations.NewItem, in project: Project) {
+        let folder = newItemFolder(in: project)
+        // A search is showing its results instead of the tree, and the new row
+        // is in the tree — so the box that put it there is cleared.
+        fileSearchText = ""
+        Task {
+            let result = await Task.detached { FileOperations.create(kind, in: folder) }.value
+
+            // The row has to exist before it can be renamed, and a new file
+            // inside a folder nobody has opened yet would have no row.
+            if let node = project.root.loadedNode(at: folder), node.isDirectory {
+                node.isExpanded = true
+            }
+            project.refreshFileTree(at: folder)
+
+            if let made = result.finished.first {
+                // Before the selection: `selectFiles` drops this the moment the
+                // selection does not hold it.
+                justCreatedFile = made
+                selectFiles([made])
+                renamingFile = made
+            }
+            // Git last. It is a process, and the box the name is typed into
+            // must not wait behind one — a new file is untracked, so the
+            // Changes tab has something to say either way.
+            await project.refreshGitStatus()
+
+            // Nothing is said when it works: the row is on screen with its name
+            // waiting to be typed, which tells the user more than a line in the
+            // status bar could.
+            guard !result.errors.isEmpty else { return }
+            report(result, action: "Created", verb: "create", place: "")
+        }
+    }
+
+    /// Lets the new row fall back into alphabetical order once the selection has
+    /// moved on. Called from everything that sets the selection.
+    private func forgetJustCreatedIfDeselected() {
+        guard let made = justCreatedFile, !selectedFiles.contains(made) else { return }
+        justCreatedFile = nil
+    }
+
     /// Renames one file or folder from the Files tab. What was open under the
     /// old name is closed — the editor is holding a path that no longer exists.
     func renameFile(_ url: URL, to name: String, project: Project) {
@@ -2022,6 +2071,10 @@ final class WorkspaceStore {
                 // moves everything under it too.
                 project.refreshFileTree()
                 await project.refreshGitStatus()
+                // A row named right after it was made keeps its place at the
+                // top of the folder: ⏎ should not send it off to wherever its
+                // new name sorts before it has even been opened.
+                if justCreatedFile == url { justCreatedFile = renamed }
                 selectFiles([renamed])
                 if let showAgain { openFile(showAgain) }
                 showStatus("Renamed to \(renamed.lastPathComponent)")
@@ -2063,6 +2116,7 @@ final class WorkspaceStore {
             }
             await project.refreshGitStatus()
             selectedFiles.subtract(result.finished)
+            forgetJustCreatedIfDeselected()
 
             report(result, action: "Moved", verb: "delete", place: "to the Trash")
         }

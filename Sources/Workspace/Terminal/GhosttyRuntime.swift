@@ -114,11 +114,12 @@ final class GhosttyRuntime {
     /// The user's own Ghostty config, with our own settings on top.
     private static func makeConfig() -> ghostty_config_t? {
         guard let config = ghostty_config_new() else { return nil }
-        // The user's own Ghostty config applies: theme, font, everything.
+        // The user's own Ghostty config applies: keybindings, shell integration,
+        // everything it says that we do not.
         ghostty_config_load_default_files(config)
-        // …except the background, which has to match the app's chrome, and the
-        // font when Settings overrides it. libghostty only reads settings from
-        // files, so write a short one.
+        // …except the colours, which are the app's theme, and the font when
+        // Settings overrides it. libghostty only reads settings from files, so
+        // write a short one.
         if let overrides = writeOverrideConfig() {
             ghostty_config_load_file(config, overrides)
         }
@@ -130,19 +131,31 @@ final class GhosttyRuntime {
     /// its path, or nil if it could not be written.
     private static func writeOverrideConfig() -> String? {
         let path = NSTemporaryDirectory() + "workspace-ghostty-overrides.conf"
-        var lines = ["background = \(AppColors.terminalBackgroundHex)"]
-
         let appearance = AppearanceSettings.shared
-        if appearance.overridesTerminalFont {
-            // `terminalFace` is SF Mono when nothing was chosen, so a shell opens
-            // in the face a file opens in. Nil only if that is not installed
-            // either — libghostty takes a name and cannot be handed the system
-            // face under Apple's private one, so it keeps its own default.
-            if let face = appearance.terminalFace {
-                lines.append("font-family = \(face)")
+        // The theme picked in Settings, all sixteen ANSI slots of it: a shell
+        // and a file are the same pane in the same app, and two colour schemes
+        // across one window is the thing this replaced.
+        var lines = TerminalPalette.configLines(for: appearance.palette)
+
+        // `terminalFace` is the face code is shown in, so a shell opens in the
+        // one a file opens in. Nil only when that is not installed — libghostty
+        // takes a name and cannot be handed the system face under Apple's
+        // private one, so there it keeps its own default.
+        if let face = appearance.terminalFace {
+            // `font-family` is a *list* in ghostty: naming one appends it as a
+            // fallback behind whatever the user's own config named, which would
+            // leave their face drawing the terminal and ours only filling in
+            // the glyphs it lacked. `""` is what ghostty documents as the way
+            // to clear a repeated value before setting it, so the face chosen
+            // here is the one in front. The three styles are cleared with it:
+            // with none of them named, ghostty looks for the bold and the
+            // italic inside the family in front, which is the point.
+            for key in ["font-family", "font-family-bold", "font-family-italic", "font-family-bold-italic"] {
+                lines.append("\(key) = \"\"")
             }
-            lines.append("font-size = \(appearance.terminalFontSize)")
+            lines.append("font-family = \(face)")
         }
+        lines.append("font-size = \(appearance.terminalFontSize)")
 
         do {
             try lines.joined(separator: "\n").write(toFile: path, atomically: true, encoding: .utf8)

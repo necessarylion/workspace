@@ -88,7 +88,7 @@ private struct FontSettings: View {
                 } header: {
                     Text("Theme")
                 } footer: {
-                    Text("Colours for the editor and the diff. Both themes travel with the app, so a file looks the same on every Mac you run it on.")
+                    Text("Colours for the editor, the diff and the terminal — a shell takes its background, its text and its sixteen ANSI colours from the theme too, and the ones already running change with it. The themes travel with the app, so a file looks the same on every Mac you run it on.")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
@@ -129,55 +129,11 @@ private struct FontSettings: View {
                 } header: {
                     Text("Code")
                 } footer: {
-                    Text("The editor and the diff share a face. A diff is read at a glance, so it keeps a size of its own; line spacing is the editor's alone.")
+                    Text("The editor, the diff and the terminal share a face, and a shell is drawn at the editor's size. A diff is read at a glance, so it keeps a size of its own; line spacing is the editor's alone.")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
 
-                Section {
-                    Toggle(
-                        "Use a font chosen here",
-                        isOn: Binding(
-                            get: { appearance.overridesTerminalFont },
-                            set: { appearance.overridesTerminalFont = $0 }
-                        )
-                    )
-                    .pointerCursor()
-                    FacePicker(
-                        title: "Face",
-                        // Ghostty picks its own face when we name none — it is
-                        // not our editor, so it does not fall back to SF Mono.
-                        systemTitle: "From your Ghostty config",
-                        selection: Binding(
-                            get: { appearance.terminalFontName },
-                            set: { appearance.terminalFontName = $0 }
-                        )
-                    )
-                    .disabled(!appearance.overridesTerminalFont)
-                    SizeStepper(
-                        title: "Size",
-                        value: Binding(
-                            get: { appearance.terminalFontSize },
-                            set: { appearance.terminalFontSize = $0 }
-                        )
-                    )
-                    .disabled(!appearance.overridesTerminalFont)
-                    if appearance.overridesTerminalFont {
-                        preview(
-                            font: appearance.previewFont(
-                                named: appearance.terminalFontName,
-                                size: appearance.terminalFontSize
-                            ),
-                            size: appearance.terminalFontSize
-                        )
-                    }
-                } header: {
-                    Text("Terminal")
-                } footer: {
-                    Text("Left off, the terminal keeps the font from your own Ghostty config. Shells already running pick the change up immediately.")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
             }
             .formStyle(.grouped)
 
@@ -262,8 +218,8 @@ private struct FontSettings: View {
 /// The installed monospaced faces, each drawn in itself.
 private struct FacePicker: View {
     let title: String
-    /// What "no face chosen" is called here.
-    var systemTitle = AppearanceSettings.systemFaceTitle
+    /// What "no face chosen" is called.
+    private let systemTitle = AppearanceSettings.systemFaceTitle
     @Binding var selection: String?
 
     var body: some View {

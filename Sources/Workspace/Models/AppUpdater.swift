@@ -408,13 +408,21 @@ enum UpdateFetch {
         request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
-        let (downloaded, response) = try await URLSession.shared.download(
-            for: request,
-            delegate: DownloadProgress(report: progress)
-        )
-        try verify(response)
+        // The release already said how many bytes the asset is, which is what
+        // the bar falls back to if the response itself does not say.
+        let fetch = DownloadTask(expected: release.size, report: progress)
+        let (downloaded, response) = try await fetch.run(request)
 
         let manager = FileManager.default
+        do {
+            // A refusal has a body like anything else, so the file it was
+            // written to goes with the error rather than staying in /tmp.
+            if let response { try verify(response) }
+        } catch {
+            try? manager.removeItem(at: downloaded)
+            throw error
+        }
+
         // The name is what the hand-off script matches on before deleting it.
         let work = manager.temporaryDirectory
             .appendingPathComponent("workspace-update-\(UUID().uuidString)", isDirectory: true)
@@ -513,15 +521,45 @@ enum UpdateFetch {
     }
 }
 
-/// Bytes as they arrive. URLSession reports them to a delegate and nowhere
-/// else, and the async `download(for:delegate:)` takes one for exactly this.
-private final class DownloadProgress: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    /// Immutable and `@Sendable`; the unchecked conformance is only there
-    /// because NSObject is not Sendable itself.
+/// One download, with the bytes reported as they arrive.
+///
+/// **Not** `URLSession.download(for:delegate:)`, which is what this was and is
+/// why the bar sat at 0% until the download finished and then jumped to done:
+/// the async call installs a download delegate of its own to catch the finished
+/// file, and the delegate handed to it never sees a single
+/// `URLSessionDownloadDelegate` callback — measured against the real release
+/// asset, 0 calls that way against 297 this way. So the session gets a delegate
+/// the way it always took one, and the classic task is bridged back to `async`
+/// with a continuation.
+private final class DownloadTask: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    /// How big the asset is according to the release. Used when the response
+    /// itself does not say — a redirected or chunked body carries no
+    /// `Content-Length`, and without a total there is no fraction to report.
+    private let expected: Int64
+    /// `@Sendable`; the unchecked conformance is only there because NSObject is
+    /// not Sendable itself.
     private let report: @Sendable (Double) -> Void
 
-    init(report: @escaping @Sendable (Double) -> Void) {
+    /// Everything below is touched on the session's own serial delegate queue,
+    /// except the continuation, which is set before the task is started.
+    private var continuation: CheckedContinuation<(URL, URLResponse?), Error>?
+    /// Where the finished file was put; see `didFinishDownloadingTo`.
+    private var file: URL?
+
+    init(expected: Int64, report: @escaping @Sendable (Double) -> Void) {
+        self.expected = expected
         self.report = report
+    }
+
+    func run(_ request: URLRequest) async throws -> (URL, URLResponse?) {
+        // A session with a delegate holds it until it is invalidated, which is
+        // what the `defer` is for.
+        let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            session.downloadTask(with: request).resume()
+        }
     }
 
     func urlSession(
@@ -532,14 +570,45 @@ private final class DownloadProgress: NSObject, URLSessionDownloadDelegate, @unc
         totalBytesExpectedToWrite: Int64
     ) {
         // -1 until the server says how long the body is.
-        guard totalBytesExpectedToWrite > 0 else { return }
-        report(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
+        let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : expected
+        guard total > 0 else { return }
+        // A release whose recorded size is a little short of what actually
+        // arrives must not push the bar past its end.
+        report(min(Double(totalBytesWritten) / Double(total), 1))
     }
 
-    /// Required by the protocol; the async call moves the file itself.
+    /// The downloaded file is deleted the moment this returns, so it is moved
+    /// out here rather than in the caller.
     func urlSession(
         _ session: URLSession,
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
-    ) {}
+    ) {
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workspace-download-\(UUID().uuidString).zip")
+        do {
+            try FileManager.default.moveItem(at: location, to: destination)
+            file = destination
+        } catch {
+            finish(.failure(error))
+        }
+    }
+
+    /// The one place the download ends, success or failure — a task that fails
+    /// before any bytes land never reaches `didFinishDownloadingTo`.
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            finish(.failure(error))
+        } else if let file {
+            finish(.success((file, task.response)))
+        } else {
+            finish(.failure(URLError(.cannotOpenFile)))
+        }
+    }
+
+    private func finish(_ result: Result<(URL, URLResponse?), Error>) {
+        guard let continuation else { return }
+        self.continuation = nil
+        continuation.resume(with: result)
+    }
 }

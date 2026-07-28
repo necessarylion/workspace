@@ -2,25 +2,36 @@ import AppKit
 import CoreText
 import SwiftUI
 
-/// The fonts the app shows code in — the editor, the diff, and the terminal.
+/// How the app draws code — the theme, and the fonts the editor, the diff and
+/// the terminal are set in.
 ///
-/// One face is shared by the editor and the diff, because they show the same
-/// thing; only the size differs, since a diff is read at a glance and a file is
-/// read line by line. The terminal is left alone unless asked: libghostty
-/// already reads the user's own `config`, and overriding it by default would
-/// throw away a font they chose there.
+/// **One face and one theme for all three.** They show the same thing in the
+/// same window, and a terminal that kept its own colours and its own font was
+/// two apps in one pane. Only the size differs, and only for the diff, which is
+/// read at a glance rather than line by line. Nothing here is read from the
+/// user's Ghostty config any more; what that file still decides is everything
+/// we say nothing about — keybindings, shell integration, the rest.
 @MainActor
 @Observable
 final class AppearanceSettings {
     static let shared = AppearanceSettings()
 
     /// The family code is shown in, or nil for the system monospaced face.
+    /// The terminal is set in it too, so a change has to reach ghostty.
     var codeFontName: String? {
-        didSet { store(codeFontName, forKey: Keys.codeFont) }
+        didSet {
+            store(codeFontName, forKey: Keys.codeFont)
+            GhosttyRuntime.applyConfigurationIfRunning()
+        }
     }
 
+    /// The editor's size, and the terminal's — a shell and a file are read the
+    /// same way, so they are read at the same size.
     var editorFontSize: Double {
-        didSet { UserDefaults.standard.set(editorFontSize, forKey: Keys.editorSize) }
+        didSet {
+            UserDefaults.standard.set(editorFontSize, forKey: Keys.editorSize)
+            GhosttyRuntime.applyConfigurationIfRunning()
+        }
     }
 
     var diffFontSize: Double {
@@ -32,29 +43,13 @@ final class AppearanceSettings {
         didSet { UserDefaults.standard.set(editorLineHeight, forKey: Keys.lineHeight) }
     }
 
-    /// The theme the editor and the diff are drawn with.
+    /// The theme the editor, the diff **and the terminal** are drawn with. A
+    /// shell takes its background, its text colour and its sixteen ANSI slots
+    /// from here too — see ``TerminalPalette`` — so picking a theme in Settings
+    /// repaints the shells already running along with everything else.
     var palette: SyntaxPalette {
-        didSet { UserDefaults.standard.set(palette.name, forKey: Keys.theme) }
-    }
-
-    /// False leaves the terminal to the user's own Ghostty config.
-    var overridesTerminalFont: Bool {
         didSet {
-            UserDefaults.standard.set(overridesTerminalFont, forKey: Keys.terminalOverride)
-            GhosttyRuntime.applyConfigurationIfRunning()
-        }
-    }
-
-    var terminalFontName: String? {
-        didSet {
-            store(terminalFontName, forKey: Keys.terminalFont)
-            GhosttyRuntime.applyConfigurationIfRunning()
-        }
-    }
-
-    var terminalFontSize: Double {
-        didSet {
-            UserDefaults.standard.set(terminalFontSize, forKey: Keys.terminalSize)
+            UserDefaults.standard.set(palette.name, forKey: Keys.theme)
             GhosttyRuntime.applyConfigurationIfRunning()
         }
     }
@@ -65,7 +60,6 @@ final class AppearanceSettings {
         /// Still a shade denser than a file — two columns have to fit — but not
         /// so small that a diff is harder to read than the file it came from.
         static let diffSize: Double = 12
-        static let terminalSize: Double = 13
         /// The terminal is set in SF Mono too, so a shell and a file read as the
         /// same app rather than as two.
         static let faceName = "SF Mono"
@@ -87,26 +81,24 @@ final class AppearanceSettings {
         static let diffSize = "appearance.diffFontSize"
         static let lineHeight = "appearance.editorLineHeight"
         static let theme = "appearance.theme"
-        static let terminalOverride = "appearance.terminalFontOverride"
-        static let terminalFont = "appearance.terminalFont"
-        static let terminalSize = "appearance.terminalFontSize"
+        /// The terminal's own face, size and "leave it to Ghostty" switch, which
+        /// Settings no longer offers. Cleared once so a Mac that used them is
+        /// not carrying three dead keys about.
+        static let retiredTerminal = [
+            "appearance.terminalFontOverride",
+            "appearance.terminalFont",
+            "appearance.terminalFontSize"
+        ]
     }
 
     private init() {
         let defaults = UserDefaults.standard
+        for key in Keys.retiredTerminal { defaults.removeObject(forKey: key) }
         codeFontName = defaults.string(forKey: Keys.codeFont)
-        terminalFontName = defaults.string(forKey: Keys.terminalFont)
-        // On unless it was turned off. `bool(forKey:)` cannot tell "never set"
-        // from "set to false", and the default is now on — the terminal is meant
-        // to arrive in the same face as everything else.
-        overridesTerminalFont = defaults.object(forKey: Keys.terminalOverride) == nil
-            ? true
-            : defaults.bool(forKey: Keys.terminalOverride)
         // `double(forKey:)` answers 0 for a key that was never written, which is
         // not a font size — read those as "never set".
         editorFontSize = Self.size(defaults.double(forKey: Keys.editorSize), or: Default.editorSize)
         diffFontSize = Self.size(defaults.double(forKey: Keys.diffSize), or: Default.diffSize)
-        terminalFontSize = Self.size(defaults.double(forKey: Keys.terminalSize), or: Default.terminalSize)
 
         let storedLineHeight = defaults.double(forKey: Keys.lineHeight)
         editorLineHeight = Self.lineHeightRange.contains(storedLineHeight)
@@ -172,14 +164,18 @@ final class AppearanceSettings {
             ?? .monospacedSystemFont(ofSize: size, weight: .regular)
     }
 
-    /// The family name to hand the terminal, or nil to leave its own config
-    /// alone. Falls back to SF Mono, which is also what the editor uses when no
-    /// face has been chosen — and nil if even that is not installed, since
-    /// libghostty takes a *name* and has no fallback of ours to reach for.
+    /// The family name to hand the terminal: the face code is shown in, so a
+    /// shell and a file are set in one face. Falls back to SF Mono, which is
+    /// what the editor uses when no face has been chosen — and to nil if even
+    /// that is not installed, since libghostty takes a *name* and has no
+    /// fallback of ours to reach for.
     var terminalFace: String? {
-        if let terminalFontName, Self.isInstalled(terminalFontName) { return terminalFontName }
+        if let codeFontName, Self.isInstalled(codeFontName) { return codeFontName }
         return Self.isInstalled(Default.faceName) ? Default.faceName : nil
     }
+
+    /// The size a shell is drawn at — the editor's, for the same reason.
+    var terminalFontSize: Double { editorFontSize }
 
     private static func swiftUIFont(named name: String?, size: Double) -> Font {
         guard let name, NSFont(name: name, size: size) != nil else {
@@ -248,25 +244,17 @@ final class AppearanceSettings {
             || editorFontSize != Default.editorSize
             || diffFontSize != Default.diffSize
             || editorLineHeight != Default.lineHeight
-            // Inverted along with the default: leaving the terminal to its own
-            // config is now the departure from it, not the other way round.
-            || !overridesTerminalFont
-            || terminalFontName != nil
-            || terminalFontSize != Default.terminalSize
             || palette.name != SyntaxPalette.all[0].name
     }
 
     func restoreDefaults() {
-        codeFontName = nil
-        editorFontSize = Default.editorSize
         diffFontSize = Default.diffSize
         editorLineHeight = Default.lineHeight
-        terminalFontName = nil
-        terminalFontSize = Default.terminalSize
+        // These three reach the terminal, so they go last — each one rebuilds
+        // ghostty's configuration, and the last rebuild should be the one with
+        // everything already back.
+        codeFontName = nil
+        editorFontSize = Default.editorSize
         palette = SyntaxPalette.all[0]
-        // Last, so the terminal is rebuilt once, with everything else already
-        // back. True, matching the launch default: SF Mono in the terminal is
-        // part of what "defaults" now means.
-        overridesTerminalFont = true
     }
 }

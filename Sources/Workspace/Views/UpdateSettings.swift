@@ -113,7 +113,10 @@ struct UpdateSettings: View {
             VStack(alignment: .leading, spacing: 6) {
                 ProgressView(value: fraction)
                     .progressViewStyle(.linear)
-                Text("Downloading \(release.version.text) — \(Int(fraction * 100))%")
+                // The size as well as the percentage: a big release moves the
+                // bar slowly, and knowing it is 40 MB says the wait is the
+                // download rather than something stuck.
+                Text("Downloading \(release.version.text) — \(Int(fraction * 100))% of \(release.size.formatted(.byteCount(style: .file)))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()

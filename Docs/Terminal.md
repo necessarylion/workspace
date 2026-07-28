@@ -2,8 +2,13 @@
 
 The embedded terminal is [libghostty](https://github.com/ghostty-org/ghostty) —
 the same engine as the Ghostty app, linked as a static library. SwiftTerm is
-gone. The user's own Ghostty config (theme, font, keybinds) applies inside
-this app too, because the runtime loads the default config files.
+gone. The user's own Ghostty config applies inside this app too, because the
+runtime loads the default config files — everything in it that we do not
+override ourselves. **The colours and the font we do**: a shell is drawn in the
+theme picked in Settings and in the face code is shown in, since a terminal
+with a scheme of its own made one window look like two apps. See
+`Themes/TerminalPalette.swift`, which turns the editor's palette into the
+sixteen ANSI slots a terminal needs.
 
 ## The pieces
 
@@ -22,7 +27,8 @@ this app too, because the runtime loads the default config files.
   590 themes (2.3 MB); only `Ghostty Default Style Dark` is kept, which is why
   the whole directory is 84 KB. The consequence: a `theme = …` line in the
   user's own ghostty config no longer resolves — ghostty logs it and falls
-  back to its built-in colours. Re-add a theme file here to support one.
+  back to its built-in colours. It would make no difference now anyway: the
+  app writes every colour on top of whatever that file says.
 - **`Terminal/GhosttyRuntime.swift`** — the single `ghostty_app_t`: config
   loading, `ghostty_app_tick` scheduling (wakeup callback → main actor), and
   the runtime callbacks: clipboard read/write, paste confirmation, close

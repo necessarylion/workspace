@@ -88,6 +88,9 @@ struct ContentView: View {
         // The app's own releases, asked after at most six hours. Starting it
         // here rather than in the app's `init` keeps a launch free of network.
         .task { AppUpdater.shared.startAutomaticChecks() }
+        // The sidebar's branch, changes and pull request counts, read again
+        // every five minutes while the app is in front.
+        .task { store.startAutomaticRefresh() }
         // Asked once per repository, right after it is added.
         .sheet(item: $store.gitHubAccountPrompt) { prompt in
             GitHubAccountSheet(prompt: prompt)

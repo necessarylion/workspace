@@ -283,14 +283,41 @@ struct FileListView: View {
     }
 
     private func children(of node: FileNode) -> [FileNode] {
-        let children = node.children ?? []
-        guard !store.showsIgnoredFiles else { return children }
-        return children.filter { !project.isIgnored($0.url) }
+        var children = node.children ?? []
+        if !store.showsIgnoredFiles {
+            children = children.filter { !project.isIgnored($0.url) }
+        }
+        // The row the **+** just made goes to the top of its folder instead of
+        // wherever "untitled" happens to sort — so the box waiting for its name
+        // is where the button that made it is, and not somewhere down the list.
+        // It falls back into order as soon as the selection moves off it.
+        if let made = store.justCreatedFile,
+           let index = children.firstIndex(where: { $0.url == made }) {
+            children.insert(children.remove(at: index), at: 0)
+        }
+        return children
     }
 
     // A hand-drawn tree instead of `List`: the sidebar list style forces tall,
     // widely spaced rows and offers no way to compact them.
     private var fileList: some View {
+        ScrollViewReader { scroller in
+            treeScrollView
+                // The rows are built lazily, so a row off the bottom of the pane
+                // does not exist and its rename box cannot open. Scrolling to the
+                // new one is what builds it — and it is where the name is typed,
+                // so it should be on screen anyway. A folder made in a folder is
+                // the case that needs it: its row can be a long way down.
+                .onChange(of: store.justCreatedFile) { _, made in
+                    guard let made else { return }
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        scroller.scrollTo(made, anchor: .center)
+                    }
+                }
+        }
+    }
+
+    private var treeScrollView: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 if query.isEmpty {
@@ -302,6 +329,7 @@ struct FileListView: View {
                             isIgnored: project.isIgnored(entry.node.url),
                             activate: { activate(entry.node, modifiers: $0) }
                         )
+                        .id(entry.node.url)
                     }
                 } else if searchResults.isEmpty {
                     Text(isSearching ? "Searching…" : "No results")
@@ -355,6 +383,7 @@ struct FileListView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer()
+                newItemMenu
                 Button {
                     store.showsIgnoredFiles.toggle()
                 } label: {
@@ -381,6 +410,39 @@ struct FileListView: View {
             .padding(.vertical, 6)
             .background(.bar)
         }
+    }
+
+    /// **+** in the footer: an empty file or folder, made in the folder that is
+    /// picked in the tree — or in the repository itself when nothing is. What it
+    /// makes arrives **with its name being edited**, so the name is typed on the
+    /// row rather than into a sheet, and ⎋ there leaves an "untitled" behind
+    /// rather than half a file.
+    private var newItemMenu: some View {
+        Menu {
+            Button {
+                store.createItem(.file, in: project)
+            } label: {
+                Label("New File", systemImage: "doc")
+            }
+            Button {
+                store.createItem(.folder, in: project)
+            } label: {
+                Label("New Folder", systemImage: "folder")
+            }
+        } label: {
+            Image(systemName: "plus")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("New file or folder in \(newItemFolderName)")
+        .pointerCursor()
+    }
+
+    /// What the **+** would put a new row into, for its tooltip.
+    private var newItemFolderName: String {
+        let folder = store.newItemFolder(in: project)
+        return folder == project.url ? project.name : folder.lastPathComponent
     }
 }
 
@@ -1403,8 +1465,8 @@ struct TerminalCard: View {
     /// named the same once their prompts have renamed them.
     let position: Int
     let isSelected: Bool
-    /// False for a tab brought back from the last run of the app, whose shell
-    /// starts the moment it is shown.
+    /// False for a tab whose shell has not been spawned yet — it starts the
+    /// moment the tab is shown.
     let isRunning: Bool
     let close: () -> Void
 
