@@ -39,6 +39,18 @@ struct WorkspaceApp: App {
             }
 
             CommandGroup(replacing: .newItem) {
+                Button("New Repository…") {
+                    store.showNewRepository(.create)
+                }
+                .keyboardShortcut("n", modifiers: .command)
+
+                Button("Clone Repository…") {
+                    store.showNewRepository(.clone)
+                }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+
+                Divider()
+
                 Button("Add Repository…") {
                     store.promptForProjectFolder()
                 }

@@ -487,7 +487,7 @@ struct WelcomeView: View {
                 .foregroundStyle(.tertiary)
             Text("No repository yet")
                 .font(.title2.weight(.semibold))
-            Text("Add a repository folder from your Mac. Nothing shows up here until you do.")
+            Text("Add a folder from your Mac, start an empty repository, or clone one from GitHub or Bitbucket.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 380)
@@ -500,6 +500,13 @@ struct WelcomeView: View {
             .controlSize(.large)
             .pointerCursor()
             .padding(.top, 4)
+            HStack(spacing: 16) {
+                Button("New empty repository") { store.showNewRepository(.create) }
+                    .pointerCursor()
+                Button("Clone from a URL") { store.showNewRepository(.clone) }
+                    .pointerCursor()
+            }
+            .buttonStyle(.link)
         }
         .padding(60)
         .frame(maxWidth: .infinity)

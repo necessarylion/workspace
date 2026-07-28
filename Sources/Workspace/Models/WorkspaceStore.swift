@@ -157,6 +157,12 @@ final class WorkspaceStore {
     /// Repositories added in the same batch, waiting their turn to be asked.
     private var gitHubAccountQueue: [URL] = []
 
+    // New repository
+    /// Set while the New Repository sheet is up — `git init` in a new folder, or
+    /// a clone of one that is already on a host. `nil` the rest of the time,
+    /// which is what keeps the sheet away.
+    var newRepository: NewRepositoryRequest?
+
     private let projectsDefaultsKey = "workspace.projects"
     private let pinnedProjectsDefaultsKey = "workspace.pinnedProjects"
     private let gitHubAccountsDefaultsKey = "workspace.githubAccounts"
@@ -240,11 +246,16 @@ final class WorkspaceStore {
         persistProjects()
     }
 
-    /// The only way a repository enters the workspace: the user picks a folder.
+    /// A repository that is already on this Mac: the user picks its folder.
+    /// ``showNewRepository(_:)`` is the other way in, for one that is not.
     func promptForProjectFolder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
+        // A repository can be made here as well as found: the picker's own New
+        // Folder button was off, which is why an empty one could not be started
+        // from this side at all.
+        panel.canCreateDirectories = true
         panel.allowsMultipleSelection = true
         panel.prompt = "Add"
         panel.message = "Choose one or more repository folders."
@@ -252,6 +263,28 @@ final class WorkspaceStore {
         for url in panel.urls {
             addProject(at: url, makeSelected: url == panel.urls.first)
         }
+    }
+
+    // MARK: - New repository
+
+    /// Opens the New Repository sheet. `mode` is which of the two halves it
+    /// starts on; both are one press apart inside it.
+    func showNewRepository(_ mode: NewRepository.Mode = .create) {
+        newRepository = NewRepositoryRequest(mode: mode)
+    }
+
+    func dismissNewRepository() {
+        newRepository = nil
+    }
+
+    /// The folder the sheet has just made. Added like any other repository, and
+    /// selected: one is made in order to work in it.
+    func adoptNewRepository(at url: URL, cloned: Bool) {
+        newRepository = nil
+        addProject(at: url)
+        showStatus(cloned
+            ? "Cloned into \(url.lastPathComponent)"
+            : "Created \(url.lastPathComponent)")
     }
 
     /// What the repositories sidebar lists: every repository, or the ones

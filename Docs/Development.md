@@ -168,6 +168,7 @@ Sources/Workspace/
   Support/SettingsWindow.swift  opening ⌘, from a menu item, on a chosen tab
   Models/
     RemoteInfo.swift          origin URL → GitHub/Bitbucket + owner/slug
+    NewRepository.swift       making one instead of finding one: `git init`, `git clone`
     Project.swift             one repository: remote, status, PRs, ports, tree
     PullRequest.swift         unified PR model + gh/bkt loaders
     PullRequestComment.swift  reading and posting PR comments
@@ -237,6 +238,7 @@ Sources/Workspace/
     PullRequestSidebar.swift  the PR's right-hand panel: reviewers and builds
     PullRequestTable.swift    the open PRs on the dashboard, a row each
     CommitMessageText.swift   a commit message with its #123 drawn as a link
+    NewRepositorySheet.swift  ⌘N / ⇧⌘N — an empty repository, or a clone, and the + menu
     ProjectSwitcherOverlay.swift  ⌃⇥ — the repositories in a row, on glass
     FileFinderOverlay.swift   ⌘P — find a file by name, on glass
     SettingsView.swift        ⌘, — Appearance, Requirements, Language Servers, Updates
