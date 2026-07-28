@@ -107,6 +107,9 @@ struct GitStatus: Sendable, Hashable {
 
     var isClean: Bool { changes.isEmpty }
 
+    /// How git names the branch of a repository that has nothing committed yet.
+    private static let noCommitsPrefix = "No commits yet on "
+
     /// Runs `git status`; nil when the folder is not a repository.
     static func load(for directory: URL) async -> GitStatus? {
         async let ignoredTask = loadIgnored(in: directory)
@@ -156,7 +159,19 @@ struct GitStatus: Sendable, Hashable {
                     }
                     rest = String(rest[rest.startIndex..<bracket]).trimmingCharacters(in: .whitespaces)
                 }
-                branch = rest.components(separatedBy: "...").first ?? rest
+                let name = rest.components(separatedBy: "...").first ?? rest
+                // A repository with nothing committed yet says so instead of
+                // naming the branch on its own — "## No commits yet on main" —
+                // and a brand new one is exactly what the New Repository sheet
+                // leaves behind. A detached head has a phrase of its own too,
+                // and `detached` is the word the rest of the app uses for it.
+                if name == "HEAD (no branch)" {
+                    branch = "detached"
+                } else if name.hasPrefix(Self.noCommitsPrefix) {
+                    branch = String(name.dropFirst(Self.noCommitsPrefix.count))
+                } else {
+                    branch = name
+                }
             } else if field.count > 3 {
                 let code = String(field.prefix(2))
                 var originalPath: String?
