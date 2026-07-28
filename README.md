@@ -143,12 +143,18 @@ missing ones, so you never have to work out which command it wanted.
 | One palette | All sixteen ANSI colours come from the theme, so `git diff` matches the code above it. |
 | One font | Your monospaced face across the app, with its own sizes and line spacing. |
 | Bring your own | `Scripts/import-vscode-theme.swift` ports any VS Code theme. |
+| Your keys | Every shortcut the app binds is rebindable in Settings → Shortcuts, or removable. |
 
 ## Keyboard
 
+The keys below are what the app ships with. **Every one of them is yours to
+change** — Settings (⌘,) → Shortcuts records a new key for any command, or
+takes its key away entirely. The rows the app does not own (⌘F, ⌃Space and
+everything macOS binds) are not on offer there.
+
 | Shortcut | Action |
 | --- | --- |
-| ⌘, | Settings — theme and font, required tools, language servers, updates |
+| ⌘, | Settings — theme and font, shortcuts, required tools, language servers, updates |
 | ⇧⌘O | Add repository |
 | ⌘P | Go to file |
 | ⌘F | Find in the file |

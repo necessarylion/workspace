@@ -195,6 +195,7 @@ Sources/Workspace/
     ToolRequirements.swift    git/gh/bkt/claude/rg: installed? signed in as whom?
     LanguageServerCatalog.swift  the language server list: defaults + yours
     AppearanceSettings.swift  the theme and the code font (terminal included): face, sizes, spacing
+    KeyboardShortcuts.swift   every key the app binds, its default, and what you rebound it to
     AppUpdater.swift          the app's own releases: check, download, swap, relaunch
     WorkspaceStore.swift      window state, back/forward history, the five-minute refresh
   Editor/
@@ -239,7 +240,8 @@ Sources/Workspace/
     CommitMessageText.swift   a commit message with its #123 drawn as a link
     ProjectSwitcherOverlay.swift  ⌃⇥ — the repositories in a row, on glass
     FileFinderOverlay.swift   ⌘P — find a file by name, on glass
-    SettingsView.swift        ⌘, — Appearance, Requirements, Language Servers, Updates
+    SettingsView.swift        ⌘, — Appearance, Shortcuts, Requirements, Language Servers, Updates
+    ShortcutSettings.swift    the Shortcuts tab: one recorder per command, conflicts named
     UpdateSettings.swift      the Updates tab, and the corner notice a new version leaves
     ToolConsoleSheet.swift    runs one install or sign-in in a real terminal
 ```

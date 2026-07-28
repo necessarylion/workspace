@@ -12,7 +12,7 @@ struct SettingsView: View {
     private var updater: AppUpdater { .shared }
 
     enum Tab: Hashable {
-        case appearance, requirements, servers, updates
+        case appearance, shortcuts, requirements, servers, updates
     }
 
     @State private var tab: Tab = .appearance
@@ -25,6 +25,9 @@ struct SettingsView: View {
             FontSettings()
                 .tabItem { Label("Appearance", systemImage: "paintpalette") }
                 .tag(Tab.appearance)
+            ShortcutSettings()
+                .tabItem { Label("Shortcuts", systemImage: "keyboard") }
+                .tag(Tab.shortcuts)
             RequirementsSettings()
                 .tabItem { Label("Requirements", systemImage: "wrench.and.screwdriver") }
                 .tag(Tab.requirements)

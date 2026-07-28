@@ -1153,8 +1153,8 @@ struct ChangeListView: View {
                     }
                 }
                 .disabled(!canCommit)
-                .keyboardShortcut(.return, modifiers: .command)
-                .help("Commit the staged files (⌘⏎)")
+                .shortcut(.submit)
+                .shortcutHelp("Commit the staged files", .submit)
                 .pointerCursor(canCommit)
 
                 Button {
