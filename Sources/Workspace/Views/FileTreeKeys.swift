@@ -5,6 +5,12 @@ import SwiftUI
 enum FileTreeKey {
     case rename
     case trash
+    /// ⌘C: puts the selected files on the pasteboard as files, so Finder and
+    /// every other app that takes them can paste them.
+    case copy
+    /// ⌘V: puts whatever files are on the pasteboard into the picked folder —
+    /// the other half of a ⌘C in Finder.
+    case paste
     /// ↑ / ↓, with ⇧ held to stretch the selection instead of moving it.
     case move(by: Int, extending: Bool)
 }
@@ -25,16 +31,21 @@ struct FileTreeKeyCatcher: NSViewRepresentable {
     let claims: Int
     /// Returns true when the key was used, false to let it carry on.
     let handle: (FileTreeKey) -> Bool
+    /// Whether the key would do anything at all, asked without doing it — the
+    /// Edit menu wants to know before it draws Copy and Paste enabled.
+    let canHandle: (FileTreeKey) -> Bool
 
     func makeNSView(context: Context) -> KeyView {
         let view = KeyView()
         view.handle = handle
+        view.canHandle = canHandle
         view.claims = claims
         return view
     }
 
     func updateNSView(_ view: KeyView, context: Context) {
         view.handle = handle
+        view.canHandle = canHandle
         guard view.claims != claims else { return }
         view.claims = claims
         // A runloop turn later: taking the keyboard in the middle of a SwiftUI
@@ -45,8 +56,9 @@ struct FileTreeKeyCatcher: NSViewRepresentable {
         }
     }
 
-    final class KeyView: NSView {
+    final class KeyView: NSView, NSMenuItemValidation {
         var handle: (FileTreeKey) -> Bool = { _ in false }
+        var canHandle: (FileTreeKey) -> Bool = { _ in false }
         var claims = 0
 
         override var acceptsFirstResponder: Bool { true }
@@ -57,6 +69,33 @@ struct FileTreeKeyCatcher: NSViewRepresentable {
             guard let key = Self.key(for: event), handle(key) else {
                 super.keyDown(with: event)
                 return
+            }
+        }
+
+        // MARK: Copy and paste
+        //
+        // ⌘C and ⌘V are the Edit menu's, and a menu key equivalent is answered
+        // before `keyDown` ever runs — so these two arrive as the selectors the
+        // menu sends down the responder chain rather than as a key press. The
+        // tree is the first responder while it has the keyboard, which is what
+        // puts both the keys *and* the menu items on it. `key(for:)` still
+        // knows them, for the case where the menu did not take the event.
+
+        @objc func copy(_ sender: Any?) {
+            _ = handle(.copy)
+        }
+
+        @objc func paste(_ sender: Any?) {
+            _ = handle(.paste)
+        }
+
+        /// Greys the two items out when there is nothing selected to copy, or
+        /// nothing on the pasteboard to put down.
+        func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+            switch menuItem.action {
+            case #selector(copy(_:)): return canHandle(.copy)
+            case #selector(paste(_:)): return canHandle(.paste)
+            default: return true
             }
         }
 
@@ -71,6 +110,14 @@ struct FileTreeKeyCatcher: NSViewRepresentable {
                 return modifiers.isEmpty ? .rename : nil
             case 51:  // ⌫
                 return modifiers == .command ? .trash : nil
+            // Only reached when the Edit menu did not answer ⌘C / ⌘V first —
+            // it is disabled, or the app is running without those items. The
+            // handler refuses the same cases `validateMenuItem` greys out, so
+            // this cannot do what the menu had just said could not be done.
+            case 8:  // C
+                return modifiers == .command ? .copy : nil
+            case 9:  // V
+                return modifiers == .command ? .paste : nil
             case 126:  // ↑
                 return modifiers.subtracting(.shift).isEmpty
                     ? .move(by: -1, extending: modifiers.contains(.shift)) : nil

@@ -115,9 +115,8 @@ struct ContentView: View {
         """
     }
 
-    // MARK: - Repository switcher (⌃⇥)
+    // MARK: - Repository switcher (⌃⇥ by default)
 
-    private static let tabKeyCode: UInt16 = 48
     private static let returnKeyCode: UInt16 = 36
     private static let leftArrowKeyCode: UInt16 = 123
     private static let rightArrowKeyCode: UInt16 = 124
@@ -125,23 +124,34 @@ struct ContentView: View {
     /// down when it is pressed to call the whole thing off.
     private static let escapeKeyCode: UInt16 = 53
 
-    /// ⌃⇥ has to be caught here rather than bound to a control: the terminal
-    /// keeps every key it is given, and holding ⌃ across several presses is not
-    /// something a shortcut can express. Returns true for the keys it takes.
+    /// The switcher has to be caught here rather than bound to a control: the
+    /// terminal keeps every key it is given, and holding a modifier across
+    /// several presses is not something a shortcut can express. Returns true
+    /// for the keys it takes.
+    ///
+    /// Which key it is comes from Settings, so ⇧ is read as "the other way"
+    /// rather than being part of it, and whatever else the chord holds is what
+    /// keeps the row up — let go of it and the highlighted repository is the
+    /// one you get. A chord with no modifiers at all leaves the row up until
+    /// ⏎ or ⎋, since there is then nothing to let go of.
     private func handleSwitcherKey(_ event: NSEvent, in window: NSWindow) -> Bool {
         // A sheet is its own conversation; it finishes first.
         guard window.attachedSheet == nil else { return false }
+        let chord = KeyboardShortcuts.shared.chord(for: .switchRepository)
 
-        // Letting go of ⌃ is what picks — the row is only up while it is held.
         if event.type == .flagsChanged {
-            if store.isSwitchingProjects, !event.modifierFlags.contains(.control) {
+            let hold = chord?.holdFlags ?? []
+            if store.isSwitchingProjects, !hold.isEmpty,
+               event.modifierFlags.intersection(hold).isEmpty {
                 store.commitProjectSwitcher()
             }
             return false
         }
 
-        if event.keyCode == Self.tabKeyCode, event.modifierFlags.contains(.control) {
-            store.cycleProjectSwitcher(backwards: event.modifierFlags.contains(.shift))
+        if let chord, chord.matchesIgnoringShift(event) {
+            // ⇧ reverses whichever direction the chord itself means.
+            let shifted = event.modifierFlags.contains(.shift)
+            store.cycleProjectSwitcher(backwards: shifted != chord.modifiers.contains(.shift))
             return true
         }
 

@@ -154,8 +154,8 @@ struct CommentComposer: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .disabled(isPosting || isEmpty)
-                .keyboardShortcut(.return, modifiers: .command)
-                .help("Post (⌘↩)")
+                .shortcut(.submit)
+                .shortcutHelp("Post", .submit)
                 .pointerCursor(!isPosting && !isEmpty)
             }
         }

@@ -112,7 +112,7 @@ missing ones, so you never have to work out which command it wanted.
 | Language servers | Diagnostics, completions (⌃Space) and ⌘-click to definition for 20+ languages. |
 | Go to file (⌘P) | `item controller` finds `app/controllers/item_controller.rb`. Punctuation optional. |
 | Search in files | ripgrep, grouped by file, every hit marked in the file you open. |
-| A file tree you can use | Drag in and out, rename in place, duplicate, multi-select, new file or folder. |
+| A file tree you can use | Drag in and out, copy and paste with Finder, rename in place, duplicate, multi-select, new file or folder. |
 
 ### Previews
 
@@ -144,11 +144,19 @@ missing ones, so you never have to work out which command it wanted.
 | One palette | All sixteen ANSI colours come from the theme, so `git diff` matches the code above it. |
 | One font | Your monospaced face across the app, with its own sizes and line spacing. |
 | Bring your own | `Scripts/import-vscode-theme.swift` ports any VS Code theme. |
+| Your keys | Every shortcut the app binds is rebindable in Settings → Shortcuts, or removable. |
 
 ## Keyboard
 
+The keys below are what the app ships with. **Every one of them is yours to
+change** — Settings (⌘,) → Shortcuts records a new key for any command, or
+takes its key away entirely. The rows the app does not own (⌘F, ⌃Space and
+everything macOS binds) are not on offer there.
+
 | Shortcut | Action |
 | --- | --- |
+| ⌘, | Settings — theme and font, shortcuts, required tools, language servers, updates |
+| ⇧⌘O | Add repository |
 | ⌘, | Settings — theme and font, required tools, language servers, updates |
 | ⌘N / ⇧⌘N | New empty repository · clone one from a URL |
 | ⇧⌘O | Add a repository folder you already have |
@@ -169,6 +177,7 @@ missing ones, so you never have to work out which command it wanted.
 | ⌘-click | Go to definition · in the file tree, add a row to the selection |
 | ⌘↩ | Post the comment you typed · commit the staged files |
 | ⏎ / ⌘⌫ | File tree: rename in place · move to Trash |
+| ⌘C / ⌘V | File tree: copy the picked files · paste files copied in Finder |
 
 ## Thanks
 

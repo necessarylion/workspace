@@ -690,11 +690,11 @@ struct PullRequestDetailView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .disabled(item.isRunningPullRequestAction)
-                // ⌘↩ belongs to the comment box further down the same page, so
-                // saving takes the other key a Mac saves with.
-                .keyboardShortcut("s", modifiers: .command)
+                // Post belongs to the comment box further down the same page, so
+                // saving takes the app's Save key instead.
+                .shortcut(.save)
                 .pointerCursor(!item.isRunningPullRequestAction)
-                .help("Save the description (⌘S)")
+                .shortcutHelp("Save the description", .save)
             }
         }
     }
@@ -1116,12 +1116,12 @@ struct ConversationView<Header: View>: View {
                     item.isPostingComment ||
                     draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 )
-                .keyboardShortcut(.return, modifiers: .command)
+                .shortcut(.submit)
                 .pointerCursor(
                     !item.isPostingComment &&
                     !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 )
-                .help("Post the comment (⌘↩)")
+                .shortcutHelp("Post the comment", .submit)
             }
         }
         .padding(12)

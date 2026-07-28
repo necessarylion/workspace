@@ -48,6 +48,14 @@ The app is one window with three panes, and the mental model that drives the cod
 - **`Models/Project.swift`** — one added repository: remote detection
   (`RemoteInfo.swift` parses the `origin` URL, including SSH aliases), git status,
   PRs, listening ports, lazy file tree.
+- **`Models/KeyboardShortcuts.swift`** — every key the app binds for itself, and
+  the only place one is named. A command declares a `ShortcutAction` with a
+  default `KeyChord`; the menu item wears it with `.shortcut(_:)` and a window
+  key monitor matches it with `chord.matches(event)`, so Settings → Shortcuts
+  changes both at once. Adding a shortcut means adding a case, not a literal —
+  a `.keyboardShortcut("x", …)` anywhere but a sheet's Cancel/Default button is
+  a key the user cannot change. Overrides only, stored in `UserDefaults`, so a
+  default that moves in a later release follows.
 - **`Support/Shell.swift`** — the only way external tools are run. Everything goes
   through the user's **login shell** (`$SHELL -lc`) on purpose, because a GUI app
   inherits a bare PATH. A login shell alone still misses version managers (gvm,

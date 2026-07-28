@@ -54,18 +54,18 @@ struct WorkspaceApp: App {
                 Button("Add Repository…") {
                     store.promptForProjectFolder()
                 }
-                .keyboardShortcut("o", modifiers: [.command, .shift])
+                .shortcut(.addRepository)
             }
 
             CommandGroup(after: .saveItem) {
                 // Enabled whenever a file is open: menu items observe state
                 // lazily, and saving a clean file is harmless.
                 Button("Save") { store.saveCurrentDocument() }
-                    .keyboardShortcut("s")
+                    .shortcut(.save)
                     .disabled(store.current?.document == nil)
 
                 Button("Close") { store.closeCurrent() }
-                    .keyboardShortcut("w", modifiers: [.command, .shift])
+                    .shortcut(.close)
                     .disabled(store.current == nil)
             }
 
@@ -73,12 +73,12 @@ struct WorkspaceApp: App {
                 Button(store.showsProjects ? "Hide Repositories" : "Show Repositories") {
                     store.showsProjects.toggle()
                 }
-                .keyboardShortcut("0", modifiers: .command)
+                .shortcut(.toggleRepositories)
 
                 Button(store.showsNavigator ? "Hide Navigator" : "Show Navigator") {
                     store.toggleNavigator()
                 }
-                .keyboardShortcut("0", modifiers: [.option, .command])
+                .shortcut(.toggleNavigator)
             }
 
             CommandMenu("Go") {
@@ -87,17 +87,17 @@ struct WorkspaceApp: App {
                 // ⌘P works even while the terminal — which answers every key
                 // itself and passes none on — has the keyboard.
                 Button("Go to File…") { store.toggleFileFinder() }
-                    .keyboardShortcut("p", modifiers: .command)
+                    .shortcut(.goToFile)
                     .disabled(store.selectedProject == nil)
 
                 Divider()
 
                 Button("Back") { store.goBack() }
-                    .keyboardShortcut("[", modifiers: .command)
+                    .shortcut(.goBack)
                     .disabled(!store.canGoBack)
 
                 Button("Forward") { store.goForward() }
-                    .keyboardShortcut("]", modifiers: .command)
+                    .shortcut(.goForward)
                     .disabled(!store.canGoForward)
 
                 Divider()
@@ -109,7 +109,7 @@ struct WorkspaceApp: App {
 
             CommandMenu("Project") {
                 Button("Refresh All") { store.refreshAll() }
-                    .keyboardShortcut("r")
+                    .shortcut(.refreshAll)
 
                 Divider()
 
@@ -118,7 +118,7 @@ struct WorkspaceApp: App {
                         store.openClaude(in: project)
                     }
                 }
-                .keyboardShortcut("l", modifiers: [.command, .shift])
+                .shortcut(.askClaude)
                 .disabled(store.selectedProject == nil)
 
                 Divider()
@@ -128,7 +128,7 @@ struct WorkspaceApp: App {
                         store.openTerminal(in: project)
                     }
                 }
-                .keyboardShortcut("t", modifiers: [.control, .command])
+                .shortcut(.openTerminal)
                 .disabled(store.selectedProject == nil)
 
                 // ⌃` the way editors do it: the same key in and back out. It
@@ -141,7 +141,7 @@ struct WorkspaceApp: App {
                 ) {
                     store.toggleTerminal()
                 }
-                .keyboardShortcut("`", modifiers: .control)
+                .shortcut(.toggleTerminal)
 
                 // From inside a terminal this adds a tab next to it; from
                 // anywhere else it starts one for the selected repository.
@@ -152,14 +152,14 @@ struct WorkspaceApp: App {
                         store.newTerminal(in: project)
                     }
                 }
-                .keyboardShortcut("t")
+                .shortcut(.newTerminalTab)
                 .disabled(store.selectedProject == nil)
 
                 // Belongs to no repository, so it needs none selected.
                 Button("New Terminal in Home") {
                     store.newGlobalTerminal()
                 }
-                .keyboardShortcut("t", modifiers: [.command, .shift])
+                .shortcut(.newHomeTerminal)
 
                 Button("Open in VS Code") {
                     if let project = store.selectedProject {
@@ -190,7 +190,7 @@ struct WorkspaceApp: App {
                 Button("Save as PDF…") {
                     store.saveCurrentDocumentAsPDF()
                 }
-                .keyboardShortcut("e", modifiers: [.command, .shift])
+                .shortcut(.savePDF)
                 .disabled(store.visibleDocument?.isMarkdown != true)
             }
         }

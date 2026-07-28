@@ -6,8 +6,9 @@ import Foundation
 /// filesystem work with no UI and no state, so it can run off the main actor —
 /// a dropped folder can be large.
 ///
-/// `WorkspaceStore.createItem`, `importFiles`, `renameFile` and `deleteFiles`
-/// are the callers; they refresh the tree and put the outcome in the status bar.
+/// `WorkspaceStore.createItem`, `importFiles`, `pasteFiles`, `renameFile` and
+/// `deleteFiles` are the callers; they refresh the tree and put the outcome in
+/// the status bar.
 enum FileOperations {
     /// A drag from outside the repository copies, a drag from inside it moves —
     /// the same rule Finder uses between and within a volume, and the one that
@@ -62,6 +63,29 @@ enum FileOperations {
             } catch {
                 result.errors.append("\(source.lastPathComponent): \(error.localizedDescription)")
             }
+        }
+        return result
+    }
+
+    /// What ⌘V puts down: every file on the pasteboard is **copied** into
+    /// `folder`, whether it came from Finder, from another app, or from this
+    /// tree's own ⌘C — the Finder's paste is a copy even within one volume,
+    /// and the pasteboard has no way of saying where the files came from.
+    ///
+    /// Pasting into the folder a file already sits in is the case `transfer`
+    /// cannot answer: it reads that as a drop back where it started and does
+    /// nothing, where a paste should leave a second copy beside the original.
+    /// So that one goes through `duplicate`, which is the same numbering.
+    static func paste(_ sources: [URL], into folder: URL) -> Result {
+        let folder = folder.standardizedFileURL
+        var result = Result()
+        for source in sources.map(\.standardizedFileURL) {
+            let one = source.deletingLastPathComponent() == folder
+                ? duplicate([source])
+                : transfer(.copy, [source], into: folder)
+            result.finished += one.finished
+            result.skipped += one.skipped
+            result.errors += one.errors
         }
         return result
     }

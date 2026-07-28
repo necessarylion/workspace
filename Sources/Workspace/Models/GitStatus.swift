@@ -218,32 +218,64 @@ struct GitStatus: Sendable, Hashable {
         )
     }
 
+    /// The repository's own root, which is not always the folder that was
+    /// added.
+    ///
+    /// A package of a monorepo is a perfectly reasonable thing to open, and
+    /// `git status` answers from anywhere inside a repository — so the app
+    /// never had to notice the difference. The diff did: every path git
+    /// *reports* (`--porcelain`, `ls-files`) is relative to the root, while a
+    /// pathspec and a `--no-index` argument are read from wherever the command
+    /// ran. Open `apps/web` and `git diff HEAD -- apps/web/src/x.spec.ts`
+    /// matched nothing at all, which arrived as a file with no changes in it.
+    ///
+    /// Falls back to the folder itself, which is both the answer for a plain
+    /// checkout and the only sensible one when this is not a repository.
+    static func root(of directory: URL) async -> URL {
+        let result = await Shell.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            in: directory,
+            timeout: 15
+        )
+        let path = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard result.isSuccess, !path.isEmpty else { return directory }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
     /// Unified diff for one change (working tree, including staged changes).
     /// Takes every path the change covers, so a rename is shown as the one move
     /// it is rather than as a new file with no history.
+    ///
+    /// Run from the repository root rather than from `directory`, because the
+    /// paths handed in came from `git status --porcelain` and are relative to
+    /// it — see ``root(of:)``.
     static func diff(paths: [String], in directory: URL, isUntracked: Bool) async -> String {
         guard let first = paths.first else { return "" }
+        let root = await root(of: directory)
         if isUntracked {
             // Untracked files have no diff; synthesise one against /dev/null.
             let result = await Shell.run(
                 ["git", "diff", "--no-index", "--", "/dev/null", first],
-                in: directory,
+                in: root,
                 timeout: 30
             )
             return result.stdout
         }
-        let result = await Shell.run(["git", "diff", "HEAD", "--"] + paths, in: directory, timeout: 30)
+        let result = await Shell.run(["git", "diff", "HEAD", "--"] + paths, in: root, timeout: 30)
         return result.stdout
     }
 
     /// Unified diff for the whole working tree (staged and unstaged), with
     /// synthesised entries appended for untracked files so they show up too.
     static func diffAll(in directory: URL, untrackedPaths: [String]) async -> String {
-        var text = await Shell.run(["git", "diff", "HEAD"], in: directory, timeout: 30).stdout
+        // The untracked paths are root-relative for the same reason, and
+        // `--no-index` reads them as plain file names.
+        let root = await root(of: directory)
+        var text = await Shell.run(["git", "diff", "HEAD"], in: root, timeout: 30).stdout
         for path in untrackedPaths {
             let result = await Shell.run(
                 ["git", "diff", "--no-index", "--", "/dev/null", path],
-                in: directory,
+                in: root,
                 timeout: 30
             )
             if !text.isEmpty && !text.hasSuffix("\n") { text += "\n" }
