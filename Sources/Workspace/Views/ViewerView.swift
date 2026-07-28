@@ -654,11 +654,15 @@ struct WelcomeView: View {
 
     /// Plain `git pull` on whatever branch the line above names. The status
     /// says which branch it was, because the pull can take long enough for the
-    /// board to have been left behind by then.
+    /// board to have been left behind by then — and the name is read once the
+    /// pull is done rather than before it starts, because a checkout in a
+    /// terminal is free to move `HEAD` while it runs. `Project` re-reads its
+    /// status before returning, so what is there afterwards is the branch the
+    /// pull actually landed on.
     private func pull(_ project: Project) {
-        let branch = project.gitStatus?.branch
         Task {
             if await project.pull() {
+                let branch = project.gitStatus?.branch
                 store.showStatus(branch.map { "Pulled \($0)" } ?? "Pulled")
             } else {
                 store.showError(project.gitError ?? "Could not pull.")
