@@ -1281,7 +1281,8 @@ struct ChangeListView: View {
         case "Added": return .green
         case "Deleted": return .red
         case "Renamed": return .blue
-        case "Untracked": return .secondary
+        // Green like a staged add, because that is what it is about to be.
+        case "Untracked": return .green
         default: return .orange
         }
     }

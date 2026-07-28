@@ -75,7 +75,11 @@ struct GitStatus: Sendable, Hashable {
             case "Deleted": return "minus.circle.fill"
             case "Renamed", "Copied": return "arrow.right.circle.fill"
             case "Type Changed": return "arrow.triangle.2.circlepath.circle.fill"
-            case "Untracked": return "questionmark.circle.fill"
+            // The same plus a staged new file wears, hollow. One file arriving
+            // is one idea at two stages, and a question mark said neither of
+            // them — it read as "git is unsure about this", when the file is
+            // simply new and not staged yet.
+            case "Untracked": return "plus.circle"
             default: return "circle.fill"
             }
         }
@@ -104,6 +108,10 @@ struct GitStatus: Sendable, Hashable {
     /// slash. Git collapses a wholly ignored folder to the folder itself, so
     /// this stays short even next to a `node_modules`.
     var ignored: Set<String> = []
+    /// Whether the branch has anything committed on it. False only for a
+    /// repository still on its first commit, which is a state several git
+    /// commands cannot be asked about at all: there is no `HEAD` to resolve.
+    var hasCommits: Bool = true
 
     var isClean: Bool { changes.isEmpty }
 
@@ -121,8 +129,16 @@ struct GitStatus: Sendable, Hashable {
         // a pathspec git will take back, so `git add` and `git restore` failed
         // on exactly those files. With `-z` each path is its own NUL-terminated
         // field, verbatim, and a rename simply adds a second one.
+        //
+        // `-uall` because git's default is to collapse a folder with nothing
+        // tracked in it down to the folder — `?? server/` — which is one row
+        // standing for any number of files. The list is a list of files: every
+        // other row is one, the diff of a folder is not something `git diff`
+        // will produce, and staging or discarding it moved more than the row
+        // named. `.gitignore` is applied either way, so this does not go
+        // walking into a `node_modules`.
         let result = await Shell.run(
-            ["git", "status", "--porcelain=v1", "--branch", "-z"],
+            ["git", "status", "--porcelain=v1", "--branch", "-z", "-uall"],
             in: directory,
             timeout: 30,
             // Reading the status normally rewrites `.git/index` to cache the
@@ -140,6 +156,7 @@ struct GitStatus: Sendable, Hashable {
         var ahead = 0
         var behind = 0
         var changes: [Change] = []
+        var hasCommits = true
 
         let fields = result.stdout.components(separatedBy: "\0")
         var index = 0
@@ -171,6 +188,7 @@ struct GitStatus: Sendable, Hashable {
                     branch = "detached"
                 } else if let prefix = Self.noCommitsPrefixes.first(where: name.hasPrefix) {
                     branch = String(name.dropFirst(prefix.count))
+                    hasCommits = false
                 } else {
                     branch = name
                 }
@@ -195,7 +213,8 @@ struct GitStatus: Sendable, Hashable {
             ahead: ahead,
             behind: behind,
             changes: changes,
-            ignored: await ignoredTask
+            ignored: await ignoredTask,
+            hasCommits: hasCommits
         )
     }
 
@@ -261,8 +280,37 @@ struct GitStatus: Sendable, Hashable {
             )
             return result.stdout
         }
-        let result = await Shell.run(["git", "diff", "HEAD", "--"] + paths, in: root, timeout: 30)
+        let base = await baseRevision(in: root)
+        let result = await Shell.run(["git", "diff", base, "--"] + paths, in: root, timeout: 30)
         return result.stdout
+    }
+
+    /// What a working tree is measured against: `HEAD` once the branch has a
+    /// commit on it, and the empty tree before that.
+    ///
+    /// `git diff HEAD` is not a question a repository still on its first commit
+    /// can be asked — `fatal: bad revision 'HEAD'` — so a file staged in a
+    /// brand new repository arrived in the viewer with nothing in it. The empty
+    /// tree is the same question with the answer git would give if that commit
+    /// existed and were empty, which keeps a deletion a deletion rather than
+    /// making every path a new file. It is asked for rather than written down
+    /// because the hash depends on the repository's hash algorithm.
+    private static func baseRevision(in root: URL) async -> String {
+        let head = await Shell.run(
+            ["git", "rev-parse", "--verify", "--quiet", "HEAD"],
+            in: root,
+            timeout: 15
+        )
+        if head.isSuccess, !head.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "HEAD"
+        }
+        let empty = await Shell.run(
+            ["git", "hash-object", "-t", "tree", "/dev/null"],
+            in: root,
+            timeout: 15
+        )
+        let hash = empty.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return hash.isEmpty ? "HEAD" : hash
     }
 
     /// Unified diff for the whole working tree (staged and unstaged), with
@@ -271,7 +319,8 @@ struct GitStatus: Sendable, Hashable {
         // The untracked paths are root-relative for the same reason, and
         // `--no-index` reads them as plain file names.
         let root = await root(of: directory)
-        var text = await Shell.run(["git", "diff", "HEAD"], in: root, timeout: 30).stdout
+        let base = await baseRevision(in: root)
+        var text = await Shell.run(["git", "diff", base], in: root, timeout: 30).stdout
         for path in untrackedPaths {
             let result = await Shell.run(
                 ["git", "diff", "--no-index", "--", "/dev/null", path],
