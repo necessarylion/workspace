@@ -111,7 +111,7 @@ missing ones, so you never have to work out which command it wanted.
 | Language servers | Diagnostics, completions (⌃Space) and ⌘-click to definition for 20+ languages. |
 | Go to file (⌘P) | `item controller` finds `app/controllers/item_controller.rb`. Punctuation optional. |
 | Search in files | ripgrep, grouped by file, every hit marked in the file you open. |
-| A file tree you can use | Drag in and out, rename in place, duplicate, multi-select, new file or folder. |
+| A file tree you can use | Drag in and out, copy and paste with Finder, rename in place, duplicate, multi-select, new file or folder. |
 
 ### Previews
 
@@ -173,6 +173,7 @@ everything macOS binds) are not on offer there.
 | ⌘-click | Go to definition · in the file tree, add a row to the selection |
 | ⌘↩ | Post the comment you typed · commit the staged files |
 | ⏎ / ⌘⌫ | File tree: rename in place · move to Trash |
+| ⌘C / ⌘V | File tree: copy the picked files · paste files copied in Finder |
 
 ## Thanks
 

@@ -1986,6 +1986,60 @@ final class WorkspaceStore {
         }
     }
 
+    // MARK: Copy and paste
+    //
+    // The pasteboard is the other end of the drag: ⌘C in Finder and ⌘V here
+    // does what dragging the file into the tree does, and ⌘C here puts real
+    // files on the pasteboard, so they can be pasted into Finder, into another
+    // app, or into another folder of this tree.
+
+    /// The files on the pasteboard, if it is holding any. Read fresh every
+    /// time — anything, in any app, can have written to it since the last look.
+    var pasteboardFiles: [URL] {
+        let objects = NSPasteboard.general.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        )
+        return (objects as? [URL] ?? []).map(\.standardizedFileURL)
+    }
+
+    /// ⌘C in the Files tab: the files themselves, not their paths — Finder's
+    /// own Paste, and every app that takes a file, wants a file URL. The paths
+    /// are what the context menu's **Copy Path** is for.
+    func copyFiles(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.writeObjects(urls.map { $0 as NSURL })
+        showStatus(urls.count == 1
+            ? "Copied \(urls[0].lastPathComponent)"
+            : "Copied \(urls.count) items")
+    }
+
+    /// ⌘V in the Files tab: whatever files are on the pasteboard, copied into
+    /// `folder`. False when the pasteboard is holding something else — text
+    /// copied out of the editor, an image — so the key can go on to whatever
+    /// else might want it.
+    @discardableResult
+    func pasteFiles(into folder: URL, project: Project) -> Bool {
+        let sources = pasteboardFiles
+        guard !sources.isEmpty else { return false }
+        Task {
+            let result = await Task.detached {
+                FileOperations.paste(sources, into: folder)
+            }.value
+
+            // Expands the folder as well, when the paste is the first thing to
+            // reach into one nobody has opened yet.
+            project.refreshFileTree(at: folder)
+            await project.refreshGitStatus()
+            if !result.finished.isEmpty { selectFiles(result.finished) }
+
+            report(result, action: "Copied", verb: "paste", place: "to \(folder.lastPathComponent)")
+        }
+        return true
+    }
+
     /// Where the Files tab's **+** puts what it makes: the selected folder, the
     /// folder of the selected file, or the repository itself. With several rows
     /// picked the first one decides, which is the row the user clicked last

@@ -123,7 +123,7 @@ struct FileListView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(
-            FileTreeKeyCatcher(claims: keyboardClaims, handle: handle)
+            FileTreeKeyCatcher(claims: keyboardClaims, handle: handle, canHandle: canHandle)
                 .frame(width: 0, height: 0)
         )
         // Switching repository leaves a selection of paths that are not in this
@@ -201,11 +201,12 @@ struct FileListView: View {
         store.openFile(file.url, revealLine: line.map { max($0 - 1, 0) })
     }
 
-    /// ⏎ renames, ⌘⌫ trashes, ↑↓ walk the rows and ⇧↑↓ extend the selection —
-    /// the same keys the Finder answers.
+    /// ⏎ renames, ⌘⌫ trashes, ⌘C and ⌘V copy and paste real files, ↑↓ walk the
+    /// rows and ⇧↑↓ extend the selection — the same keys the Finder answers.
     private func handle(_ key: FileTreeKey) -> Bool {
         // With the rename box open every one of these keys is the box's: ⏎
-        // commits the new name, ⎋ drops it, and the arrows move the caret.
+        // commits the new name, ⎋ drops it, ⌘C and ⌘V are the text's, and the
+        // arrows move the caret.
         guard store.renamingFile == nil else { return false }
         let selected = store.selectedFiles
         switch key {
@@ -217,9 +218,28 @@ struct FileListView: View {
             guard !selected.isEmpty else { return false }
             store.deleteFiles(Array(selected), project: project)
             return true
+        case .copy:
+            guard !selected.isEmpty else { return false }
+            store.copyFiles(selected.sorted { $0.path < $1.path })
+            return true
+        case .paste:
+            // The same folder the **+** would make a file in: the picked
+            // folder, the folder of the picked file, or the repository itself.
+            return store.pasteFiles(into: store.newItemFolder(in: project), project: project)
         case .move(let delta, let extending):
             store.moveFileSelection(by: delta, extending: extending, visible: rowURLs)
             return true
+        }
+    }
+
+    /// The same questions `handle` asks before it acts, without acting — what
+    /// the Edit menu greys Copy and Paste out on.
+    private func canHandle(_ key: FileTreeKey) -> Bool {
+        guard store.renamingFile == nil else { return false }
+        switch key {
+        case .copy: return !store.selectedFiles.isEmpty
+        case .paste: return !store.pasteboardFiles.isEmpty
+        default: return true
         }
     }
 
@@ -375,6 +395,13 @@ struct FileListView: View {
             keyboardClaims += 1
             store.renamingFile = nil
             store.clearFileSelection()
+        }
+        // Past the last row there is no row to act on, so the only thing worth
+        // offering is the one that puts something there. Rows carry their own
+        // menu and take the click first.
+        .contextMenu {
+            Button("Paste") { store.pasteFiles(into: project.url, project: project) }
+                .disabled(store.pasteboardFiles.isEmpty)
         }
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 12) {
@@ -700,6 +727,11 @@ struct CompactFileRow: View {
             Button("Duplicate\(many)") {
                 store.duplicateFiles(targets, project: project)
             }
+            Button("Copy\(many)") { store.copyFiles(targets) }
+            // Into this row's folder, which for a folder row is the folder
+            // itself — the same place a drop on the row would land.
+            Button("Paste") { store.pasteFiles(into: dropFolder, project: project) }
+                .disabled(store.pasteboardFiles.isEmpty)
             Button("Move\(many.isEmpty ? "" : many) to Trash") {
                 store.deleteFiles(targets, project: project)
             }
