@@ -81,6 +81,19 @@ final class Project: Identifiable {
     /// them again.
     private static let pullRequestRefreshInterval: TimeInterval = 10
 
+    /// The branch the host calls this repository's default — `main` on one,
+    /// `develop` on the next. Nil until it has been read, and when nobody could
+    /// answer; the dashboard's "Switch to …" button is the only thing that uses
+    /// it, and it stays away rather than guessing. See ``DefaultBranch``.
+    var defaultBranch: String?
+
+    /// When the host was last asked. A default branch is set once and then left
+    /// alone for years, so it is read once and kept — but a read that failed
+    /// (not signed in, no network) is worth trying again later rather than
+    /// leaving the button away for the rest of the launch.
+    @ObservationIgnored private var lastDefaultBranchRead: Date?
+    private static let defaultBranchRetryInterval: TimeInterval = 300
+
     var ports: [ListeningPort] = []
     var isScanningPorts = false
     /// Why the last attempt to stop a port failed, if it did.
@@ -101,6 +114,15 @@ final class Project: Identifiable {
     var isGitRepository: Bool { gitStatus != nil }
 
     var changeCount: Int { gitStatus?.changes.count ?? 0 }
+
+    /// The default branch when the checkout is not already sitting on it, which
+    /// is exactly when the dashboard has a switch to offer. A detached head
+    /// counts as somewhere else, because it is.
+    var defaultBranchToSwitchTo: String? {
+        guard let defaultBranch, let branch = gitStatus?.branch, branch != defaultBranch
+        else { return nil }
+        return defaultBranch
+    }
 
     /// Whether `.gitignore` covers this path — the file tree draws those faded.
     /// A file inside an ignored folder counts, since git only lists the folder.
@@ -168,7 +190,29 @@ final class Project: Identifiable {
         async let status: Void = refreshGitStatus()
         async let ports: Void = refreshPorts()
         async let requests: Void = refreshPullRequestsIfStale()
-        _ = await (status, ports, requests)
+        async let branch: Void = refreshDefaultBranchIfNeeded()
+        _ = await (status, ports, requests, branch)
+    }
+
+    /// Asks the host which branch is the default, unless it already answered.
+    /// One call to `gh`/`bkt` per repository per launch — the answer does not
+    /// change — and one more every five minutes while nobody will answer.
+    func refreshDefaultBranchIfNeeded() async {
+        guard defaultBranch == nil else { return }
+        if let last = lastDefaultBranchRead,
+           Date().timeIntervalSince(last) < Self.defaultBranchRetryInterval {
+            return
+        }
+        lastDefaultBranchRead = Date()
+        // The board can appear before the first `refresh()` has named the
+        // remote, and asking git instead of the host would then cache the
+        // staler answer — so the remote is read here rather than skipped.
+        var host = remote
+        if host == nil {
+            host = await RemoteInfo.load(for: url)
+            remote = host
+        }
+        defaultBranch = await DefaultBranch.load(remote: host, in: url)
     }
 
     /// The pull requests, unless they were read a moment ago. See

@@ -525,6 +525,17 @@ struct WelcomeView: View {
                     Image(systemName: "arrow.triangle.branch")
                     Text(status.branch)
                 }
+                // Next to the branch it changes, and only while there is a
+                // change to make — on the default branch already, the button is
+                // not drawn at all.
+                if let target = project.defaultBranchToSwitchTo {
+                    SwitchBranchButton(
+                        branch: target,
+                        isRunning: project.isRunningGitCommand
+                    ) {
+                        switchToDefaultBranch(project, branch: target)
+                    }
+                }
                 Spacer(minLength: 12)
                 AskClaudeButton { store.openClaude(in: project) }
             }
@@ -607,6 +618,20 @@ struct WelcomeView: View {
         Divider()
             .opacity(0.6)
             .padding(.vertical, 2)
+    }
+
+    /// Plain git, the same as the pull request's own checkout button: fetch
+    /// first when the branch is only on the remote, then check it out. Nothing
+    /// is forced — git refuses over uncommitted work, and its own words are
+    /// what the toast says.
+    private func switchToDefaultBranch(_ project: Project, branch: String) {
+        Task {
+            if await project.checkout(branch) {
+                store.showStatus("Switched to \(branch)")
+            } else {
+                store.showError(project.gitError ?? "Could not switch to \(branch).")
+            }
+        }
     }
 
     // MARK: - History
@@ -702,6 +727,51 @@ struct WelcomeView: View {
         .font(.callout)
         .buttonStyle(.borderless)
         .pointerCursor()
+    }
+}
+
+/// Back to the branch the repository calls its own, from the line that names
+/// the one it is on. The branch is named on the button rather than called "the
+/// default": which branch that is differs per repository — `main` here,
+/// `develop` there — and the host is what said so, so the button says it too.
+struct SwitchBranchButton: View {
+    let branch: String
+    /// A git command of the app's own is already running; two at once is what
+    /// `Project` refuses anyway, so the button says as much before it is
+    /// clicked.
+    let isRunning: Bool
+    let switchTo: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: switchTo) {
+            HStack(spacing: 4) {
+                if isRunning {
+                    ProgressView().controlSize(.small).scaleEffect(0.7)
+                        .frame(width: 11, height: 11)
+                } else {
+                    Image(systemName: "arrow.uturn.backward")
+                }
+                Text("Switch to \(branch)")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+            .background(
+                .quaternary.opacity(isHovering && !isRunning ? 0.5 : 0.3),
+                in: Capsule()
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(isRunning)
+        .onHover { isHovering = $0 }
+        .pointerCursor(!isRunning)
+        .help("Check out “\(branch)”, this repository's default branch")
+        .fixedSize()
     }
 }
 
