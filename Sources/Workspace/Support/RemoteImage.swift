@@ -100,15 +100,21 @@ final class RemoteImageLoader {
 struct MarkdownImage: View {
     let url: URL
     var alt: String = ""
+    /// The width the document asked for, when it asked — a README writes its
+    /// logo as `<img width="140">`, and a logo drawn at its full size instead
+    /// is a banner. Nothing is said about the height: the picture keeps its
+    /// shape, and the width is what decides how tall it comes out.
+    var width: CGFloat?
 
     @State private var image: NSImage?
     @State private var isLoading = true
 
     private static let maximumHeight: CGFloat = 420
 
-    init(url: URL, alt: String = "") {
+    init(url: URL, alt: String = "", width: CGFloat? = nil) {
         self.url = url
         self.alt = alt
+        self.width = width
         let cached = RemoteImageLoader.shared.cached(url)
         _image = State(initialValue: cached)
         _isLoading = State(initialValue: cached == nil && !RemoteImageLoader.shared.hasFailed(url))
@@ -127,7 +133,13 @@ struct MarkdownImage: View {
                 .aspectRatio(contentMode: .fit)
                 // `maxWidth` alone would stretch a narrow picture across the
                 // pane; the natural size is the ceiling, the pane the other one.
-                .frame(maxWidth: image.size.width, maxHeight: min(image.size.height, Self.maximumHeight))
+                // A width the document asked for takes that ceiling's place,
+                // and takes the height cap with it: the two together would
+                // squeeze a tall picture narrower than it was asked to be.
+                .frame(
+                    maxWidth: width ?? image.size.width,
+                    maxHeight: width == nil ? min(image.size.height, Self.maximumHeight) : nil
+                )
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))

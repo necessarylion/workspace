@@ -68,7 +68,7 @@ enum MarkdownHTML {
             // The source, and nothing else — the script below swaps in the
             // drawn diagram once mermaid has had it.
             return "<div class=\"diagram\">\(escape(source))</div>"
-        case .image(let address, let alt):
+        case .image(let address, let alt, let width):
             // The page is rendered off-line, in a web view with no sign-in of
             // its own, so the picture cannot be fetched here — it goes in as the
             // bytes the app already has. One it never loaded is named instead of
@@ -77,7 +77,10 @@ enum MarkdownHTML {
                 let name = alt.isEmpty ? address : alt
                 return "<p class=\"missing\">\(escape(name))</p>"
             }
-            return "<p class=\"picture\"><img src=\"\(inlined)\" alt=\"\(escape(alt))\" /></p>"
+            // The width the document asked for goes back to being a width; the
+            // stylesheet's `max-width: 100%` still keeps it inside the sheet.
+            let style = width.map { " style=\"width: \(Int($0))px\"" } ?? ""
+            return "<p class=\"picture\"><img src=\"\(inlined)\"\(style) alt=\"\(escape(alt))\" /></p>"
         case .table(let headers, let rows):
             let head = headers.map { "<th>\(inline($0))</th>" }.joined()
             let body = rows.map { row in

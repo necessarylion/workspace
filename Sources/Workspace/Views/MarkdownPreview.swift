@@ -131,7 +131,10 @@ struct MarkdownText: View {
         case disclosure(summary: String, isOpen: Bool, blocks: [Block])
         case code(language: String, text: String)
         case mermaid(String)
-        case image(url: String, alt: String)
+        /// `width` is the one an HTML `<img width="140">` asked for, in points.
+        /// Markdown's own `![](…)` cannot say it, so it is usually nothing and
+        /// the picture is drawn at its own size.
+        case image(url: String, alt: String, width: CGFloat?)
         case table(headers: [String], rows: [[String]])
         case rule
         case spacer
@@ -256,7 +259,7 @@ struct MarkdownText: View {
         case .mermaid(let source):
             MermaidDiagram(source: source)
                 .padding(.vertical, 4)
-        case .image(let address, let alt):
+        case .image(let address, let alt, let width):
             // A picture is only drawn for an address the app could actually
             // reach: one it can fetch, or a file `blocks(in:relativeTo:)` found
             // beside the document. A relative one in a comment points into a
@@ -264,7 +267,7 @@ struct MarkdownText: View {
             // folder to resolve it against — so it stays as its text.
             if let url = URL(string: address),
                url.scheme == "http" || url.scheme == "https" || url.isFileURL {
-                MarkdownImage(url: url, alt: alt)
+                MarkdownImage(url: url, alt: alt, width: width)
                     .padding(.vertical, 2)
             } else {
                 Self.inline(alt.isEmpty ? address : alt)
@@ -481,9 +484,9 @@ struct MarkdownText: View {
     private static func resolvingImages(_ blocks: [Block], relativeTo base: URL) -> [Block] {
         blocks.map { block in
             switch block {
-            case .image(let address, let alt):
+            case .image(let address, let alt, let width):
                 guard let file = localFile(for: address, relativeTo: base) else { return block }
-                return .image(url: file.absoluteString, alt: alt)
+                return .image(url: file.absoluteString, alt: alt, width: width)
             // A picture inside a quote or a folded section is still a picture.
             case .quote(let alert, let nested):
                 return .quote(alert, resolvingImages(nested, relativeTo: base))
@@ -698,7 +701,7 @@ struct MarkdownText: View {
             // becomes a picture and the words around it still read as words.
             // `AttributedString` would otherwise swallow the whole `![…](…)`
             // and draw nothing at all.
-            var images: [(url: String, alt: String)] = []
+            var images: [Picture] = []
             if !inCode, line.contains("![") {
                 let split = splitImages(from: line)
                 line = split.text
@@ -707,7 +710,7 @@ struct MarkdownText: View {
             }
             defer {
                 for image in images {
-                    result.append(.image(url: image.url, alt: image.alt))
+                    result.append(.image(url: image.url, alt: image.alt, width: image.width))
                 }
             }
             // A line that was nothing but pictures leaves no text behind, and an
@@ -776,16 +779,25 @@ struct MarkdownText: View {
         return result
     }
 
+    /// One picture pulled out of a line.
+    private struct Picture {
+        var url: String
+        var alt: String
+        var width: CGFloat?
+    }
+
     /// Pulls every `![alt](url)` out of one line, handing back what is left of
     /// the line and the pictures in the order they appeared.
     ///
     /// Bitbucket writes an attribute list after the image —
     /// `![](…png){: data-layout='center' }` — which is not Markdown any parser
     /// here knows; it is swallowed along with the image rather than left behind
-    /// as stray braces in the middle of a sentence.
-    private static func splitImages(from line: String) -> (text: String, images: [(url: String, alt: String)]) {
+    /// as stray braces in the middle of a sentence. `MarkdownHTMLText` writes
+    /// the same list to carry the one attribute that *is* read: the width an
+    /// `<img width="140">` asked for.
+    private static func splitImages(from line: String) -> (text: String, images: [Picture]) {
         var text = ""
-        var images: [(url: String, alt: String)] = []
+        var images: [Picture] = []
         var index = line.startIndex
 
         while index < line.endIndex {
@@ -808,12 +820,12 @@ struct MarkdownText: View {
             let alt = String(line[line.index(after: bracket)..<altEnd])
             let address = String(line[line.index(after: open)..<close])
                 .trimmingCharacters(in: .whitespaces)
-            images.append((url: address, alt: alt.trimmingCharacters(in: .whitespaces)))
             index = line.index(after: close)
 
-            // The `{: … }` Bitbucket hangs off the end, when there is one. The
-            // leading colon is what marks it as an attribute list rather than a
-            // brace the author happened to type next.
+            // The `{: … }` hung off the end, when there is one. The leading
+            // colon is what marks it as an attribute list rather than a brace
+            // the author happened to type next.
+            var width: CGFloat?
             var attributes = index
             while attributes < line.endIndex, line[attributes] == " " {
                 attributes = line.index(after: attributes)
@@ -822,11 +834,25 @@ struct MarkdownText: View {
                let colon = line.index(attributes, offsetBy: 1, limitedBy: line.endIndex),
                colon < line.endIndex, line[colon] == ":",
                let end = line[colon...].firstIndex(of: "}") {
+                width = imageWidth(in: line[line.index(after: colon)..<end])
                 index = line.index(after: end)
             }
+
+            images.append(
+                Picture(url: address, alt: alt.trimmingCharacters(in: .whitespaces), width: width)
+            )
         }
 
         return (text, images)
+    }
+
+    /// `width=140` out of an image's attribute list. Everything else in there —
+    /// Bitbucket's `data-layout` — is somebody else's.
+    private static func imageWidth(in attributes: Substring) -> CGFloat? {
+        guard let key = attributes.range(of: "width=") else { return nil }
+        let digits = attributes[key.upperBound...].prefix { $0.isNumber }
+        guard let number = Int(digits), number > 0 else { return nil }
+        return CGFloat(number)
     }
 
     /// "| a | b |" → ["a", "b"].
