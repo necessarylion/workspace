@@ -18,14 +18,18 @@ struct Diff: Sendable, Hashable {
     /// the token: its input is never shown on its own.)
     let revision = UUID()
 
-    var isEmpty: Bool { files.allSatisfy { $0.hunks.isEmpty } }
+    /// A binary file has no hunks and never will, but it is not nothing — the
+    /// diff view has a placeholder that says so. Counting it as empty put the
+    /// viewer's "no textual changes" error up instead, and that placeholder
+    /// could never be reached for a one-file diff.
+    var isEmpty: Bool { files.allSatisfy { $0.hunks.isEmpty && !$0.isBinary } }
 
     /// Past this many files a diff is never built whole: it is read one file at
     /// a time, and each file is syntax-coloured as it is opened. Colouring a
     /// hundred files up front runs tree-sitter over every hunk of every one of
     /// them on the main actor, and laying them all out is a scroll nobody can
     /// find anything in anyway.
-    static let fileByFileThreshold = 10
+    static let fileByFileThreshold = 20
 
     /// Whether this diff is too big to show whole — see ``fileByFileThreshold``.
     var isFileByFile: Bool { files.count > Self.fileByFileThreshold }
@@ -109,6 +113,9 @@ enum DiffParser {
         var oldLine = 0
         var newLine = 0
         var nextRowID = 0
+        /// How many characters of a hunk line are the +/- markers. One for an
+        /// ordinary diff, one per parent for a combined (`--cc`) one.
+        var markerColumns = 1
 
         func rowID() -> Int {
             defer { nextRowID += 1 }
@@ -181,9 +188,18 @@ enum DiffParser {
                 line = line.replacingOccurrences(of: "\t", with: "    ")
             }
 
-            if line.hasPrefix("diff --git ") {
+            // A merge commit, and a plain `git diff` over an unmerged path,
+            // are shown as a *combined* diff instead: a `--cc` header and a
+            // marker column per parent. Without the header every line of one
+            // was skipped and the file arrived with nothing in it. (The
+            // working-tree diff asks against `HEAD`, which git answers with an
+            // ordinary two-way diff even mid-conflict, so this is for the
+            // diffs that come from elsewhere.)
+            if line.hasPrefix("diff --git ") || line.hasPrefix("diff --cc ")
+                || line.hasPrefix("diff --combined ") {
                 flushFile()
-                let paths = parseGitHeaderPaths(line)
+                let paths = parseHeaderPaths(line)
+                markerColumns = 1
                 currentFile = DiffFile(
                     oldPath: paths.old,
                     newPath: paths.new,
@@ -196,7 +212,47 @@ enum DiffParser {
 
             guard currentFile != nil else { continue }
 
-            if line.hasPrefix("new file mode") {
+            // A hunk header first, then the hunk's own lines. The file headers
+            // below are only headers *outside* a hunk: a removed line reading
+            // `-- and so on` arrives as `--- and so on`, and testing for that
+            // prefix here used to eat the row and rename the file to it.
+            if line.hasPrefix("@@") {
+                flushHunk()
+                let numbers = parseHunkHeader(line)
+                oldLine = numbers.old
+                newLine = numbers.new
+                // One marker column per parent: `@@@` heads a two-parent diff
+                // whose rows carry two of them.
+                markerColumns = max(1, line.prefix(while: { $0 == "@" }).count - 1)
+                currentHunk = DiffHunk(header: line, rows: [])
+            } else if currentHunk != nil {
+                if line.hasPrefix("\\") {
+                    continue // "\ No newline at end of file"
+                }
+                let markers = String(line.prefix(markerColumns))
+                let content = String(line.dropFirst(markerColumns))
+                if markers.contains("-") {
+                    removedBuffer.append((oldLine, content))
+                    oldLine += 1
+                } else if markers.contains("+") {
+                    addedBuffer.append((newLine, content))
+                    newLine += 1
+                } else {
+                    flushPairs()
+                    currentHunk?.rows.append(
+                        DiffRow(
+                            id: rowID(),
+                            kind: .context,
+                            oldNumber: oldLine,
+                            oldText: content,
+                            newNumber: newLine,
+                            newText: content
+                        )
+                    )
+                    oldLine += 1
+                    newLine += 1
+                }
+            } else if line.hasPrefix("new file mode") {
                 currentFile?.change = .added
             } else if line.hasPrefix("deleted file mode") {
                 currentFile?.change = .deleted
@@ -218,37 +274,6 @@ enum DiffParser {
                 if path != "/dev/null" {
                     currentFile?.newPath = strippingPrefix(path)
                 }
-            } else if line.hasPrefix("@@") {
-                flushHunk()
-                let numbers = parseHunkHeader(line)
-                oldLine = numbers.old
-                newLine = numbers.new
-                currentHunk = DiffHunk(header: line, rows: [])
-            } else if currentHunk != nil {
-                if line.hasPrefix("-") {
-                    removedBuffer.append((oldLine, String(line.dropFirst())))
-                    oldLine += 1
-                } else if line.hasPrefix("+") {
-                    addedBuffer.append((newLine, String(line.dropFirst())))
-                    newLine += 1
-                } else if line.hasPrefix("\\") {
-                    continue // "\ No newline at end of file"
-                } else {
-                    flushPairs()
-                    let content = line.hasPrefix(" ") ? String(line.dropFirst()) : line
-                    currentHunk?.rows.append(
-                        DiffRow(
-                            id: rowID(),
-                            kind: .context,
-                            oldNumber: oldLine,
-                            oldText: content,
-                            newNumber: newLine,
-                            newText: content
-                        )
-                    )
-                    oldLine += 1
-                    newLine += 1
-                }
             }
         }
 
@@ -267,11 +292,21 @@ enum DiffParser {
         return path
     }
 
-    private static func parseGitHeaderPaths(_ line: String) -> (old: String, new: String) {
-        // diff --git a/old b/new
-        let rest = String(line.dropFirst("diff --git ".count))
+    /// The paths out of a `diff --git a/old b/new` line — or out of a
+    /// `diff --cc file`, which names the one path it is about and no other.
+    ///
+    /// Both forms are rewritten by the `--- ` and `+++ ` lines that follow
+    /// wherever those exist, so the naive split below only has to hold for a
+    /// rename, a mode change or a binary, which have neither.
+    private static func parseHeaderPaths(_ line: String) -> (old: String, new: String) {
+        guard let space = line.dropFirst("diff ".count).firstIndex(of: " ") else {
+            return ("", "")
+        }
+        let rest = String(line[line.index(after: space)...])
         guard let range = rest.range(of: " b/") else {
-            return (rest, rest)
+            // `diff --cc file`: one path, standing for both sides.
+            let path = strippingPrefix(rest)
+            return (path, path)
         }
         let old = strippingPrefix(String(rest[rest.startIndex..<range.lowerBound]))
         let new = String(rest[range.upperBound...])
