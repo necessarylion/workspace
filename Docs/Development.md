@@ -178,6 +178,7 @@ Sources/Workspace/
     PullRequestBuild.swift    the CI runs on the head commit, normalised across hosts
     GitHubAccounts.swift      per-repo gh account choice + GH_TOKEN injection
     GitStatus.swift           porcelain status + per-file diff
+    DefaultBranch.swift       which branch the host calls default: gh/bkt, then origin/HEAD
     RepositoryCommit.swift    the branch's own git log, grouped by day
     DiffModel.swift           unified diff → side-by-side rows
     MarkdownCodeHighlighter.swift  tree-sitter colours for a ``` fence
