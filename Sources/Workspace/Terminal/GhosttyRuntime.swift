@@ -226,6 +226,33 @@ final class GhosttyRuntime {
             onView(surfaceBits) { view in view.onDesktopNotification?(title, body) }
             return true
 
+        // Ghostty finds the links itself and draws the underline itself; what
+        // it cannot do from in there is change the pointer over one.
+        case GHOSTTY_ACTION_MOUSE_SHAPE:
+            let shape = action.action.mouse_shape.rawValue
+            onView(surfaceBits) { view in view.setMouseShape(shape) }
+            return true
+
+        // An empty URL is how ghostty says the pointer has left the link.
+        case GHOSTTY_ACTION_MOUSE_OVER_LINK:
+            let isOver = action.action.mouse_over_link.len > 0
+            onView(surfaceBits) { view in view.setOverLink(isOver) }
+            return true
+
+        // ⌘-click on a link. The terminal's contents are ghostty's alone, so
+        // this is the only way a URL in it ever reaches a browser.
+        case GHOSTTY_ACTION_OPEN_URL:
+            let opened = action.action.open_url
+            guard let address = opened.url else { return false }
+            // Counted, not NUL-terminated, and only ours for this call.
+            let text = String(
+                decoding: UnsafeRawBufferPointer(start: address, count: Int(opened.len)),
+                as: UTF8.self
+            )
+            guard let url = URL(string: text) else { return false }
+            Task { @MainActor in NSWorkspace.shared.open(url) }
+            return true
+
         default:
             // Tabs, splits, fullscreen … are this app's own concern, not
             // ghostty's. Report them unhandled.

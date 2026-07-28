@@ -258,6 +258,45 @@ final class GhosttySurfaceView: NSView {
         (0xF700...0xF8FF).contains(scalar.value)
     }
 
+    /// A modifier pressed on its own is a key event too, and ghostty has to be
+    /// told: it decides whether the link under the pointer is underlined from
+    /// the modifiers it last heard about, and holding ⌘ moves no mouse. Without
+    /// this the highlight only ever appeared if you kept the pointer moving
+    /// while ⌘ was already down.
+    ///
+    /// It cannot go through `forwardKey`: `characters` is only defined on a key
+    /// event, and asking a flags-changed event for it raises.
+    override func flagsChanged(with event: NSEvent) {
+        guard let surface else { return }
+        // Both keys of each pair — left and right ⇧, ⌃, ⌥, ⌘.
+        let flag: NSEvent.ModifierFlags? = switch event.keyCode {
+        case 0x39: .capsLock
+        case 0x38, 0x3C: .shift
+        case 0x3B, 0x3E: .control
+        case 0x3A, 0x3D: .option
+        case 0x36, 0x37: .command
+        default: nil
+        }
+        guard let flag else { return }
+
+        var key = ghostty_input_key_s()
+        key.action = event.modifierFlags.contains(flag) ? GHOSTTY_ACTION_PRESS : GHOSTTY_ACTION_RELEASE
+        key.mods = Self.mods(from: event.modifierFlags)
+        key.consumed_mods = ghostty_input_mods_e(rawValue: GHOSTTY_MODS_NONE.rawValue)
+        key.keycode = UInt32(event.keyCode)
+        key.composing = false
+        key.unshifted_codepoint = 0
+        _ = ghostty_surface_key(surface, key)
+
+        // The position has not changed, only what is held down with it.
+        if let point = window?.mouseLocationOutsideOfEventStream {
+            let position = convert(point, from: nil)
+            if bounds.contains(position) {
+                reportMouse(at: position, mods: Self.mods(from: event.modifierFlags))
+            }
+        }
+    }
+
     private static func mods(from flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {
         var mods = GHOSTTY_MODS_NONE.rawValue
         if flags.contains(.shift) { mods |= GHOSTTY_MODS_SHIFT.rawValue }
@@ -365,7 +404,11 @@ final class GhosttySurfaceView: NSView {
         _ event: NSEvent
     ) {
         guard let surface else { return }
-        _ = ghostty_surface_mouse_button(surface, state, which, Self.mods(from: event.modifierFlags))
+        var mods = Self.mods(from: event.modifierFlags)
+        // Only a click *on a link* is claimed from the program; every other
+        // click is still its own, so it keeps the modifiers it was made with.
+        if overLink { mods = Self.claimingLinks(mods, capturedBy: surface) }
+        _ = ghostty_surface_mouse_button(surface, state, which, mods)
     }
 
     override func mouseMoved(with event: NSEvent) { reportMouse(event) }
@@ -380,15 +423,85 @@ final class GhosttySurfaceView: NSView {
     }
 
     private func reportMouse(_ event: NSEvent) {
+        reportMouse(at: convert(event.locationInWindow, from: nil), mods: Self.mods(from: event.modifierFlags))
+    }
+
+    private func reportMouse(at position: NSPoint, mods: ghostty_input_mods_e) {
         guard let surface else { return }
-        let position = convert(event.locationInWindow, from: nil)
         // Ghostty's origin is the top-left corner.
         ghostty_surface_mouse_pos(
             surface,
             position.x,
             frame.height - position.y,
-            Self.mods(from: event.modifierFlags)
+            Self.claimingLinks(mods, capturedBy: surface)
         )
+    }
+
+    // MARK: - Links
+
+    /// True while ghostty says a link is under the pointer.
+    private var overLink = false
+
+    /// Set from ghostty's mouse-over-link action; an empty URL means the
+    /// pointer has left the link.
+    func setOverLink(_ isOver: Bool) { overLink = isOver }
+
+    /// Ghostty stops looking for links the moment the program in the terminal
+    /// asks for mouse events, and Claude Code asks for them — which is why a
+    /// URL in a conversation underlined nowhere while it underlined fine at a
+    /// shell prompt. Ghostty's own way past a program that has taken the mouse
+    /// is ⇧: it means "this one is the terminal's, not the program's", and the
+    /// link is then matched with the ⇧ taken back off again.
+    ///
+    /// So a held ⌘ goes down as ⇧⌘. Ghostty matches ⌘, which is what the link
+    /// wants, and drops the event rather than reporting it — a ⌘-click was
+    /// never meant for the program anyway. With no program holding the mouse
+    /// there is nothing to get past, and the modifiers go as they are: adding
+    /// ⇧ there would be compared literally and match no link at all.
+    private static func claimingLinks(
+        _ mods: ghostty_input_mods_e,
+        capturedBy surface: ghostty_surface_t
+    ) -> ghostty_input_mods_e {
+        let superKey = GHOSTTY_MODS_SUPER.rawValue | GHOSTTY_MODS_SUPER_RIGHT.rawValue
+        guard mods.rawValue & superKey != 0, ghostty_surface_mouse_captured(surface) else { return mods }
+        return ghostty_input_mods_e(rawValue: mods.rawValue | GHOSTTY_MODS_SHIFT.rawValue)
+    }
+
+    // MARK: - Pointer
+
+    /// The pointer ghostty asks for — an I-beam over text, a hand over a link.
+    /// It reaches us as a shape rather than a cursor, so the mapping is here.
+    func setMouseShape(_ shape: UInt32) {
+        mouseCursor = switch ghostty_action_mouse_shape_e(rawValue: shape) {
+        case GHOSTTY_MOUSE_SHAPE_DEFAULT: .arrow
+        case GHOSTTY_MOUSE_SHAPE_POINTER: .pointingHand
+        case GHOSTTY_MOUSE_SHAPE_CROSSHAIR: .crosshair
+        case GHOSTTY_MOUSE_SHAPE_VERTICAL_TEXT: .iBeamCursorForVerticalLayout
+        case GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED, GHOSTTY_MOUSE_SHAPE_NO_DROP: .operationNotAllowed
+        case GHOSTTY_MOUSE_SHAPE_GRAB: .openHand
+        case GHOSTTY_MOUSE_SHAPE_GRABBING: .closedHand
+        case GHOSTTY_MOUSE_SHAPE_COL_RESIZE, GHOSTTY_MOUSE_SHAPE_EW_RESIZE: .resizeLeftRight
+        case GHOSTTY_MOUSE_SHAPE_ROW_RESIZE, GHOSTTY_MOUSE_SHAPE_NS_RESIZE: .resizeUpDown
+        // A terminal is text, so anything without a pointer of its own is
+        // better served by the I-beam than by an arrow.
+        default: .iBeam
+        }
+    }
+
+    private var mouseCursor: NSCursor = .iBeam {
+        didSet {
+            guard mouseCursor != oldValue else { return }
+            // The rects are what AppKit reads as the pointer moves; setting it
+            // as well is what makes the change show without waiting for a move,
+            // and ⌘ going down over a link moves nothing.
+            window?.invalidateCursorRects(for: self)
+            mouseCursor.set()
+        }
+    }
+
+    override func resetCursorRects() {
+        discardCursorRects()
+        addCursorRect(bounds, cursor: mouseCursor)
     }
 
     override func scrollWheel(with event: NSEvent) {
