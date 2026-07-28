@@ -292,6 +292,7 @@ Sources/Workspace/
   Support/FileOperations.swift  what the Files tab does to disk: copy, move, rename, trash
   Support/MarkdownPDF.swift   the preview as a PDF: measure, render, cut into sheets
   Support/MarkdownHTML.swift  the same document as a printable page, diagrams and all
+  Support/MarkdownHTMLText.swift  the HTML in a comment: `<details>`, `<br>`, `&amp;`, hidden comments
   Support/StreamingShellProcess.swift  a command that stays up, read a line at a time
   Support/JSONValue.swift     JSON of a shape only known at runtime (tool inputs)
   Support/RemoteImage.swift   pictures Markdown points at: download once, draw, fall back

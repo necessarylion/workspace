@@ -705,12 +705,23 @@ extension PullRequestService {
     static func parseTimestamp(_ string: String) -> Date? {
         let withFraction = ISO8601DateFormatter()
         withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = withFraction.date(from: string) { return date }
-        if let date = ISO8601DateFormatter().date(from: string) { return date }
+        if let date = withFraction.date(from: string) { return real(date) }
+        if let date = ISO8601DateFormatter().date(from: string) { return real(date) }
         // Bitbucket Data Center sends epoch milliseconds.
         if let milliseconds = Double(string) {
-            return Date(timeIntervalSince1970: milliseconds / 1000)
+            return real(Date(timeIntervalSince1970: milliseconds / 1000))
         }
         return nil
+    }
+
+    /// Nothing, for a time that only means the host had none to give.
+    ///
+    /// `gh` writes a check with no time of its own as `0001-01-01T00:00:00Z` —
+    /// Go's zero `time.Time` — and a check posted by a bot that never ran (a
+    /// review it declined, say) carries exactly that. Read as a date it is real
+    /// enough to format, which is how "2,025 years ago" ends up on screen.
+    /// Nothing this app reads about a pull request predates the epoch.
+    private static func real(_ date: Date) -> Date? {
+        date.timeIntervalSince1970 > 0 ? date : nil
     }
 }
