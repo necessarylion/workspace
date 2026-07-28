@@ -78,6 +78,7 @@ missing ones, so you never have to work out which command it wanted.
 | Start or clone one | ⌘N makes an empty repository; ⇧⌘N clones from an SSH or HTTPS URL. Either lands in the sidebar. |
 | Sidebar that stays true | Branch, ahead/behind, open PRs and changed files, re-read every five minutes. |
 | Back to the default branch | The dashboard asks GitHub or Bitbucket which branch is the default — `main`, `develop`, `master` — and one button checks it out. |
+| Pull, next to it | The button beside it brings the branch you are on up to date. Plain `git pull` — whatever the repository configures is what runs. |
 | Your order | Drag cards to reorder, filter by name or path, fold it away with ⌘0. |
 | Several GitHub accounts | Each repo uses its own `gh` account. Nothing global is switched. |
 | Ports and Open in… | Live ports for the folder, and one click to VS Code, Cursor, Zed, Finder or Terminal. |

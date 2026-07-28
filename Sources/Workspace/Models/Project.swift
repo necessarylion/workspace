@@ -693,6 +693,21 @@ final class Project: Identifiable {
         return await runGit(["push", "--set-upstream", "origin", branch])
     }
 
+    /// Brings the current branch up to date with its remote. Plain `git pull`,
+    /// with no upstream invented and no rebase chosen for the user: which of
+    /// those a repository wants is its own configuration, and git already reads
+    /// it. A branch with no upstream, a dirty tree, a conflicted merge — git
+    /// refuses each of those in its own words, and those words are what the
+    /// toast says.
+    @discardableResult
+    func pull() async -> Bool {
+        guard let branch = gitStatus?.branch, branch != "detached" else {
+            gitError = "Not on a branch, so there is nothing to pull."
+            return false
+        }
+        return await runGit(["pull"])
+    }
+
     /// Switches to an existing branch. A pull request's source branch is often
     /// only on the remote, and git can only create a local branch from it once
     /// that ref has been fetched — so fetch first when there is no local branch

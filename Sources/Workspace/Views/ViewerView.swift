@@ -527,13 +527,31 @@ struct WelcomeView: View {
                 }
                 // Next to the branch it changes, and only while there is a
                 // change to make — on the default branch already, the button is
-                // not drawn at all.
+                // not drawn at all. The branch is named on the button rather
+                // than called "the default": which branch that is differs per
+                // repository — `main` here, `develop` there — and the host is
+                // what said so, so the button says it too.
                 if let target = project.defaultBranchToSwitchTo {
-                    SwitchBranchButton(
-                        branch: target,
+                    BranchActionButton(
+                        title: "Switch to \(target)",
+                        symbol: "arrow.uturn.backward",
+                        help: "Check out “\(target)”, this repository's default branch",
                         isRunning: project.isRunningGitCommand
                     ) {
                         switchToDefaultBranch(project, branch: target)
+                    }
+                }
+                // And next to that, the same branch brought up to date. Drawn
+                // only for a repository that has a remote to pull from: without
+                // an `origin` the command has nowhere to go.
+                if project.gitStatus != nil, project.remote != nil {
+                    BranchActionButton(
+                        title: "Pull",
+                        symbol: "arrow.down",
+                        help: "Pull the current branch from its remote",
+                        isRunning: project.isRunningGitCommand
+                    ) {
+                        pull(project)
                     }
                 }
                 Spacer(minLength: 12)
@@ -634,6 +652,20 @@ struct WelcomeView: View {
         }
     }
 
+    /// Plain `git pull` on whatever branch the line above names. The status
+    /// says which branch it was, because the pull can take long enough for the
+    /// board to have been left behind by then.
+    private func pull(_ project: Project) {
+        let branch = project.gitStatus?.branch
+        Task {
+            if await project.pull() {
+                store.showStatus(branch.map { "Pulled \($0)" } ?? "Pulled")
+            } else {
+                store.showError(project.gitError ?? "Could not pull.")
+            }
+        }
+    }
+
     // MARK: - History
 
     /// The branch's own commits, a day at a time. Only the folder's history is
@@ -730,30 +762,34 @@ struct WelcomeView: View {
     }
 }
 
-/// Back to the branch the repository calls its own, from the line that names
-/// the one it is on. The branch is named on the button rather than called "the
-/// default": which branch that is differs per repository — `main` here,
-/// `develop` there — and the host is what said so, so the button says it too.
-struct SwitchBranchButton: View {
-    let branch: String
+/// One of the git commands the repository line offers — back to the branch the
+/// repository calls its own, or the current branch brought up to date. They sit
+/// in a line of secondary text rather than a toolbar, so they are drawn as
+/// quiet pills instead of controls, and they share the one shape because they
+/// stand side by side. The running spinner takes the glyph's place: every one
+/// of these is a git command, and `Project` runs one at a time.
+struct BranchActionButton: View {
+    let title: String
+    let symbol: String
+    let help: String
     /// A git command of the app's own is already running; two at once is what
     /// `Project` refuses anyway, so the button says as much before it is
     /// clicked.
     let isRunning: Bool
-    let switchTo: () -> Void
+    let run: () -> Void
 
     @State private var isHovering = false
 
     var body: some View {
-        Button(action: switchTo) {
+        Button(action: run) {
             HStack(spacing: 4) {
                 if isRunning {
                     ProgressView().controlSize(.small).scaleEffect(0.7)
                         .frame(width: 11, height: 11)
                 } else {
-                    Image(systemName: "arrow.uturn.backward")
+                    Image(systemName: symbol)
                 }
-                Text("Switch to \(branch)")
+                Text(title)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -770,7 +806,7 @@ struct SwitchBranchButton: View {
         .disabled(isRunning)
         .onHover { isHovering = $0 }
         .pointerCursor(!isRunning)
-        .help("Check out “\(branch)”, this repository's default branch")
+        .help(help)
         .fixedSize()
     }
 }
