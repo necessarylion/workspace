@@ -486,7 +486,21 @@ final class Project: Identifiable {
 
     /// `git restore --staged` leaves the working tree alone, so unstaging never
     /// costs the user their edits.
+    ///
+    /// Except on the first commit, where it cannot run at all: `--staged` means
+    /// "put back what `HEAD` has", and a branch with nothing on it has no `HEAD`
+    /// to read — `fatal: could not resolve HEAD`, and the button did nothing.
+    /// There is only an index to empty in that case, which is `rm --cached`; it
+    /// leaves the file on disk just the same, so the file goes back to being
+    /// untracked rather than being lost. Same pair of commands ``discard(_:)``
+    /// already chooses between.
     func unstage(_ paths: [String]) async {
+        guard gitStatus?.hasCommits ?? true else {
+            await runGit(
+                ["rm", "--cached", "--force", "-r", "--quiet", "--ignore-unmatch", "--"] + paths
+            )
+            return
+        }
         await runGit(["restore", "--staged", "--"] + paths)
     }
 
@@ -572,7 +586,8 @@ final class Project: Identifiable {
         let restore = paths.filter { known.contains($0) }
         if !restore.isEmpty { steps.append(["checkout", "--"] + restore) }
         let remove = paths.filter { !known.contains($0) }
-        // `-d` because git collapses a wholly untracked folder to the folder.
+        // `-d` for the path that names a folder rather than a file; a file
+        // pathspec leaves the folder it was in behind either way, empty.
         if !remove.isEmpty { steps.append(["clean", "--force", "-d", "--"] + remove) }
 
         var succeeded = true
