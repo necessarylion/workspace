@@ -220,8 +220,8 @@ struct ClaudeSessionListView: View {
 }
 
 /// One conversation running in this window — a terminal tab with `claude` in it.
-/// The row shows it; the ✕ under the pointer closes that tab alone, and the
-/// others keep going.
+/// The row shows it; the stop button under the pointer closes that tab alone,
+/// and the others keep going.
 private struct LiveClaudeRow: View {
     let terminal: OpenTerminal
     let isOnScreen: Bool
@@ -271,15 +271,20 @@ private struct LiveClaudeRow: View {
         // Floating, for the reason spelled out on ``ClaudeSessionRow``.
         .overlay(alignment: .topTrailing) {
             if isHovering {
+                // A stop sign, not a cross: this row's button ends a
+                // conversation that is still going, which is not the same act
+                // as closing a window, and red is what says so before the
+                // click. The Past row below keeps its ✕ — that one only throws
+                // a finished transcript away.
                 Button(action: close) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 8, weight: .bold))
                         .frame(width: 16, height: 16)
                         .background(.regularMaterial, in: Circle())
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.red)
                 .help("End this conversation and close its tab")
                 .pointerCursor()
                 .padding(.top, 5)
