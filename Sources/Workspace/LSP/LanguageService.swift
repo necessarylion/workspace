@@ -147,10 +147,14 @@ final class LanguageService {
     ///   consequences: `@vue/typescript-plugin` serves a document only when it
     ///   arrives as `vue`, so tsserver would instead try to read `<template>` as
     ///   TypeScript and report a file full of syntax errors.
-    func open(uri: String, text: String, languageID: String? = nil) async {
-        guard await startIfNeeded() else { return }
+    /// - Returns: Whether the server is now holding this document. False means the
+    ///   server never started — nothing was sent, and nothing may be sent, since
+    ///   every later notification is guarded on a document this one never opened.
+    @discardableResult
+    func open(uri: String, text: String, languageID: String? = nil) async -> Bool {
+        guard await startIfNeeded() else { return false }
         openCount[uri, default: 0] += 1
-        guard openCount[uri] == 1 else { return }
+        guard openCount[uri] == 1 else { return true }
         versions[uri] = 1
         await connection.notify(
             "textDocument/didOpen",
@@ -163,6 +167,7 @@ final class LanguageService {
                 )
             )
         )
+        return true
     }
 
     /// Full-text sync: simple, and correct for every server.
@@ -262,14 +267,23 @@ final class LanguageService {
         }
     }
 
-    func symbols(uri: String) async -> [LSP.Symbol] {
-        guard status.isHealthy else { return [] }
-        let result = try? await connection.request(
-            "textDocument/documentSymbol",
-            params: DocumentParams(textDocument: .init(uri: uri)),
-            timeout: 8
-        )
-        return LSP.decodeSymbols(Self.json(result))
+    /// Nil when the server never answered, for the same reason as ``definitions``
+    /// — and here the distinction is what keeps the outline honest. An empty
+    /// array is a real answer: the last declaration in the file was deleted, and
+    /// the outline should empty with it. Collapsing the two would leave the
+    /// window showing symbols that are no longer in the text.
+    func symbols(uri: String) async -> [LSP.Symbol]? {
+        guard status.isHealthy else { return nil }
+        do {
+            let result = try await connection.request(
+                "textDocument/documentSymbol",
+                params: DocumentParams(textDocument: .init(uri: uri)),
+                timeout: 8
+            )
+            return LSP.decodeSymbols(Self.json(result))
+        } catch {
+            return nil
+        }
     }
 
     private static func json(_ data: Data??) -> Any? {

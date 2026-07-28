@@ -45,6 +45,13 @@ final class LanguageServerCoordinator: TextViewCoordinator, TextViewDelegate, @u
     /// Edits waiting to be sent, oldest first.
     private var pending: [LSP.TextChange] = []
     private var flushTask: Task<Void, Never>?
+    /// The in-flight `didOpen`, held so that ``destroy()`` can wait for it.
+    ///
+    /// The handshake behind it can run for tens of seconds, and a `didClose` that
+    /// overtook it would find nothing open, return, and leave the server holding a
+    /// document that is never closed — analysing a file nobody is looking at, and
+    /// one more leaked open on every teardown.
+    private var openTask: Task<Void, Never>?
     /// Set when an edit could not be expressed as a range, so the next send has
     /// to be the whole file. One unexpressed edit makes every later range in the
     /// batch a lie, and the only honest repair is to restate the document.
@@ -105,19 +112,58 @@ final class LanguageServerCoordinator: TextViewCoordinator, TextViewDelegate, @u
 
         observeStatus()
         observeSaves()
+        openIfNeeded()
+    }
+
+    /// Opens the document with every server this file has.
+    ///
+    /// Re-runnable, and deliberately so. `LanguageService.startIfNeeded` drops its
+    /// task when a start fails, so a server that was not installed when the file
+    /// was opened gets another go — and that second start is worth nothing unless
+    /// the document is opened with it as well. Everything that waits on the
+    /// server comes through here first for that reason. A second call after a
+    /// successful open does nothing: ``isOpen`` stops it, and `LanguageService`
+    /// counts opens per URI besides.
+    @MainActor
+    private func openIfNeeded() {
+        guard isRunning, !isOpen, openTask == nil, let service else { return }
 
         let text = document.text
         // Every server holds this file under the *file's* language, not its own.
         // See `LanguageService.open(uri:text:languageID:)` — the companion is the
         // whole reason that parameter exists.
         let languageID = service.definition.languageID
-        Task { @MainActor [weak self] in
+        openTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            // Only the answering server decides. `open` returns false when the
+            // process never started — nothing was sent, and `LanguageService`
+            // will drop every `didChange` after it — so calling the document
+            // open would strand the edits: `flush()` would clear `needsFullText`
+            // against a server that is not listening, and the restatement owed
+            // when it does come up would be gone.
+            var opened = false
             for target in self.targets {
-                await target.open(uri: self.uri, text: text, languageID: languageID)
+                let didOpen = await target.open(uri: self.uri, text: text, languageID: languageID)
+                if target === self.service { opened = didOpen }
             }
-            guard self.isRunning else { return }
+            self.openTask = nil
+            guard self.isRunning, opened else { return }
             self.isOpen = true
+            self.catchUp()
+        }
+    }
+
+    /// Says everything the server missed while it was starting.
+    ///
+    /// Its own task, so that ``openTask`` ends with the notification it stands
+    /// for. Both things that wait on that task want the `didOpen` and nothing
+    /// after it: ``destroy()`` only needs `didClose` to follow it, and a ⌘-click
+    /// arriving mid-startup should not sit through a symbol request's 8 s
+    /// timeout. Guarded on ``isRunning``, so it falls away with the pane.
+    @MainActor
+    private func catchUp() {
+        Task { @MainActor [weak self] in
+            guard let self, self.isRunning else { return }
             // Anything typed while the server was starting was held back rather
             // than sent — see ``flush()`` — so the file is restated now that it
             // will be listened to.
@@ -139,12 +185,17 @@ final class LanguageServerCoordinator: TextViewCoordinator, TextViewDelegate, @u
 
             let closing = targets
             let uri = self.uri
+            // Not cancelled — the `didOpen` it is in the middle of has to finish,
+            // or the `didClose` below has nothing to close. See ``openTask``.
+            let opening = openTask
+            openTask = nil
             service = nil
             companion = nil
             controller = nil
             document.languageServerStatus = ""
 
             Task {
+                await opening?.value
                 for target in closing { await target.close(uri: uri) }
             }
         }
@@ -192,12 +243,17 @@ final class LanguageServerCoordinator: TextViewCoordinator, TextViewDelegate, @u
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self, self.isRunning else { return }
+                // Re-armed *before* the awaits, not after. `withObservationTracking`
+                // fires once, and the work below runs for as long as the symbol
+                // request's 8 s timeout — a second ⌘S inside that window would
+                // change `saveRevision` while nothing was watching it, which is
+                // exactly the save that `rust-analyzer` needs to see.
+                self.observeSaves()
                 let text = self.document.text
                 for target in self.targets {
                     await target.save(uri: self.uri, text: text)
                 }
                 await self.refreshSymbols()
-                self.observeSaves()
             }
         }
     }
@@ -243,8 +299,26 @@ final class LanguageServerCoordinator: TextViewCoordinator, TextViewDelegate, @u
         flushTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(250))
             guard let self else { return }
-            self.flushTask = nil
+            // Released only once the send is done. Clearing it first would let an
+            // edit arriving mid-send schedule a second flush, and two batches
+            // racing to `change(uri:changes:)` is the one thing incremental sync
+            // cannot survive — each batch's ranges are stated against the document
+            // the batch before it produced. Edits arriving now are simply carried
+            // into the next round, which is the batching this is here to do.
             await self.flush()
+            self.flushTask = nil
+            // Those carried-over edits still have to leave. Nothing else will ask
+            // — `scheduleFlush` turned every one of them away while the send was
+            // running — so if the user stopped typing at that moment this is the
+            // only thing standing between them and a server that never hears
+            // about the last thing they typed.
+            //
+            // Only while the document is really open, though: before that
+            // `flush()` deliberately banks the edits as a restatement and returns,
+            // so rescheduling on it would spin every 250 ms for the whole
+            // handshake. `start()` does the restating itself once `didOpen` lands.
+            guard self.isRunning, self.isOpen else { return }
+            if self.needsFullText || !self.pending.isEmpty { self.scheduleFlush() }
         }
     }
 
@@ -285,11 +359,14 @@ final class LanguageServerCoordinator: TextViewCoordinator, TextViewDelegate, @u
 
     // MARK: - Symbols
 
+    /// Nil, not empty, is what means "no answer" — see
+    /// ``LanguageService/symbols(uri:)``. An empty list is a real one, and taking
+    /// it for a failed request is how the outline goes on listing a function the
+    /// user has just deleted.
     @MainActor
     private func refreshSymbols() async {
         guard isRunning, let service else { return }
-        let found = await service.symbols(uri: uri)
-        guard isRunning, !found.isEmpty else { return }
+        guard let found = await service.symbols(uri: uri), isRunning else { return }
         document.symbols = found
     }
 
@@ -341,6 +418,13 @@ extension LanguageServerCoordinator: JumpToDefinitionDelegate {
         // answers nothing at all until it is running — which the package can only
         // report as the "no definition" bezel, for a symbol that has one.
         guard await service.startIfNeeded(), isRunning else { return nil }
+        // A server that failed to start when the file was opened has just been
+        // given another go and taken it — but it has never seen this document.
+        // Asking it about a position in a file it does not hold is how the user
+        // gets "no definition" for a symbol that has one.
+        openIfNeeded()
+        await openTask?.value
+        guard isRunning else { return nil }
 
         let label = (view.textStorage.string as NSString).substring(with: range)
         // Nil, not empty, when the server never answered. sourcekit-lsp can
@@ -435,7 +519,21 @@ extension LanguageServerCoordinator: CodeSuggestionDelegate {
     /// languages here rather than the server's own set — the server is asked for
     /// its trigger characters during `initialize`, which is a capability we do
     /// not read back yet.
-    func completionTriggerCharacters() -> Set<String> { [".", ":", "->", "@", "<"] }
+    ///
+    /// **One keystroke each.** `SuggestionTriggerCharacterModel` matches with
+    /// `contains(String(lastChar))` against the single character just typed, so a
+    /// sequence never matches: Rust's `->` has to be spelled as the `>` that ends
+    /// it, and `<` is already here for the same reason on the other side.
+    ///
+    /// **And it lives on the configuration, not here.** The protocol declares
+    /// `completionTriggerCharacters()` but CodeEditSourceEditor 0.15.2 never calls
+    /// it — the model reads `peripherals.codeSuggestionTriggerCharacters` instead,
+    /// which is why `CodeEditorView` passes this set there. The method below
+    /// answers with the same constant so the two cannot drift if a later version
+    /// starts asking.
+    static let triggerCharacters: Set<String> = [".", ":", ">", "@", "<"]
+
+    func completionTriggerCharacters() -> Set<String> { Self.triggerCharacters }
 
     @MainActor
     func completionSuggestionsRequested(

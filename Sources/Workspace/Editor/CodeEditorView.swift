@@ -160,9 +160,19 @@ private struct EditorPane: View {
             // comes from the syntax tree, and there is no tree for one of those —
             // so it is a column of nothing, drawn per line, over a document with
             // a great many of them.
+            //
+            // The trigger characters belong here and nowhere else: the package
+            // declares `completionTriggerCharacters()` on the delegate but never
+            // calls it, and `SuggestionTriggerCharacterModel` reads this instead —
+            // so a set given only to the delegate is a set that never fires. Only
+            // when there is a server to answer, since the list has nothing to
+            // show without one.
             peripherals: .init(
                 showMinimap: false,
-                showFoldingRibbon: !document.isLargeFile
+                showFoldingRibbon: !document.isLargeFile,
+                codeSuggestionTriggerCharacters: languageServer == nil
+                    ? []
+                    : LanguageServerCoordinator.triggerCharacters
             )
         )
     }

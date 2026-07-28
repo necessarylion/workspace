@@ -124,9 +124,14 @@ been fine; they were not why.
   same closed 21-case `CaptureName` that costs us 56 captures today, see
   `Editor/EditorThemeBridge.swift` — but *accuracy*, a type the compiler resolved
   instead of one the grammar guessed.
-- **Trigger characters from the server.** `completionTriggerCharacters()`
-  currently returns a fixed set that suits the languages here. `initialize`
-  reports the server's own; we do not read it back yet.
+- **Trigger characters from the server.** A fixed set that suits the languages
+  here — `LanguageServerCoordinator.triggerCharacters`. `initialize` reports the
+  server's own; we do not read it back yet. Two things it has to be, whatever it
+  comes from: passed through `peripherals.codeSuggestionTriggerCharacters`, since
+  the package declares `completionTriggerCharacters()` on the delegate and then
+  never calls it, and **one keystroke per entry** — the match is
+  `contains(String(lastChar))` against the character just typed, so `->` can only
+  be spelled as the `>` that ends it.
 - **Snippets** are flattened. `foo(${1:bar})` becomes `foo(bar)` — never a
   placeholder left in the file, but no tab stops either.
 
