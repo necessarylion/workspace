@@ -229,12 +229,21 @@ final class TerminalSession: Identifiable {
     /// never sends one — hence the ceiling. The cover always comes down: a
     /// second of shell prompt is a far better failure than a spinner that stays
     /// for good.
+    ///
+    /// The command is **exec'd**, so `claude` replaces the shell instead of
+    /// running inside it: leaving the conversation — `/exit`, ^D, the CLI
+    /// falling over — ends the process the terminal is watching, and the tab
+    /// closes itself the way one typed `exit` into does. Run as a plain command,
+    /// what a finished conversation left behind was a shell prompt still sitting
+    /// in the Claude tab claiming to be a conversation that was running. A shell
+    /// that cannot find `claude` at all execs nothing and stays where it is,
+    /// with the error on screen.
     func runClaude(_ command: String) {
         isStartingClaude = true
         claudeStartupWatch?.cancel()
         claudeStartupWatch = Task { [weak self] in
             guard let self else { return }
-            await type(command, autoRun: true)
+            await type("exec " + command, autoRun: true)
             let renames = titleChanges
             for _ in 0..<25 where titleChanges == renames && !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(100))

@@ -68,6 +68,11 @@ struct ProjectsSidebar: View {
                     }
                 }
                 .padding(.horizontal, 10)
+                // The working badge rides a few points above its card's top
+                // edge, and the scroll view clips at its own — without this the
+                // first card's badge would be the one card's badge that is cut
+                // in half.
+                .padding(.top, 9)
                 .padding(.bottom, 10)
                 .animation(.easeInOut(duration: 0.15), value: store.projects.map(\.id))
             }
@@ -399,12 +404,7 @@ struct CollapsedProjectsRail: View {
                 GitHostIcon(host: project.host, size: 19)
             }
             .frame(width: 44, height: 44)
-            // Folded, the rail is all there is to say a repository has a turn
-            // running in it, so the badge rides the corner of the tile.
-            .overlay(alignment: .topTrailing) {
-                ClaudeWorkingBadge(count: store.workingClaudeCount(in: project), size: 13)
-                    .offset(x: 5, y: -4)
-            }
+            .claudeWorkingBadge(count: store.workingClaudeCount(in: project))
 
             // The name is the only way to tell two GitHub repositories apart, so
             // it is worth the two lines even at this width; the tooltip carries
@@ -444,7 +444,6 @@ struct ProjectCard: View {
                     .font(.callout.weight(.medium))
                     .lineLimit(1)
                 Spacer()
-                ClaudeWorkingBadge(count: store.workingClaudeCount(in: project))
                 if project.isLoadingPullRequests {
                     ProgressView().controlSize(.mini)
                 }
@@ -494,6 +493,7 @@ struct ProjectCard: View {
             RoundedRectangle(cornerRadius: 9)
                 .stroke(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 1.2)
         )
+        .claudeWorkingBadge(count: store.workingClaudeCount(in: project))
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
     }
@@ -512,8 +512,29 @@ struct ProjectCard: View {
     }
 }
 
+extension View {
+    /// Rides this tile's top-right corner with the badge that says a repository
+    /// has a turn running in it.
+    ///
+    /// The card and the folded rail's square wear it the same way — the corner
+    /// is where a badge belongs, and a mark tucked into the card's header row
+    /// instead read as one more of the things in that row rather than as a
+    /// state the whole repository is in. Nothing is drawn while no turn is
+    /// running, so nothing is reserved for it either.
+    func claudeWorkingBadge(count: Int) -> some View {
+        overlay(alignment: .topTrailing) {
+            // Sat on the corner rather than over it: half the mark hanging past
+            // each edge is what reads as a badge, and any less has it looking
+            // like something that landed on the tile.
+            ClaudeWorkingBadge(count: count)
+                .offset(x: 6, y: -7)
+        }
+    }
+}
+
 /// The sign that a repository has a conversation mid-turn, for its card and for
-/// its square on the folded rail.
+/// its square on the folded rail. Placed by `claudeWorkingBadge(count:)`, which
+/// is what keeps the two the same badge rather than two of them.
 ///
 /// Claude's own mark rather than a spinner, and it breathes rather than spins:
 /// there is already a spinner on the card for the pull request load, and two
@@ -522,7 +543,7 @@ struct ProjectCard: View {
 /// only furniture.
 struct ClaudeWorkingBadge: View {
     let count: Int
-    var size: CGFloat = 12
+    private let size: CGFloat = 13
 
     @State private var isDim = false
 
@@ -535,9 +556,17 @@ struct ClaudeWorkingBadge: View {
                 if count > 1 {
                     Text("\(count)")
                         .font(.caption2.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(.secondary)
                 }
             }
+            // The chip is what keeps a second conversation from reading as a
+            // digit dropped next to the mark: hanging off a card's corner over
+            // whatever is behind it, the two need something to say they are one
+            // badge. A single mark gets it too — the capsule closes to a disc
+            // around it, so the badge grows rather than changing shape.
+            .padding(.horizontal, 4)
+            .padding(.vertical, 3)
+            .background(.regularMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 0.5))
             .opacity(isDim ? 0.35 : 1)
             .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: isDim)
             .onAppear { isDim = true }

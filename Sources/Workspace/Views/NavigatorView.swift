@@ -50,7 +50,10 @@ struct NavigatorView: View {
     private var header: some View {
         Picker("", selection: Binding(
             get: { store.navigatorTab },
-            set: { store.navigatorTab = $0 }
+            // Through the store rather than straight onto the property: the
+            // Terminals and Claude tabs bring their most recent session back to
+            // the centre as they open.
+            set: { store.selectNavigatorTab($0) }
         )) {
             ForEach(WorkspaceStore.NavigatorTab.allCases) { tab in
                 tabIcon(tab)
