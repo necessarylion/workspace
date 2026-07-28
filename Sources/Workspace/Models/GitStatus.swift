@@ -108,7 +108,9 @@ struct GitStatus: Sendable, Hashable {
     var isClean: Bool { changes.isEmpty }
 
     /// How git names the branch of a repository that has nothing committed yet.
-    private static let noCommitsPrefix = "No commits yet on "
+    /// It called that "Initial commit on" until 2.16, and the app runs whatever
+    /// git the user's own prompt finds, so both spellings are read.
+    private static let noCommitsPrefixes = ["No commits yet on ", "Initial commit on "]
 
     /// Runs `git status`; nil when the folder is not a repository.
     static func load(for directory: URL) async -> GitStatus? {
@@ -167,8 +169,8 @@ struct GitStatus: Sendable, Hashable {
                 // and `detached` is the word the rest of the app uses for it.
                 if name == "HEAD (no branch)" {
                     branch = "detached"
-                } else if name.hasPrefix(Self.noCommitsPrefix) {
-                    branch = String(name.dropFirst(Self.noCommitsPrefix.count))
+                } else if let prefix = Self.noCommitsPrefixes.first(where: name.hasPrefix) {
+                    branch = String(name.dropFirst(prefix.count))
                 } else {
                     branch = name
                 }

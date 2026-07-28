@@ -99,17 +99,34 @@ enum NewRepository {
     /// The URL out of whatever was pasted. The whole `git clone …` line comes
     /// along with it more often than not, and so do the quotes around a string
     /// copied out of a README.
+    ///
+    /// The line a README gives you carries more than the URL: options
+    /// (`--depth 1`, `-b main`), which are not it, and a destination folder,
+    /// which the sheet has a field of its own for. So the URL is picked out by
+    /// what it looks like rather than by where it sits — the first word that is
+    /// not an option and has a `:` or a `/` in it, which every remote does and
+    /// neither `1` nor `main` nor a folder name does. A word that looks like
+    /// nothing in particular is taken as typed, so a bare host alias still
+    /// works.
     static func normalizedRemote(_ text: String) -> String {
-        var remote = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if remote.lowercased().hasPrefix("git clone ") {
-            remote = String(remote.dropFirst("git clone ".count))
+        var line = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if line.lowercased().hasPrefix("git clone ") {
+            line = String(line.dropFirst("git clone ".count))
         }
-        // A pasted command carries its destination folder too, and the sheet has
-        // a field of its own for that, so only the first word is the URL.
-        if let first = remote.split(separator: " ").first {
-            remote = String(first)
-        }
-        return remote.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        let quotes = CharacterSet(charactersIn: "\"'")
+        let words = line
+            .split(separator: " ")
+            .map { $0.trimmingCharacters(in: quotes) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("-") }
+        return words.first(where: isRemoteShaped) ?? words.first ?? ""
+    }
+
+    /// Whether a word from a pasted command could be the repository: every form
+    /// git takes has a separator in it — `https://…`, `git@host:owner/repo`,
+    /// `~/path`, `../path`. The value an option ate (`1`, `main`) and the
+    /// destination folder do not.
+    private static func isRemoteShaped(_ word: String) -> Bool {
+        word.contains(":") || word.contains("/") || word.hasPrefix("~")
     }
 
     /// The folder a clone would land in — `git@github.com:owner/repo.git` gives
@@ -152,7 +169,7 @@ enum NewRepository {
         }
         guard result.isSuccess else {
             // Only a folder this call made itself is taken back again.
-            if made { try? FileManager.default.removeItem(at: destination) }
+            if made { discardMadeFolder(at: destination) }
             throw Failure.git(result.failureMessage)
         }
         return destination
@@ -170,6 +187,12 @@ enum NewRepository {
         // It would refuse a non-empty one too, but by naming a path rather than
         // saying what to do about it.
         try checkFree(destination)
+        // git counts a folder holding a `.DS_Store` as occupied — `is_empty_dir`
+        // sees every entry, dotfiles included — and refuses to clone into it.
+        // `checkFree` has just said that file is the only thing there, and it is
+        // Finder's note of how the window was scrolled, not anything of the
+        // user's, so it goes rather than the clone failing on it.
+        removeFinderMetadata(in: destination)
         try makeParent(parent)
 
         let result = await Shell.run(
@@ -226,6 +249,28 @@ enum NewRepository {
         } catch {
             throw Failure.couldNotCreate(parent, error.localizedDescription)
         }
+    }
+
+    /// Takes back a folder this call made a moment ago, when git then refused to
+    /// make a repository in it.
+    ///
+    /// Only when nothing is in it but what git itself could have left half
+    /// made. The folder was empty when it was created, but "empty" was true a
+    /// few seconds ago and this is a recursive delete: anything that has
+    /// arrived since belongs to whatever put it there, and losing it would be a
+    /// far worse outcome than leaving an empty folder behind.
+    private static func discardMadeFolder(at destination: URL) {
+        let contents = (try? FileManager.default.contentsOfDirectory(atPath: destination.path)) ?? []
+        guard contents.allSatisfy({ $0 == ".git" || $0 == ".DS_Store" }) else { return }
+        try? FileManager.default.removeItem(at: destination)
+    }
+
+    /// Drops the `.DS_Store` a folder made in Finder arrives with. Nothing when
+    /// the folder does not exist, which is the usual case.
+    private static func removeFinderMetadata(in destination: URL) {
+        let metadata = destination.appending(path: ".DS_Store")
+        guard FileManager.default.fileExists(atPath: metadata.path) else { return }
+        try? FileManager.default.removeItem(at: metadata)
     }
 
     /// The folder the repository goes *into*. Chosen from a picker nearly always,
