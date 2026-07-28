@@ -58,12 +58,14 @@ private struct EditorPane: View {
     /// Held rather than made in `body`: a coordinator is handed over by
     /// reference and has to outlive the render that passed it.
     @State private var clipping = ClipFloatingSubviews()
+    @State private var revealing: RevealPendingPosition
     @State private var languageServer: LanguageServerCoordinator?
 
     init(document: OpenDocument, wrapsLines: Bool, theme: SyntaxTheme, store: WorkspaceStore) {
         self.document = document
         self.wrapsLines = wrapsLines
         self.theme = theme
+        _revealing = State(initialValue: RevealPendingPosition(document: document))
         // A file outside every added repository has no root to start a server
         // in, and a large one is deliberately left alone.
         let root = store.project(containing: document.url)?.url
@@ -102,21 +104,20 @@ private struct EditorPane: View {
             document.caretLine = caret.line
             document.caretColumn = caret.column
         }
+        // Only for a file that is *already* open when something asks to reveal a
+        // line in it. The first reveal of a newly opened file arrives before this
+        // view exists, and `RevealPendingPosition` picks that one up as the
+        // controller appears.
         .onChange(of: document.revealLine) { _, line in
-            guard let line else { return }
-            // Clearing the request is a state change, so it waits a turn.
-            Task { @MainActor in
-                document.revealLine = nil
-                // The app counts lines from zero, `CursorPosition` from one.
-                state.cursorPositions = [CursorPosition(line: line + 1, column: 1)]
-            }
+            guard line != nil else { return }
+            revealing.apply()
         }
     }
 
     /// Spelled out rather than built from a literal: the two have no type in
     /// common but the protocol, and an array literal of them infers the wrong one.
     private var coordinators: [any TextViewCoordinator] {
-        var list: [any TextViewCoordinator] = [clipping]
+        var list: [any TextViewCoordinator] = [clipping, revealing]
         if let languageServer { list.append(languageServer) }
         return list
     }
@@ -164,6 +165,82 @@ private struct EditorPane: View {
                 showFoldingRibbon: !document.isLargeFile
             )
         )
+    }
+}
+
+/// Puts the caret where the document is asking for, and brings it on screen.
+///
+/// Both halves of that are the reason this exists, because the state binding does
+/// neither reliably.
+///
+/// **It cannot scroll.** `SourceEditor` applies `state.cursorPositions` with
+/// `controller.setCursorPositions(cursorPositions)` and no `scrollToVisible:`,
+/// which defaults to `false` — so the caret moves to the right line and the
+/// viewport stays where it was, leaving the user to scroll to the definition they
+/// just asked to be taken to. Its update branch is dead in any case: the
+/// condition reads `cursorPositions != state.cursorPositions`, comparing the
+/// value it just unwrapped against itself.
+///
+/// **And it is too late for a new file.** `WorkspaceStore.openFile` sets the
+/// reveal on a document it has just built, so for a file that was not already
+/// open the value is there from the first render and never changes — nothing for
+/// `onChange` to observe.
+///
+/// So both paths come here instead and go straight to the controller.
+private final class RevealPendingPosition: TextViewCoordinator, @unchecked Sendable {
+    private let document: OpenDocument
+    private weak var controller: TextViewController?
+
+    init(document: OpenDocument) {
+        self.document = document
+    }
+
+    func prepareCoordinator(controller: TextViewController) {
+        MainActor.assumeIsolated { self.controller = controller }
+    }
+
+    /// The first reveal of a file that has only just been opened.
+    func controllerDidAppear(controller: TextViewController) {
+        MainActor.assumeIsolated {
+            self.controller = controller
+            apply()
+        }
+    }
+
+    func destroy() {
+        MainActor.assumeIsolated { controller = nil }
+    }
+
+    /// Deferred a turn: taking the request while the change that made it is still
+    /// being delivered would be a mutation inside an observation.
+    @MainActor
+    func apply() {
+        Task { @MainActor [weak self] in
+            guard let self,
+                  let controller = self.controller,
+                  let reveal = self.document.takePendingReveal() else { return }
+
+            let position = CursorPosition(line: reveal.line, column: reveal.column)
+            controller.setCursorPositions([position])
+
+            // Scrolled explicitly, rather than by asking `setCursorPositions` to
+            // do it with `scrollToVisible:`. That route calls
+            // `scrollSelectionToVisible()`, which cannot get started from a cold
+            // layout: it opens with `lastFrame = .zero` and loops
+            // `while lastFrame != boundingRect`, so a selection whose rect is
+            // still `.zero` — which is what an unlaid-out line off the bottom of
+            // a file just opened has — fails the condition on the first test and
+            // it scrolls nowhere. That is the whole of "the caret is on the right
+            // line but the view never moved".
+            //
+            // `scrollToRange` asks the layout manager for the offset's rect
+            // instead, which lays the line out to answer, and stabilises in a loop
+            // with a timeout. It centres the line too, which is what a jump to a
+            // definition wants — the lines above it are usually the context.
+            if let resolved = controller.resolveCursorPosition(position) {
+                controller.textView.scrollToRange(resolved.range)
+            }
+        }
     }
 }
 

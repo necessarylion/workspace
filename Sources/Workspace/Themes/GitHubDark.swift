@@ -13,6 +13,8 @@ extension SyntaxPalette {
         lineNumber: NSColor(rgb: 0x6E_76_81),
         currentLine: NSColor(rgb: 0x6E_76_81, alpha: 0.102),
         indentGuide: NSColor(rgb: 0xE6_ED_F3, alpha: 0.122),
+        // github.com's own `editor.selectionBackground`.
+        selection: NSColor(rgb: 0x33_92_FF, alpha: 0.267),
         styles: [
             "attribute": SyntaxStyle(color: NSColor(rgb: 0xD2_A8_FF)),
             "boolean": SyntaxStyle(color: NSColor(rgb: 0x79_C0_FF)),

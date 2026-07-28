@@ -702,10 +702,14 @@ final class WorkspaceStore {
 
     // MARK: - Opening things
 
-    func openFile(_ url: URL, revealLine: Int? = nil) {
+    /// Both reveal arguments count from zero, the way LSP does.
+    func openFile(_ url: URL, revealLine: Int? = nil, revealColumn: Int? = nil) {
         let key = ViewerItem.Kind.file(url).key
         if let existing = items[key] {
-            if let revealLine { existing.document?.revealLine = revealLine }
+            if let revealLine {
+                existing.document?.revealLine = revealLine
+                existing.document?.revealColumn = revealColumn
+            }
             present(existing)
             return
         }
@@ -717,6 +721,7 @@ final class WorkspaceStore {
         )
         let document = OpenDocument(url: url)
         document.revealLine = revealLine
+        document.revealColumn = revealColumn
         item.document = document
         present(item)
     }

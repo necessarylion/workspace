@@ -140,7 +140,14 @@ final class LanguageService {
 
     // MARK: - Document sync
 
-    func open(uri: String, text: String) async {
+    /// - Parameter languageID: What to call the document, when that is not this
+    ///   server's own language. A companion server is holding a file belonging to
+    ///   the server it accompanies — vtsls opened alongside the Vue server holds a
+    ///   `.vue` file — and announcing it as `typescript` would be a lie with
+    ///   consequences: `@vue/typescript-plugin` serves a document only when it
+    ///   arrives as `vue`, so tsserver would instead try to read `<template>` as
+    ///   TypeScript and report a file full of syntax errors.
+    func open(uri: String, text: String, languageID: String? = nil) async {
         guard await startIfNeeded() else { return }
         openCount[uri, default: 0] += 1
         guard openCount[uri] == 1 else { return }
@@ -150,7 +157,7 @@ final class LanguageService {
             params: DidOpenParams(
                 textDocument: .init(
                     uri: uri,
-                    languageId: definition.languageID,
+                    languageId: languageID ?? definition.languageID,
                     version: 1,
                     text: text
                 )
@@ -314,14 +321,20 @@ final class LanguageService {
     /// Carries one question from the Vue server to the TypeScript server and
     /// the answer back.
     ///
-    /// This is the join that makes hybrid mode work, and there is no way round
-    /// it: the Vue server deliberately keeps no TypeScript project of its own —
-    /// that is the whole point, one `tsserver` for the repository instead of
-    /// two — so anything needing a type is asked of whatever `tsserver` the
-    /// *client* is running. It arrives as `[id, command, payload]`, goes out as
-    /// the `typescript.tsserverRequest` command vtsls exposes for exactly this,
-    /// and the answer goes back as a `tsserver/response` notification carrying
-    /// the same id.
+    /// **Only older Vue servers ask for this.** `@vue/language-server` 2.0.x had
+    /// the client relay every typed question: it arrived as `[id, command,
+    /// payload]`, went out as the `typescript.tsserverRequest` command vtsls
+    /// exposes for exactly this, and the answer came back as a
+    /// `tsserver/response` notification carrying the same id. From 2.1 the relay
+    /// is gone — `@vue/typescript-plugin` opens a named pipe inside `tsserver`
+    /// and the Vue server connects to it directly, so neither method name appears
+    /// in the package any more and this is never called. Kept because it is
+    /// correct for the servers that do ask, and costs nothing for the ones that
+    /// do not.
+    ///
+    /// What hybrid mode needs from us either way is in
+    /// ``LanguageServerConfiguration``: vtsls has to load the plugin, and has to
+    /// have the `.vue` file open, or there is no pipe and no project behind it.
     ///
     /// A question that cannot be delivered is still answered, with null. The
     /// Vue server waits on every id it issues, and one silently dropped is a

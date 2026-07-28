@@ -30,7 +30,12 @@ extension SyntaxTheme {
             invisibles: .init(color: palette.indentGuide),
             background: background,
             lineHighlight: palette.currentLine,
-            selection: palette.selection ?? palette.foreground.withAlphaComponent(0.25),
+            // Every palette names its own now, and the fallback is the system's
+            // rather than a wash of the text colour. This is not only the selection
+            // band: the editor fills the ⌘-hover box for go-to-definition with
+            // this colour, and a pale grey of the foreground over a word is a word
+            // you can no longer read.
+            selection: palette.selection ?? .selectedTextBackgroundColor,
             keywords: attribute(for: "keyword"),
             // The package's `commands` is what it paints a call with.
             commands: attribute(for: "function"),

@@ -107,10 +107,14 @@ final class LanguageServerCoordinator: TextViewCoordinator, TextViewDelegate, @u
         observeSaves()
 
         let text = document.text
+        // Every server holds this file under the *file's* language, not its own.
+        // See `LanguageService.open(uri:text:languageID:)` — the companion is the
+        // whole reason that parameter exists.
+        let languageID = service.definition.languageID
         Task { @MainActor [weak self] in
             guard let self else { return }
             for target in self.targets {
-                await target.open(uri: self.uri, text: text)
+                await target.open(uri: self.uri, text: text, languageID: languageID)
             }
             guard self.isRunning else { return }
             self.isOpen = true
@@ -332,6 +336,12 @@ extension LanguageServerCoordinator: JumpToDefinitionDelegate {
               let view = controller?.textView,
               let start = position(of: range.location, in: view) else { return nil }
 
+        // Waited for rather than checked. The first ⌘-click on a freshly opened
+        // file is exactly when the server is still starting, and `definitions`
+        // answers nothing at all until it is running — which the package can only
+        // report as the "no definition" bezel, for a symbol that has one.
+        guard await service.startIfNeeded(), isRunning else { return nil }
+
         let label = (view.textStorage.string as NSString).substring(with: range)
         // Nil, not empty, when the server never answered. sourcekit-lsp can
         // spend the best part of a minute preparing a package before its first
@@ -342,8 +352,30 @@ extension LanguageServerCoordinator: JumpToDefinitionDelegate {
         return locations.compactMap { location in
             guard let target = location.fileURL else { return nil }
             let isHere = target.standardizedFileURL == document.url.standardizedFileURL
+
+            // **Always a URL, even for a definition in this very file**, so that
+            // every jump comes back through `openLink` below and is answered the
+            // same way. Leaving it nil is what the type invites, and it goes wrong
+            // twice over:
+            //
+            // `JumpToDefinitionModel` hands a URL-less link's `targetRange.range`
+            // straight to `setSelectedRange` without resolving it. A position
+            // built from a line and column carries no range — it reads as
+            // `NSNotFound` — so selecting it took the app down.
+            //
+            // And it then scrolls with `scrollSelectionToVisible()`, which cannot
+            // start from a cold layout (see `RevealPendingPosition`), so the caret
+            // moved and the viewport did not.
+            //
+            // Re-presenting the file that is already showing is free:
+            // `WorkspaceStore.present` returns early for the current item, so the
+            // back history is untouched.
+            //
+            // The one cost is that two definitions in the *same* file share a link
+            // id, since `JumpToDefinitionLink.id` is the URL — visible only in the
+            // popover that opens when a symbol has several.
             return JumpToDefinitionLink(
-                url: isHere ? nil : target,
+                url: target,
                 targetRange: CursorPosition(
                     line: location.range.start.line + 1,
                     column: location.range.start.character + 1
@@ -357,13 +389,16 @@ extension LanguageServerCoordinator: JumpToDefinitionDelegate {
 
     func openLink(link: JumpToDefinitionLink) {
         MainActor.assumeIsolated {
-            guard let url = link.url else {
-                // Same file: move the caret rather than reopening the pane.
-                controller?.setCursorPositions([link.targetRange], scrollToVisible: true)
-                return
-            }
-            // The app counts lines from zero, `CursorPosition` from one.
-            store?.openFile(url, revealLine: link.targetRange.start.line - 1)
+            guard let url = link.url else { return }
+            // Back to counting from zero, which is what `openFile` takes. The same
+            // call serves a definition in this file and one in another: the store
+            // finds the open document or makes one, and either way the reveal is
+            // carried out by `RevealPendingPosition`.
+            store?.openFile(
+                url,
+                revealLine: link.targetRange.start.line - 1,
+                revealColumn: link.targetRange.start.column - 1
+            )
         }
     }
 

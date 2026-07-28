@@ -27,6 +27,12 @@ extension SyntaxPalette {
             currentLine: NSColor(white: 1, alpha: 0.045),
             // Present, but a good deal fainter than any text on the line.
             indentGuide: NSColor(white: 1, alpha: 0.12),
+            // VS Code's own `editor.selectionBackground`. Named rather than left
+            // to be derived from the foreground, because the editor fills the
+            // ⌘-hover box for go-to-definition with this colour — and a pale wash
+            // of the *text* colour over a word makes that word unreadable, which
+            // is the one thing the box must not do.
+            selection: NSColor(rgb: 0x26_4F_78),
             styles: [
                 "comment": SyntaxStyle(color: comment),
                 // Dark+ splits keywords in two: control flow is mauve,

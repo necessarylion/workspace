@@ -19,12 +19,18 @@ enum LanguageServerOptions {
     /// What went wrong before the server was even started.
     enum Failure: LocalizedError {
         case typeScriptServerMissing(String)
+        case typeScriptSDKMissing
 
         var errorDescription: String? {
             switch self {
             case .typeScriptServerMissing(let executable):
                 "The Vue server cannot answer anything about types without \(executable). "
                     + "Install it from Settings → Language Servers."
+            case .typeScriptSDKMissing:
+                "The Vue server needs a TypeScript 5 or 6 to load. Add one to the project "
+                    + "(npm install -D typescript), or install one globally — a global "
+                    + "TypeScript 7 cannot be used, it is the Go rewrite and ships no "
+                    + "typescript.js for a language server to load."
             }
         }
     }
@@ -43,19 +49,27 @@ enum LanguageServerOptions {
         let typescript = typeScriptExecutable
         guard await isAvailable(typescript) else { throw Failure.typeScriptServerMissing(typescript) }
 
-        var options: [String: LSP.Value] = [
-            // Saying so is what makes the server forward `tsserver/request` at
-            // all, rather than deciding the client cannot cope.
-            "vue": .object(["hybridMode": .bool(true)])
-        ]
-        // Still wanted, and still only for the server's own template checking —
-        // it is not what answers the `<script>` block any more. Left out
-        // entirely when there is none, since an empty path is worse than no
-        // path: the server would try to load it.
-        if let tsdk = await typeScriptSDK(near: root) {
-            options["typescript"] = .object(["tsdk": .string(tsdk)])
+        // **Not optional, whatever it looks like.** The server's entry point does
+        //
+        //     loadTsdkByPath(options.typescript.tsdk, params.locale)
+        //
+        // before it looks at anything else, so options without this key are not
+        // "options with a default" — they are a `TypeError` on `initialize` and a
+        // server that dies during the handshake. Every ⌘-click then draws the
+        // package's "no definition" bezel, for symbols that plainly have one,
+        // which is a long way from the actual problem. Better to refuse here and
+        // say what is missing.
+        guard let tsdk = await typeScriptSDK(near: root) else {
+            throw Failure.typeScriptSDKMissing
         }
-        return .object(options)
+
+        return .object([
+            // Hybrid mode is this server's default (`options.vue?.hybridMode ??
+            // true`); said out loud because it is the arrangement the vtsls side
+            // is configured for, and a default is free to change.
+            "vue": .object(["hybridMode": .bool(true)]),
+            "typescript": .object(["tsdk": .string(tsdk)])
+        ])
     }
 
     private static var typeScriptExecutable: String {
