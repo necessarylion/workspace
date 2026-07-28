@@ -283,14 +283,41 @@ struct FileListView: View {
     }
 
     private func children(of node: FileNode) -> [FileNode] {
-        let children = node.children ?? []
-        guard !store.showsIgnoredFiles else { return children }
-        return children.filter { !project.isIgnored($0.url) }
+        var children = node.children ?? []
+        if !store.showsIgnoredFiles {
+            children = children.filter { !project.isIgnored($0.url) }
+        }
+        // The row the **+** just made goes to the top of its folder instead of
+        // wherever "untitled" happens to sort — so the box waiting for its name
+        // is where the button that made it is, and not somewhere down the list.
+        // It falls back into order as soon as the selection moves off it.
+        if let made = store.justCreatedFile,
+           let index = children.firstIndex(where: { $0.url == made }) {
+            children.insert(children.remove(at: index), at: 0)
+        }
+        return children
     }
 
     // A hand-drawn tree instead of `List`: the sidebar list style forces tall,
     // widely spaced rows and offers no way to compact them.
     private var fileList: some View {
+        ScrollViewReader { scroller in
+            treeScrollView
+                // The rows are built lazily, so a row off the bottom of the pane
+                // does not exist and its rename box cannot open. Scrolling to the
+                // new one is what builds it — and it is where the name is typed,
+                // so it should be on screen anyway. A folder made in a folder is
+                // the case that needs it: its row can be a long way down.
+                .onChange(of: store.justCreatedFile) { _, made in
+                    guard let made else { return }
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        scroller.scrollTo(made, anchor: .center)
+                    }
+                }
+        }
+    }
+
+    private var treeScrollView: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 if query.isEmpty {
@@ -302,6 +329,7 @@ struct FileListView: View {
                             isIgnored: project.isIgnored(entry.node.url),
                             activate: { activate(entry.node, modifiers: $0) }
                         )
+                        .id(entry.node.url)
                     }
                 } else if searchResults.isEmpty {
                     Text(isSearching ? "Searching…" : "No results")

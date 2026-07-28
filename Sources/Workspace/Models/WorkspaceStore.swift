@@ -1886,6 +1886,7 @@ final class WorkspaceStore {
             selectedFiles = [url]
             fileSelectionAnchor = url
         }
+        forgetJustCreatedIfDeselected()
     }
 
     /// ↑ and ↓ in the tree. With ⇧ the range grows from the anchor, without it
@@ -1902,16 +1903,19 @@ final class WorkspaceStore {
             selectedFiles = [url]
             fileSelectionAnchor = url
         }
+        forgetJustCreatedIfDeselected()
     }
 
     func selectFiles(_ urls: [URL]) {
         selectedFiles = Set(urls)
         fileSelectionAnchor = urls.last
+        forgetJustCreatedIfDeselected()
     }
 
     func clearFileSelection() {
         selectedFiles = []
         fileSelectionAnchor = nil
+        forgetJustCreatedIfDeselected()
     }
 
     /// What a menu item, a key or a drag started on `url` applies to.
@@ -1996,6 +2000,15 @@ final class WorkspaceStore {
         return isDirectory.boolValue ? selected : selected.deletingLastPathComponent()
     }
 
+    /// The row the **+** just made, if it is still the one being worked on.
+    ///
+    /// The tree draws it **first inside its folder** rather than in alphabetical
+    /// order — a new `untitled` sorted into a long list is a row you have to go
+    /// looking for, and the box waiting for its name is at the top of the pane
+    /// where the button that made it was. It goes back into order as soon as the
+    /// selection moves off it.
+    private(set) var justCreatedFile: URL?
+
     /// Makes an empty file or folder and **hands it straight to the rename box**,
     /// so the name is typed on the row itself rather than into a sheet first.
     /// The Files tab's **+** is the only caller.
@@ -2007,24 +2020,38 @@ final class WorkspaceStore {
         Task {
             let result = await Task.detached { FileOperations.create(kind, in: folder) }.value
 
-            // The row has to be on screen before it can be renamed, and a new
-            // file inside a folder nobody has opened yet would have no row.
+            // The row has to exist before it can be renamed, and a new file
+            // inside a folder nobody has opened yet would have no row.
             if let node = project.root.loadedNode(at: folder), node.isDirectory {
                 node.isExpanded = true
             }
             project.refreshFileTree(at: folder)
-            await project.refreshGitStatus()
 
             if let made = result.finished.first {
+                // Before the selection: `selectFiles` drops this the moment the
+                // selection does not hold it.
+                justCreatedFile = made
                 selectFiles([made])
                 renamingFile = made
             }
+            // Git last. It is a process, and the box the name is typed into
+            // must not wait behind one — a new file is untracked, so the
+            // Changes tab has something to say either way.
+            await project.refreshGitStatus()
+
             // Nothing is said when it works: the row is on screen with its name
             // waiting to be typed, which tells the user more than a line in the
             // status bar could.
             guard !result.errors.isEmpty else { return }
             report(result, action: "Created", verb: "create", place: "")
         }
+    }
+
+    /// Lets the new row fall back into alphabetical order once the selection has
+    /// moved on. Called from everything that sets the selection.
+    private func forgetJustCreatedIfDeselected() {
+        guard let made = justCreatedFile, !selectedFiles.contains(made) else { return }
+        justCreatedFile = nil
     }
 
     /// Renames one file or folder from the Files tab. What was open under the
@@ -2044,6 +2071,10 @@ final class WorkspaceStore {
                 // moves everything under it too.
                 project.refreshFileTree()
                 await project.refreshGitStatus()
+                // A row named right after it was made keeps its place at the
+                // top of the folder: ⏎ should not send it off to wherever its
+                // new name sorts before it has even been opened.
+                if justCreatedFile == url { justCreatedFile = renamed }
                 selectFiles([renamed])
                 if let showAgain { openFile(showAgain) }
                 showStatus("Renamed to \(renamed.lastPathComponent)")
@@ -2085,6 +2116,7 @@ final class WorkspaceStore {
             }
             await project.refreshGitStatus()
             selectedFiles.subtract(result.finished)
+            forgetJustCreatedIfDeselected()
 
             report(result, action: "Moved", verb: "delete", place: "to the Trash")
         }
