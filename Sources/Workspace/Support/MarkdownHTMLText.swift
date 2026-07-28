@@ -219,7 +219,13 @@ enum MarkdownHTMLText {
             return String(repeating: "#", count: level) + " "
         case "img":
             guard !tag.isClosing, let address = attribute("src", in: tag.attributes) else { return "" }
-            return "![\(attribute("alt", in: tag.attributes) ?? "")](\(address))"
+            let image = "![\(attribute("alt", in: tag.attributes) ?? "")](\(address))"
+            // A README sizes its logo with `width="140"`, and Markdown has no
+            // way of saying that — so it is written as the attribute list
+            // Bitbucket already hangs off an image, which is the one thing the
+            // parser downstream reads after an address.
+            guard let width = pixels(attribute("width", in: tag.attributes)) else { return image }
+            return "\(image){: width=\(width) }"
         case "a":
             // The stack is pushed even for an `<a>` with no address, so the
             // closing tag always pops the one it belongs to.
@@ -232,6 +238,20 @@ enum MarkdownHTMLText {
             return address.isEmpty ? "" : "["
         default: return ""
         }
+    }
+
+    /// A length in points, out of what an attribute was set to: `140` and
+    /// `140px` are the same number, and `50%` is nothing here — a share of the
+    /// pane is not a size the preview can be told, and half of nothing is what
+    /// it would come to.
+    private static func pixels(_ value: String?) -> Int? {
+        guard let value else { return nil }
+        let digits = value.trimmingCharacters(in: .whitespaces).prefix { $0.isNumber }
+        guard digits.count == value.trimmingCharacters(in: .whitespaces).count
+                || value.trimmingCharacters(in: .whitespaces).lowercased().hasSuffix("px"),
+              let number = Int(digits), number > 0
+        else { return nil }
+        return number
     }
 
     /// `href="…"` out of a tag's attribute text, quoted either way or bare.

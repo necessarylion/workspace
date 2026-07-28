@@ -2,7 +2,8 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// Downloads the pictures Markdown points at, once each.
+/// Loads the pictures Markdown points at, once each — downloaded when the
+/// address is a web one, read off the disk when it is a file beside the document.
 ///
 /// Same shape as `AvatarLoader`, and separate from it on purpose: an avatar is a
 /// small square that is drawn hundreds of times, while these are full-size
@@ -62,6 +63,16 @@ final class RemoteImageLoader {
     /// picture behind a login is one the reader opens in their browser, where
     /// they are already signed in.
     private static func download(_ url: URL) async -> Outcome {
+        // A picture in a README is a file in the same checkout, and that one is
+        // read rather than requested — no session, no cache policy, no waiting
+        // on a network that has nothing to do with it.
+        if url.isFileURL {
+            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+                  let image = NSImage(data: data)
+            else { return Outcome() }
+            return Outcome(image: image, bytes: data.count)
+        }
+
         var request = URLRequest(url: url)
         request.cachePolicy = .returnCacheDataElseLoad
         request.timeoutInterval = 30
@@ -89,15 +100,21 @@ final class RemoteImageLoader {
 struct MarkdownImage: View {
     let url: URL
     var alt: String = ""
+    /// The width the document asked for, when it asked — a README writes its
+    /// logo as `<img width="140">`, and a logo drawn at its full size instead
+    /// is a banner. Nothing is said about the height: the picture keeps its
+    /// shape, and the width is what decides how tall it comes out.
+    var width: CGFloat?
 
     @State private var image: NSImage?
     @State private var isLoading = true
 
     private static let maximumHeight: CGFloat = 420
 
-    init(url: URL, alt: String = "") {
+    init(url: URL, alt: String = "", width: CGFloat? = nil) {
         self.url = url
         self.alt = alt
+        self.width = width
         let cached = RemoteImageLoader.shared.cached(url)
         _image = State(initialValue: cached)
         _isLoading = State(initialValue: cached == nil && !RemoteImageLoader.shared.hasFailed(url))
@@ -116,14 +133,20 @@ struct MarkdownImage: View {
                 .aspectRatio(contentMode: .fit)
                 // `maxWidth` alone would stretch a narrow picture across the
                 // pane; the natural size is the ceiling, the pane the other one.
-                .frame(maxWidth: image.size.width, maxHeight: min(image.size.height, Self.maximumHeight))
+                // A width the document asked for takes that ceiling's place,
+                // and takes the height cap with it: the two together would
+                // squeeze a tall picture narrower than it was asked to be.
+                .frame(
+                    maxWidth: width ?? image.size.width,
+                    maxHeight: width == nil ? min(image.size.height, Self.maximumHeight) : nil
+                )
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))
                 .accessibilityLabel(alt.isEmpty ? "Image" : alt)
-                .onTapGesture { NSWorkspace.shared.open(url) }
+                .onTapGesture { open() }
                 .pointerCursor()
-                .help("Open in browser")
+                .help(url.isFileURL ? "Open this file" : "Open in browser")
         } else if isLoading {
             placeholder {
                 ProgressView().controlSize(.small)
@@ -146,17 +169,35 @@ struct MarkdownImage: View {
                     }
                 }
                 Spacer(minLength: 8)
-                Button("Open in Browser") { NSWorkspace.shared.open(url) }
+                Button(url.isFileURL ? "Show in Finder" : "Open in Browser") { reveal() }
                     .buttonStyle(.link)
                     .pointerCursor()
             }
         }
     }
 
+    /// Whatever the address points at, in the app that owns it — the browser for
+    /// a web one, Preview or whatever else the reader set for a file.
+    private func open() { NSWorkspace.shared.open(url) }
+
+    /// The way out of a placeholder. A file that would not draw is one to look
+    /// at rather than open, so Finder is where the button goes.
+    private func reveal() {
+        if url.isFileURL {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            open()
+        }
+    }
+
     /// Why it is a placeholder and not a picture. Only worth saying for a host
-    /// the app is known not to be able to reach — anything else failed for a
-    /// reason the reader can see for themselves by opening it.
+    /// the app is known not to be able to reach, or for a file that is there and
+    /// still would not draw — anything else failed for a reason the reader can
+    /// see for themselves by opening it.
     private var hint: String? {
+        if url.isFileURL {
+            return "This file is not a picture the app can draw."
+        }
         guard let host = url.host()?.lowercased(),
               host == "bitbucket.org" || host.hasSuffix(".bitbucket.org")
         else { return nil }

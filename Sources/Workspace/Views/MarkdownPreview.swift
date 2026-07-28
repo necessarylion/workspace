@@ -77,10 +77,14 @@ private struct CodeChipBackdrop: ViewModifier {
 /// Full-page Markdown view for `.md` files: `MarkdownText` in a scroll view.
 struct MarkdownPreview: View {
     let text: String
+    /// The file the text was read from, when it was read from one. A README
+    /// writes its pictures as paths beside itself — `![](assets/preview.jpeg)` —
+    /// and this is what those are paths from.
+    var baseURL: URL?
 
     var body: some View {
         ScrollView {
-            MarkdownText(text: text)
+            MarkdownText(text: text, relativeTo: baseURL)
                 .frame(maxWidth: 720, alignment: .leading)
                 .padding(28)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -101,11 +105,14 @@ struct MarkdownText: View {
     /// `MarkdownText`, and re-serialising them to Markdown to parse again would
     /// be work for nothing.
     private enum Source {
-        case markdown(String)
+        case markdown(String, base: URL?)
         case parsed([Block])
     }
 
-    init(text: String) { source = .markdown(text) }
+    /// `baseURL` is the file the Markdown came from, and only a file on disk has
+    /// one: it is what a picture written as a relative path is a path from. A PR
+    /// description or a comment has no folder, so it passes nothing.
+    init(text: String, relativeTo baseURL: URL? = nil) { source = .markdown(text, base: baseURL) }
 
     fileprivate init(blocks: [Block]) { source = .parsed(blocks) }
 
@@ -124,7 +131,10 @@ struct MarkdownText: View {
         case disclosure(summary: String, isOpen: Bool, blocks: [Block])
         case code(language: String, text: String)
         case mermaid(String)
-        case image(url: String, alt: String)
+        /// `width` is the one an HTML `<img width="140">` asked for, in points.
+        /// Markdown's own `![](…)` cannot say it, so it is usually nothing and
+        /// the picture is drawn at its own size.
+        case image(url: String, alt: String, width: CGFloat?)
         case table(headers: [String], rows: [[String]])
         case rule
         case spacer
@@ -249,12 +259,15 @@ struct MarkdownText: View {
         case .mermaid(let source):
             MermaidDiagram(source: source)
                 .padding(.vertical, 4)
-        case .image(let address, let alt):
+        case .image(let address, let alt, let width):
             // A picture is only drawn for an address the app could actually
-            // fetch; a relative one in a comment points into a repository
-            // checkout the viewer has no idea about, so it stays as its text.
-            if let url = URL(string: address), url.scheme == "http" || url.scheme == "https" {
-                MarkdownImage(url: url, alt: alt)
+            // reach: one it can fetch, or a file `blocks(in:relativeTo:)` found
+            // beside the document. A relative one in a comment points into a
+            // repository checkout the viewer has no idea about — there is no
+            // folder to resolve it against — so it stays as its text.
+            if let url = URL(string: address),
+               url.scheme == "http" || url.scheme == "https" || url.isFileURL {
+                MarkdownImage(url: url, alt: alt, width: width)
                     .padding(.vertical, 2)
             } else {
                 Self.inline(alt.isEmpty ? address : alt)
@@ -422,7 +435,7 @@ struct MarkdownText: View {
     @MainActor
     private var blocks: [Block] {
         switch source {
-        case .markdown(let text): Self.cachedBlocks(in: text)
+        case .markdown(let text, let base): Self.cachedBlocks(in: text, relativeTo: base)
         case .parsed(let blocks): blocks
         }
     }
@@ -436,21 +449,103 @@ struct MarkdownText: View {
     /// keeps its colours. The cap only stops a long reading session from
     /// growing this without end.
     @MainActor
-    private static func cachedBlocks(in text: String) -> [Block] {
-        if let cached = cache[text] { return cached }
-        let parsed = blocks(in: text)
+    private static func cachedBlocks(in text: String, relativeTo base: URL?) -> [Block] {
+        // The folder is part of the key, not just the text: the same
+        // `![](assets/logo.png)` is a different picture in another repository.
+        let key = "\(base?.path ?? "")\n\(text)"
+        if let cached = cache[key] { return cached }
+        let parsed = blocks(in: text, relativeTo: base)
         if cache.count > 200 { cache.removeAll() }
-        cache[text] = parsed
+        cache[key] = parsed
         return parsed
     }
 
     @MainActor
     private static var cache: [String: [Block]] = [:]
 
-    static func blocks(in text: String) -> [Block] {
+    static func blocks(in text: String, relativeTo base: URL? = nil) -> [Block] {
         // The bookkeeping a bot hides in `<!-- … -->` goes first, so nothing
         // downstream has to know it was ever there.
-        parse(MarkdownHTMLText.strippingComments(text), depth: 0)
+        let parsed = parse(MarkdownHTMLText.strippingComments(text), depth: 0)
+        guard let base else { return parsed }
+        return resolvingImages(parsed, relativeTo: base)
+    }
+
+    /// Turns `![](assets/preview.jpeg)` into the file it means.
+    ///
+    /// A README is written to be read beside its own folder, and the pictures in
+    /// it are paths into that folder rather than addresses anything can fetch.
+    /// Nothing downstream has to know that happened: the block carries a
+    /// `file://` address, and the picture is loaded, cached and written into the
+    /// PDF by the same code an `https://` one goes through.
+    ///
+    /// It is done here rather than in the view because the parse is what is
+    /// cached, and because `MarkdownPDF` walks these very blocks.
+    private static func resolvingImages(_ blocks: [Block], relativeTo base: URL) -> [Block] {
+        blocks.map { block in
+            switch block {
+            case .image(let address, let alt, let width):
+                guard let file = localFile(for: address, relativeTo: base) else { return block }
+                return .image(url: file.absoluteString, alt: alt, width: width)
+            // A picture inside a quote or a folded section is still a picture.
+            case .quote(let alert, let nested):
+                return .quote(alert, resolvingImages(nested, relativeTo: base))
+            case .disclosure(let summary, let isOpen, let nested):
+                return .disclosure(
+                    summary: summary,
+                    isOpen: isOpen,
+                    blocks: resolvingImages(nested, relativeTo: base)
+                )
+            default:
+                return block
+            }
+        }
+    }
+
+    /// The file a Markdown address points at, when it points at one at all.
+    ///
+    /// `https://…` and anything else with a scheme is somebody else's to fetch.
+    /// A leading `/` means the repository's root the way GitHub reads it, not
+    /// the disk's, so it is resolved against the checkout the file sits in and
+    /// dropped when there is none — `/etc/passwd` is not what a README meant.
+    ///
+    /// Only a path that is actually there becomes a picture. A broken one stays
+    /// the text the author wrote, which is what shows them it is broken.
+    private static func localFile(for address: String, relativeTo base: URL) -> URL? {
+        guard !address.isEmpty, URL(string: address)?.scheme == nil else { return nil }
+        // The `#fragment` and `?query` a host would answer without, and the
+        // escapes a path with a space in it is written with.
+        var path = address
+        if let hash = path.firstIndex(of: "#") { path = String(path[..<hash]) }
+        if let question = path.firstIndex(of: "?") { path = String(path[..<question]) }
+        path = path.removingPercentEncoding ?? path
+        guard !path.isEmpty else { return nil }
+
+        let directory = base.deletingLastPathComponent()
+        let resolved: URL
+        if path.hasPrefix("/") {
+            guard let root = repositoryRoot(above: directory) else { return nil }
+            resolved = root.appending(path: String(path.dropFirst()))
+        } else {
+            resolved = directory.appending(path: path)
+        }
+        let file = resolved.standardizedFileURL
+        return FileManager.default.fileExists(atPath: file.path) ? file : nil
+    }
+
+    /// The checkout the folder sits in, found the way git finds it — the nearest
+    /// `.git` at or above it. The count is only a backstop; a path has an end.
+    private static func repositoryRoot(above directory: URL) -> URL? {
+        var folder = directory.standardizedFileURL
+        for _ in 0..<64 {
+            if FileManager.default.fileExists(atPath: folder.appending(path: ".git").path) {
+                return folder
+            }
+            let parent = folder.deletingLastPathComponent().standardizedFileURL
+            if parent == folder { return nil }
+            folder = parent
+        }
+        return nil
     }
 
     /// True when `blocks` — or anything nested in them — holds a diagram.
@@ -606,7 +701,7 @@ struct MarkdownText: View {
             // becomes a picture and the words around it still read as words.
             // `AttributedString` would otherwise swallow the whole `![…](…)`
             // and draw nothing at all.
-            var images: [(url: String, alt: String)] = []
+            var images: [Picture] = []
             if !inCode, line.contains("![") {
                 let split = splitImages(from: line)
                 line = split.text
@@ -615,7 +710,7 @@ struct MarkdownText: View {
             }
             defer {
                 for image in images {
-                    result.append(.image(url: image.url, alt: image.alt))
+                    result.append(.image(url: image.url, alt: image.alt, width: image.width))
                 }
             }
             // A line that was nothing but pictures leaves no text behind, and an
@@ -684,16 +779,25 @@ struct MarkdownText: View {
         return result
     }
 
+    /// One picture pulled out of a line.
+    private struct Picture {
+        var url: String
+        var alt: String
+        var width: CGFloat?
+    }
+
     /// Pulls every `![alt](url)` out of one line, handing back what is left of
     /// the line and the pictures in the order they appeared.
     ///
     /// Bitbucket writes an attribute list after the image —
     /// `![](…png){: data-layout='center' }` — which is not Markdown any parser
     /// here knows; it is swallowed along with the image rather than left behind
-    /// as stray braces in the middle of a sentence.
-    private static func splitImages(from line: String) -> (text: String, images: [(url: String, alt: String)]) {
+    /// as stray braces in the middle of a sentence. `MarkdownHTMLText` writes
+    /// the same list to carry the one attribute that *is* read: the width an
+    /// `<img width="140">` asked for.
+    private static func splitImages(from line: String) -> (text: String, images: [Picture]) {
         var text = ""
-        var images: [(url: String, alt: String)] = []
+        var images: [Picture] = []
         var index = line.startIndex
 
         while index < line.endIndex {
@@ -716,12 +820,12 @@ struct MarkdownText: View {
             let alt = String(line[line.index(after: bracket)..<altEnd])
             let address = String(line[line.index(after: open)..<close])
                 .trimmingCharacters(in: .whitespaces)
-            images.append((url: address, alt: alt.trimmingCharacters(in: .whitespaces)))
             index = line.index(after: close)
 
-            // The `{: … }` Bitbucket hangs off the end, when there is one. The
-            // leading colon is what marks it as an attribute list rather than a
-            // brace the author happened to type next.
+            // The `{: … }` hung off the end, when there is one. The leading
+            // colon is what marks it as an attribute list rather than a brace
+            // the author happened to type next.
+            var width: CGFloat?
             var attributes = index
             while attributes < line.endIndex, line[attributes] == " " {
                 attributes = line.index(after: attributes)
@@ -730,11 +834,25 @@ struct MarkdownText: View {
                let colon = line.index(attributes, offsetBy: 1, limitedBy: line.endIndex),
                colon < line.endIndex, line[colon] == ":",
                let end = line[colon...].firstIndex(of: "}") {
+                width = imageWidth(in: line[line.index(after: colon)..<end])
                 index = line.index(after: end)
             }
+
+            images.append(
+                Picture(url: address, alt: alt.trimmingCharacters(in: .whitespaces), width: width)
+            )
         }
 
         return (text, images)
+    }
+
+    /// `width=140` out of an image's attribute list. Everything else in there —
+    /// Bitbucket's `data-layout` — is somebody else's.
+    private static func imageWidth(in attributes: Substring) -> CGFloat? {
+        guard let key = attributes.range(of: "width=") else { return nil }
+        let digits = attributes[key.upperBound...].prefix { $0.isNumber }
+        guard let number = Int(digits), number > 0 else { return nil }
+        return CGFloat(number)
     }
 
     /// "| a | b |" → ["a", "b"].

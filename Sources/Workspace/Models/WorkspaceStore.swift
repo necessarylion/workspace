@@ -1759,7 +1759,11 @@ final class WorkspaceStore {
     func saveCurrentDocumentAsPDF() {
         guard let document = visibleDocument, document.isMarkdown else { return }
         let name = document.url.deletingPathExtension().lastPathComponent
-        MarkdownPDF.save(markdown: document.text, suggestedName: name) { [weak self] result in
+        MarkdownPDF.save(
+            markdown: document.text,
+            suggestedName: name,
+            relativeTo: document.url
+        ) { [weak self] result in
             switch result {
             case .success(let url):
                 self?.showStatus("Saved \(url.lastPathComponent)")
