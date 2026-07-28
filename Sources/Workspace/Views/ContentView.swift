@@ -95,6 +95,10 @@ struct ContentView: View {
         .sheet(item: $store.gitHubAccountPrompt) { prompt in
             GitHubAccountSheet(prompt: prompt)
         }
+        // `git init` in a new folder, or a clone from a pasted URL.
+        .sheet(item: $store.newRepository) { request in
+            NewRepositorySheet(request: request)
+        }
     }
 
     /// Names what would be installed, so the answer is given about something

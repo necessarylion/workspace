@@ -74,6 +74,7 @@ missing ones, so you never have to work out which command it wanted.
 | Feature | What it does |
 | --- | --- |
 | Any folder, any host | GitHub, Bitbucket Cloud and Data Center, detected from `origin`. SSH aliases included. |
+| Start or clone one | ⌘N makes an empty repository; ⇧⌘N clones from an SSH or HTTPS URL. Either lands in the sidebar. |
 | Sidebar that stays true | Branch, ahead/behind, open PRs and changed files, re-read every five minutes. |
 | Your order | Drag cards to reorder, filter by name or path, fold it away with ⌘0. |
 | Several GitHub accounts | Each repo uses its own `gh` account. Nothing global is switched. |
@@ -156,6 +157,9 @@ everything macOS binds) are not on offer there.
 | --- | --- |
 | ⌘, | Settings — theme and font, shortcuts, required tools, language servers, updates |
 | ⇧⌘O | Add repository |
+| ⌘, | Settings — theme and font, required tools, language servers, updates |
+| ⌘N / ⇧⌘N | New empty repository · clone one from a URL |
+| ⇧⌘O | Add a repository folder you already have |
 | ⌘P | Go to file |
 | ⌘F | Find in the file |
 | ⌘S | Save the file — or the PR description — you are editing |

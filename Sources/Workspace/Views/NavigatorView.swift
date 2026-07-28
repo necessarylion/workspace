@@ -20,10 +20,19 @@ struct NavigatorView: View {
                 ContentUnavailableView {
                     Label("No repository", systemImage: "folder.badge.plus")
                 } description: {
-                    Text("Add a repository folder to get started.")
+                    Text("Add a repository folder to get started, or make a new one.")
                 } actions: {
-                    Button("Add Repository…") { store.promptForProjectFolder() }
-                        .pointerCursor()
+                    VStack(spacing: 8) {
+                        Button("Add Existing Folder…") { store.promptForProjectFolder() }
+                            .pointerCursor()
+                        HStack(spacing: 12) {
+                            Button("New") { store.showNewRepository(.create) }
+                                .pointerCursor()
+                            Button("Clone…") { store.showNewRepository(.clone) }
+                                .pointerCursor()
+                        }
+                        .buttonStyle(.link)
+                    }
                 }
             }
         }

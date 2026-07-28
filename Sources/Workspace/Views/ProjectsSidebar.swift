@@ -18,10 +18,19 @@ struct ProjectsSidebar: View {
                 ContentUnavailableView {
                     Label("No repositories", systemImage: "folder.badge.plus")
                 } description: {
-                    Text("Repositories only appear here once you add their folder.")
+                    Text("Add the folder of one you already have, or make a new one here.")
                 } actions: {
-                    Button("Add Repository…") { store.promptForProjectFolder() }
-                        .pointerCursor()
+                    VStack(spacing: 8) {
+                        Button("Add Existing Folder…") { store.promptForProjectFolder() }
+                            .pointerCursor()
+                        HStack(spacing: 12) {
+                            Button("New") { store.showNewRepository(.create) }
+                                .pointerCursor()
+                            Button("Clone…") { store.showNewRepository(.clone) }
+                                .pointerCursor()
+                        }
+                        .buttonStyle(.link)
+                    }
                 }
             } else {
                 searchField
@@ -139,13 +148,9 @@ struct ProjectsSidebar: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            Button {
-                store.promptForProjectFolder()
-            } label: {
+            AddRepositoryMenu {
                 Label("Add Repository", systemImage: "plus")
             }
-            .buttonStyle(.plain)
-            .pointerCursor()
             Spacer()
             updateButton
             settingsButton
@@ -359,13 +364,10 @@ struct CollapsedProjectsRail: View {
             Divider()
             HStack(spacing: 12) {
                 HomeTerminalButton()
-                Button {
-                    store.promptForProjectFolder()
-                } label: {
+                AddRepositoryMenu {
                     Image(systemName: "plus")
                 }
-                .help("Add a repository folder")
-                .pointerCursor()
+                .help("Add, create or clone a repository")
             }
             .buttonStyle(.borderless)
             .frame(maxWidth: .infinity)
