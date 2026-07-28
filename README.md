@@ -11,7 +11,8 @@ language servers, and a real terminal running Claude Code — side by side, in o
 place, on one theme.
 
 [Download](https://github.com/necessarylion/workspace/releases/latest) ·
-[Features](#features) · [Shortcuts](#keyboard) · [Contributing](#contributing)
+[Features](#features) · [Shortcuts](#keyboard) · [Contributing](#contributing) ·
+[License](#license)
 
 </div>
 
@@ -244,3 +245,8 @@ server layer, [Terminal.md](Docs/Terminal.md) for the terminal.
 Found a bug or want something?
 [Open an issue](https://github.com/necessarylion/workspace/issues) — screenshots
 and the repo host involved help a lot.
+
+## License
+
+Workspace is released under the [MIT License](LICENSE) — use it, change it, ship
+it, as long as the copyright notice comes along.
