@@ -48,8 +48,17 @@ enum MarkdownHTML {
             return item(marker: "\(escape(number)).", text: inline(text), indent: indent)
         case .task(let done, let text):
             return item(marker: done ? "☑" : "☐", text: inline(text), indent: 0)
-        case .quote(let text):
-            return "<blockquote>\(inline(text))</blockquote>"
+        case .quote(let alert, let blocks):
+            let head = alert.map { "<p class=\"alert\">\(escape($0.title))</p>" } ?? ""
+            return "<blockquote>\(head)\(blocks.map(html(for:)).joined(separator: "\n"))</blockquote>"
+        case .disclosure(let summary, _, let blocks):
+            // Always unfolded: a sheet of paper has nothing to click.
+            return """
+            <div class="details">
+              <p class="summary">\(inline(summary))</p>
+              \(blocks.map(html(for:)).joined(separator: "\n"))
+            </div>
+            """
         case .code(_, let text):
             // Plain, whatever the fence named: the preview's colours come from
             // the editor theme, which is dark, and dark syntax on a white page
@@ -195,6 +204,11 @@ enum MarkdownHTML {
       padding-left: 10pt;
       color: #55555c;
     }
+    blockquote > :last-child { margin-bottom: 0; }
+    .alert { font-weight: 600; color: #3c3c43; }
+    .details { margin: 0 0 8pt 0; padding-left: 10pt; border-left: 1px solid #e2e2e6; }
+    .details .summary { font-weight: 600; margin-bottom: 5pt; }
+    .details > :last-child { margin-bottom: 0; }
     .item { display: flex; gap: 7px; align-items: baseline; }
     .item .marker { color: #77777f; flex: none; }
     hr { border: none; border-top: 1px solid #e2e2e6; margin: 12pt 0; }

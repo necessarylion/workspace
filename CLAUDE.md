@@ -74,6 +74,14 @@ The app is one window with three panes, and the mental model that drives the cod
   current palette — the fence's language word replaces the file name the editor
   detects from, and the result is cached per (language, palette, text). A
   ` ```mermaid ` fence goes to `Views/MermaidDiagramView.swift`.
+  Both hosts render a comment as Markdown *with HTML in it*, and a bot leans on
+  that hard, so `Support/MarkdownHTMLText.swift` handles the tags a comment
+  actually uses: `<!-- … -->` is dropped, `<details>`/`<summary>` and
+  `<blockquote>` become blocks the parser recurses into, and every inline tag is
+  rewritten as the Markdown that says the same thing before the line is
+  classified. It is not an HTML parser — an unknown tag is dropped and its text
+  kept. `MarkdownText.Block` is `indirect` because of those containers, so a new
+  case has to be answered in `MarkdownHTML` too.
 - **Diagrams** (`Views/DiagramWebView.swift`) — mermaid fences and `.drawio`
   files are both drawn by the real JavaScript library in a `WKWebView`, and both
   go through this one representable: it loads a page from `Resources/` as a

@@ -95,7 +95,7 @@ private final class Renderer: NSObject, WKNavigationDelegate {
         self.destination = destination
 
         let blocks = MarkdownText.blocks(in: markdown)
-        let needsDiagrams = blocks.contains { if case .mermaid = $0 { true } else { false } }
+        let needsDiagrams = MarkdownText.containsDiagram(blocks)
 
         // WebKit only reads local files out of a directory it was handed, and
         // the app bundle is not writable, so the page is assembled in a scratch

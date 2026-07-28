@@ -94,23 +94,79 @@ struct MarkdownPreview: View {
 /// `AttributedString`. Does not scroll — embed it wherever text goes
 /// (PR descriptions, comments, the file preview).
 struct MarkdownText: View {
-    let text: String
+    private let source: Source
+
+    /// Text the view parses itself, or blocks a container block already holds —
+    /// a `<details>` section and a quote both draw their contents with a nested
+    /// `MarkdownText`, and re-serialising them to Markdown to parse again would
+    /// be work for nothing.
+    private enum Source {
+        case markdown(String)
+        case parsed([Block])
+    }
+
+    init(text: String) { source = .markdown(text) }
+
+    fileprivate init(blocks: [Block]) { source = .parsed(blocks) }
 
     /// Not private: `MarkdownPDF` writes the same document out to a file and
     /// walks this very list, so the page and the PDF cannot drift apart.
-    enum Block {
+    ///
+    /// `indirect` because a quote and a `<details>` section hold blocks of their
+    /// own.
+    indirect enum Block {
         case heading(level: Int, text: String)
         case paragraph(String)
         case bullet(indent: Int, text: String)
         case numbered(indent: Int, number: String, text: String)
         case task(done: Bool, text: String)
-        case quote(String)
+        case quote(Alert?, [Block])
+        case disclosure(summary: String, isOpen: Bool, blocks: [Block])
         case code(language: String, text: String)
         case mermaid(String)
         case image(url: String, alt: String)
         case table(headers: [String], rows: [[String]])
         case rule
         case spacer
+    }
+
+    /// A GitHub alert — a quote whose first line is `[!WARNING]`. Both hosts
+    /// write them and a bot writes little else, so a quote that is one is drawn
+    /// with its name and colour rather than as an unexplained `[!WARNING]`.
+    enum Alert: String {
+        case note, tip, important, warning, caution
+
+        init?(marker: String) {
+            guard marker.hasPrefix("[!"), let end = marker.firstIndex(of: "]") else { return nil }
+            let name = marker[marker.index(marker.startIndex, offsetBy: 2)..<end].lowercased()
+            // Only when the marker is the whole line, the way the syntax reads.
+            guard marker[marker.index(after: end)...].trimmingCharacters(in: .whitespaces).isEmpty,
+                  let alert = Alert(rawValue: name)
+            else { return nil }
+            self = alert
+        }
+
+        var title: String { rawValue.capitalized }
+
+        var symbol: String {
+            switch self {
+            case .note: "info.circle.fill"
+            case .tip: "lightbulb.fill"
+            case .important: "exclamationmark.bubble.fill"
+            case .warning: "exclamationmark.triangle.fill"
+            case .caution: "exclamationmark.octagon.fill"
+            }
+        }
+
+        var color: Color {
+            switch self {
+            case .note: .blue
+            case .tip: .green
+            case .important: .purple
+            case .warning: .orange
+            case .caution: .red
+            }
+        }
     }
 
     var body: some View {
@@ -127,15 +183,15 @@ struct MarkdownText: View {
     private func view(for block: Block) -> some View {
         switch block {
         case .heading(let level, let text):
-            inline(text, baseSize: headingSize(level))
+            Self.inline(text, baseSize: headingSize(level))
                 .font(headingFont(level))
                 .padding(.top, level <= 2 ? 8 : 4)
         case .paragraph(let text):
-            inline(text)
+            Self.inline(text)
         case .bullet(let indent, let text):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(indent > 0 ? "◦" : "•").foregroundStyle(.secondary)
-                inline(text)
+                Self.inline(text)
             }
             .padding(.leading, CGFloat(indent) * 16)
         case .numbered(let indent, let number, let text):
@@ -143,7 +199,7 @@ struct MarkdownText: View {
                 Text("\(number).")
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
-                inline(text)
+                Self.inline(text)
             }
             .padding(.leading, CGFloat(indent) * 16)
         case .task(let done, let text):
@@ -154,14 +210,29 @@ struct MarkdownText: View {
                 // No strikethrough on a ticked item: the box already says it is
                 // done, and struck-through text is the harder to read the more
                 // there is of it.
-                inline(text)
+                Self.inline(text)
                     .foregroundStyle(done ? .secondary : .primary)
             }
-        case .quote(let text):
+        case .quote(let alert, let blocks):
             HStack(alignment: .top, spacing: 10) {
-                Rectangle().fill(.quaternary).frame(width: 3)
-                inline(text).foregroundStyle(.secondary)
+                Rectangle()
+                    .fill(alert.map { AnyShapeStyle($0.color.opacity(0.7)) } ?? AnyShapeStyle(.quaternary))
+                    .frame(width: 3)
+                VStack(alignment: .leading, spacing: 6) {
+                    if let alert {
+                        Label(alert.title, systemImage: alert.symbol)
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(alert.color)
+                    }
+                    // An alert is the point of the comment it sits in, so it
+                    // keeps the body colour; a plain quote is someone else's
+                    // words and stays back.
+                    MarkdownText(blocks: blocks)
+                        .foregroundStyle(alert == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                }
             }
+        case .disclosure(let summary, let isOpen, let blocks):
+            MarkdownDisclosure(summary: summary, isOpen: isOpen, blocks: blocks)
         case .code(let language, let code):
             ScrollView(.horizontal) {
                 // Coloured by the editor's own tree-sitter setup when the fence
@@ -186,7 +257,7 @@ struct MarkdownText: View {
                 MarkdownImage(url: url, alt: alt)
                     .padding(.vertical, 2)
             } else {
-                inline(alt.isEmpty ? address : alt)
+                Self.inline(alt.isEmpty ? address : alt)
                     .foregroundStyle(.secondary)
             }
         case .table(let headers, let rows):
@@ -201,7 +272,7 @@ struct MarkdownText: View {
                 // gaps wherever a column is wider than its text.
                 // `maxWidth: .infinity` makes a cell take the whole column.
                 ForEach(headers.indices, id: \.self) { column in
-                    inline(headers[column])
+                    Self.inline(headers[column])
                         .font(.callout.weight(.semibold))
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, 10)
@@ -212,7 +283,7 @@ struct MarkdownText: View {
                 }
                 ForEach(rows.indices, id: \.self) { index in
                     ForEach(headers.indices, id: \.self) { column in
-                        inline(column < rows[index].count ? rows[index][column] : "")
+                        Self.inline(column < rows[index].count ? rows[index][column] : "")
                             // Take as many lines as the wrapped text needs
                             // rather than being squeezed onto one.
                             .fixedSize(horizontal: false, vertical: true)
@@ -263,7 +334,7 @@ struct MarkdownText: View {
     }
 
     /// One line of styled text, with the chip backdrop layered behind it.
-    private func inline(_ source: String, baseSize: CGFloat = MarkdownText.bodySize) -> some View {
+    fileprivate static func inline(_ source: String, baseSize: CGFloat = MarkdownText.bodySize) -> some View {
         let text = inlineText(source, baseSize: baseSize)
         // Both layers are the same `Text`, and `.font`/`.foregroundStyle` set by
         // the caller reach the backdrop through the environment, so the two
@@ -277,7 +348,7 @@ struct MarkdownText: View {
     /// Returns a `Text` rather than an `AttributedString` because the chip
     /// attribute can only be attached per `Text`. Concatenating with `+` still
     /// leaves one `Text`, so the whole thing wraps as a single paragraph.
-    private func inlineText(_ source: String, baseSize: CGFloat) -> Text {
+    private static func inlineText(_ source: String, baseSize: CGFloat) -> Text {
         let parsed = (try? AttributedString(
             markdown: source,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
@@ -349,7 +420,12 @@ struct MarkdownText: View {
     }
 
     @MainActor
-    private var blocks: [Block] { Self.cachedBlocks(in: text) }
+    private var blocks: [Block] {
+        switch source {
+        case .markdown(let text): Self.cachedBlocks(in: text)
+        case .parsed(let blocks): blocks
+        }
+    }
 
     /// The parse, remembered.
     ///
@@ -372,12 +448,102 @@ struct MarkdownText: View {
     private static var cache: [String: [Block]] = [:]
 
     static func blocks(in text: String) -> [Block] {
+        // The bookkeeping a bot hides in `<!-- … -->` goes first, so nothing
+        // downstream has to know it was ever there.
+        parse(MarkdownHTMLText.strippingComments(text), depth: 0)
+    }
+
+    /// True when `blocks` — or anything nested in them — holds a diagram.
+    /// `MarkdownPDF` asks before copying mermaid in beside the page.
+    static func containsDiagram(_ blocks: [Block]) -> Bool {
+        blocks.contains { block in
+            switch block {
+            case .mermaid: true
+            case .quote(_, let nested), .disclosure(_, _, let nested): containsDiagram(nested)
+            default: false
+            }
+        }
+    }
+
+    /// Peels off the `<details>` and `<blockquote>` sections, outermost first,
+    /// and hands what is between them to the line parser. A section's own
+    /// contents come back through here, which is what lets a review nested four
+    /// deep read as four foldable sections rather than as its tags.
+    ///
+    /// `depth` is only a backstop against text that nests without end; real
+    /// output from a bot bottoms out around five.
+    private static func parse(_ text: String, depth: Int) -> [Block] {
+        guard depth < 12, let container = MarkdownHTMLText.container(in: text) else {
+            return tidied(plainBlocks(in: text, depth: depth))
+        }
+        var result = plainBlocks(in: String(container.before), depth: depth)
+
+        switch container.tag {
+        case .details:
+            let split = MarkdownHTMLText.summary(in: container.inner)
+            let summary = MarkdownHTMLText.markdown(from: split?.summary ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            result.append(.disclosure(
+                // A section with no `<summary>` still needs something to click.
+                summary: summary.isEmpty ? "Details" : summary,
+                isOpen: container.isOpen,
+                blocks: parse(split?.body ?? String(container.inner), depth: depth + 1)
+            ))
+        case .blockquote:
+            result.append(.quote(nil, parse(String(container.inner), depth: depth + 1)))
+        }
+
+        result += parse(String(container.after), depth: depth)
+        return tidied(result)
+    }
+
+    /// A run of blank lines is one paragraph break, and the blank lines a
+    /// section opens and closes with are nothing at all — the stack's own
+    /// spacing is what holds the blocks apart.
+    ///
+    /// This matters here in a way it does not in a hand-written document: HTML
+    /// needs a blank line either side of a tag for the Markdown inside it to be
+    /// read as Markdown, so a bot writing `<details>` sections leaves two or
+    /// three, and each one used to push the next section further down.
+    private static func tidied(_ blocks: [Block]) -> [Block] {
+        var result: [Block] = []
+        for block in blocks {
+            guard case .spacer = block else {
+                result.append(block)
+                continue
+            }
+            if let last = result.last, case .spacer = last { continue }
+            if result.isEmpty { continue }
+            result.append(block)
+        }
+        if let last = result.last, case .spacer = last { result.removeLast() }
+        return result
+    }
+
+    private static func plainBlocks(in text: String, depth: Int) -> [Block] {
         var result: [Block] = []
         var codeBuffer: [String] = []
         var inCode = false
         /// The word after the opening ``` — "swift", "mermaid", or nothing.
         var codeLanguage = ""
         var tableBuffer: [[String]] = []
+        var quoteBuffer: [String] = []
+
+        /// A quote is parsed as a document of its own rather than line by line:
+        /// it can hold anything, a `<details>` section included, and a bot's
+        /// alert is several paragraphs behind one bar.
+        func flushQuote() {
+            guard !quoteBuffer.isEmpty else { return }
+            var lines = quoteBuffer
+            quoteBuffer.removeAll()
+            var alert: Alert?
+            if let first = lines.firstIndex(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+               let marked = Alert(marker: lines[first].trimmingCharacters(in: .whitespaces)) {
+                alert = marked
+                lines.remove(at: first)
+            }
+            result.append(.quote(alert, parse(lines.joined(separator: "\n"), depth: depth + 1)))
+        }
 
         /// A fence is a diagram when it says so and has something in it;
         /// everything else stays a code block.
@@ -418,8 +584,22 @@ struct MarkdownText: View {
         }
 
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            var line = String(rawLine)
+            // Whatever HTML the line still carries becomes the Markdown that
+            // says the same thing, so everything below reads one syntax.
+            var line = inCode ? String(rawLine) : MarkdownHTMLText.markdown(from: String(rawLine))
             var trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // The quote comes off before the pictures are pulled out: its lines
+            // are re-parsed as a document, and one that went through here first
+            // would have its pictures hoisted out of the quote and left after it.
+            if !inCode, trimmed.hasPrefix(">") {
+                flushTable()
+                var rest = Substring(trimmed).dropFirst()
+                if rest.hasPrefix(" ") { rest = rest.dropFirst() }
+                quoteBuffer.append(String(rest))
+                continue
+            }
+            flushQuote()
 
             // Pictures come out of the line before anything else looks at it, so
             // an image sitting on a bullet or at the end of a sentence still
@@ -479,23 +659,23 @@ struct MarkdownText: View {
                 result.append(.heading(level: min(level, 6), text: title))
             } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
                 let rest = String(trimmed.dropFirst(2))
+                // Trimmed: a bot writes its checkbox id in a comment between the
+                // box and the label, and taking the comment out leaves the gap.
                 if rest.hasPrefix("[ ] ") {
-                    result.append(.task(done: false, text: String(rest.dropFirst(4))))
+                    result.append(.task(done: false, text: rest.dropFirst(4).trimmingCharacters(in: .whitespaces)))
                 } else if rest.hasPrefix("[x] ") || rest.hasPrefix("[X] ") {
-                    result.append(.task(done: true, text: String(rest.dropFirst(4))))
+                    result.append(.task(done: true, text: rest.dropFirst(4).trimmingCharacters(in: .whitespaces)))
                 } else {
                     result.append(.bullet(indent: indent, text: rest))
                 }
             } else if let ordered = orderedItem(trimmed) {
                 result.append(.numbered(indent: indent, number: ordered.number, text: ordered.text))
-            } else if trimmed.hasPrefix(">") {
-                let rest = trimmed.dropFirst().trimmingCharacters(in: .whitespaces)
-                result.append(.quote(rest))
             } else {
                 result.append(.paragraph(trimmed))
             }
         }
 
+        flushQuote()
         flushTable()
         // An unterminated fence — the file is still being typed, most likely.
         if inCode, !codeBuffer.isEmpty {
@@ -574,6 +754,53 @@ struct MarkdownText: View {
         let rest = line.dropFirst(digits.count)
         guard rest.hasPrefix(". ") || rest.hasPrefix(") ") else { return nil }
         return (String(digits), rest.dropFirst(2).trimmingCharacters(in: .whitespaces))
+    }
+}
+
+/// A `<details>` section: its summary on a row that folds the rest away.
+///
+/// Not a `DisclosureGroup`. The contents are selectable text, and the label
+/// would be too — a drag across the summary would select rather than open it.
+/// A button of its own keeps the whole row a click target, and the summary opts
+/// out of selection so nothing swallows the click.
+private struct MarkdownDisclosure: View {
+    let summary: String
+    let blocks: [MarkdownText.Block]
+    @State private var isExpanded: Bool
+
+    init(summary: String, isOpen: Bool, blocks: [MarkdownText.Block]) {
+        self.summary = summary
+        self.blocks = blocks
+        _isExpanded = State(initialValue: isOpen)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        // The triangle turns about its own middle, which sits a
+                        // little above the baseline the row is aligned on.
+                        .alignmentGuide(.firstTextBaseline) { $0[.bottom] }
+                    MarkdownText.inline(summary)
+                        .fontWeight(.semibold)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .textSelection(.disabled)
+
+            if isExpanded {
+                MarkdownText(blocks: blocks)
+                    .padding(.leading, 14)
+            }
+        }
     }
 }
 
