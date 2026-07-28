@@ -50,12 +50,22 @@ final class Project: Identifiable {
     /// Whether a spinner should be up for the read that is running. **Not the
     /// same as one running**: a read nobody asked for — the five-minute sweep
     /// of the sidebar — leaves this alone, so the cards stay still. See
-    /// ``isReadingPullRequests`` for the one that answers "is a call in the
-    /// air", which is what stops two of them overlapping.
+    /// ``pullRequestReads`` for the one that answers "is a call in the air",
+    /// which is what stops two of them overlapping.
     var isLoadingPullRequests = false
 
-    /// Whether the host is being asked right now, spinner or no spinner.
-    @ObservationIgnored private var isReadingPullRequests = false
+    /// How many reads are in the air, spinner or no spinner. A sweep on a clock
+    /// gives way while any of them is running.
+    @ObservationIgnored private var pullRequestReads = 0
+
+    /// Which read is the newest one started.
+    ///
+    /// Two can overlap — a sweep on a clock while a merge asks for the list
+    /// again — and the host answers in whatever order it likes, so the older
+    /// one landing last would write its stale list over the newer one's and
+    /// take the spinner down while the newer read is still running. A read
+    /// only writes anything if it is still the newest when it lands.
+    @ObservationIgnored private var pullRequestReadGeneration = 0
 
     /// When the host was last asked for the pull requests. `nil` until the first
     /// read, which is what makes a repository restored from the last launch fill
@@ -166,7 +176,7 @@ final class Project: Identifiable {
     private func refreshPullRequestsIfStale() async {
         // A read already running counts as the fresh one: the stamp is only put
         // down when it lands, so without this a slow host would be asked twice.
-        guard !isReadingPullRequests else { return }
+        guard pullRequestReads == 0 else { return }
         if let last = lastPullRequestRead,
            Date().timeIntervalSince(last) < Self.pullRequestRefreshInterval {
             return
@@ -261,7 +271,7 @@ final class Project: Identifiable {
         // A sweep on a clock gives way to the read already running; a read the
         // user asked for is the one that is allowed to double up, since it is
         // answering a button that was just pressed.
-        guard !quietly || !isReadingPullRequests else { return }
+        guard !quietly || pullRequestReads == 0 else { return }
 
         guard let remote, remote.kind != .unknown else {
             pullRequests = []
@@ -272,19 +282,29 @@ final class Project: Identifiable {
             return
         }
 
-        isReadingPullRequests = true
+        pullRequestReads += 1
+        pullRequestReadGeneration += 1
+        let generation = pullRequestReadGeneration
         if !quietly { isLoadingPullRequests = true }
         pullRequestError = nil
         defer {
-            isReadingPullRequests = false
-            isLoadingPullRequests = false
-            lastPullRequestRead = Date()
+            pullRequestReads -= 1
+            // Only the newest read settles the spinner and the stamp. One that
+            // started earlier and landed later would put the spinner down over
+            // a read still running, and would date a list it did not write.
+            if generation == pullRequestReadGeneration {
+                isLoadingPullRequests = false
+                lastPullRequestRead = Date()
+            }
         }
 
         do {
-            pullRequests = try await PullRequestService.loadOpen(for: remote, in: url)
+            let loaded = try await PullRequestService.loadOpen(for: remote, in: url)
+            guard generation == pullRequestReadGeneration else { return }
+            pullRequests = loaded
             fillPullRequestColumns()
         } catch {
+            guard generation == pullRequestReadGeneration else { return }
             pullRequests = []
             pullRequestError = error.localizedDescription
         }

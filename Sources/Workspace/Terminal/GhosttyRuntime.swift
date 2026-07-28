@@ -142,6 +142,17 @@ final class GhosttyRuntime {
         // takes a name and cannot be handed the system face under Apple's
         // private one, so there it keeps its own default.
         if let face = appearance.terminalFace {
+            // `font-family` is a *list* in ghostty: naming one appends it as a
+            // fallback behind whatever the user's own config named, which would
+            // leave their face drawing the terminal and ours only filling in
+            // the glyphs it lacked. `""` is what ghostty documents as the way
+            // to clear a repeated value before setting it, so the face chosen
+            // here is the one in front. The three styles are cleared with it:
+            // with none of them named, ghostty looks for the bold and the
+            // italic inside the family in front, which is the point.
+            for key in ["font-family", "font-family-bold", "font-family-italic", "font-family-bold-italic"] {
+                lines.append("\(key) = \"\"")
+            }
             lines.append("font-family = \(face)")
         }
         lines.append("font-size = \(appearance.terminalFontSize)")

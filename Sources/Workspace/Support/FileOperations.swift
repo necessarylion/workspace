@@ -81,26 +81,39 @@ enum FileOperations {
     /// Makes an empty file or folder inside `folder`. The name is numbered past
     /// anything already called that ("untitled 2"), so pressing **+** twice
     /// gives two rows rather than an error.
+    ///
+    /// Twice *quickly* is why the name is chosen in a loop. `uniqueURL` only
+    /// asks whether a name is free; the create is what takes it, and between
+    /// the two another one can take it first. Then the name is chosen again
+    /// rather than the second press failing — which is the behaviour the line
+    /// above promises. `Data.write(options: .withoutOverwriting)` rather than
+    /// `createFile(atPath:contents:)` for the same reason: the latter writes
+    /// straight through a file that is already there, and a lost file is worse
+    /// than a lost name.
     static func create(_ kind: NewItem, in folder: URL) -> Result {
         var result = Result()
-        let destination = uniqueURL(for: kind.placeholderName, in: folder)
-        do {
-            switch kind {
-            case .file:
-                // `createFile` reports a plain false rather than throwing, so it
-                // is turned into the same error the folder case produces.
-                guard FileManager.default.createFile(atPath: destination.path, contents: Data())
-                else { throw CocoaError(.fileWriteUnknown) }
-            case .folder:
-                try FileManager.default.createDirectory(
-                    at: destination,
-                    withIntermediateDirectories: false
-                )
+        for _ in 0..<8 {
+            let destination = uniqueURL(for: kind.placeholderName, in: folder)
+            do {
+                switch kind {
+                case .file:
+                    try Data().write(to: destination, options: .withoutOverwriting)
+                case .folder:
+                    try FileManager.default.createDirectory(
+                        at: destination,
+                        withIntermediateDirectories: false
+                    )
+                }
+                result.finished.append(destination)
+                return result
+            } catch let error as CocoaError where error.code == .fileWriteFileExists {
+                continue
+            } catch {
+                result.errors.append("\(destination.lastPathComponent): \(error.localizedDescription)")
+                return result
             }
-            result.finished.append(destination)
-        } catch {
-            result.errors.append("\(destination.lastPathComponent): \(error.localizedDescription)")
         }
+        result.errors.append("\(kind.placeholderName): the name was taken every time")
         return result
     }
 
