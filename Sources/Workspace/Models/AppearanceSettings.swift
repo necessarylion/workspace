@@ -62,8 +62,9 @@ final class AppearanceSettings {
     /// What the sizes fall back to, and what Restore Defaults puts back.
     enum Default {
         static let editorSize: Double = 12.5
-        /// A diff is denser than a file on purpose: two columns have to fit.
-        static let diffSize: Double = 10
+        /// Still a shade denser than a file — two columns have to fit — but not
+        /// so small that a diff is harder to read than the file it came from.
+        static let diffSize: Double = 12
         static let terminalSize: Double = 13
         /// The terminal is set in SF Mono too, so a shell and a file read as the
         /// same app rather than as two.
