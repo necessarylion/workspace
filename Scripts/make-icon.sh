@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regenerates Resources/AppIcon.icns from icon.png.
+# Regenerates Resources/AppIcon.icns from Assets/icon.png.
 #
 # The source artwork is the mark alone on transparency. What the icon needs is
 # a body to sit on, and it is built here rather than drawn by hand: a dark
@@ -17,7 +17,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-SRC="${1:-icon.png}"
+SRC="${1:-Assets/icon.png}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 

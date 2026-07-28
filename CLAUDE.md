@@ -135,5 +135,8 @@ The app is one window with three panes, and the mental model that drives the cod
   in `Terminal/`) so the engine could be swapped again without
   touching anything else (see `Docs/Terminal.md` for the plan and current state).
 
-`README.md` has the full feature table, keyboard shortcuts, and a per-file source
-layout map — keep it updated when adding features.
+`README.md` is the user-facing page: logo, feature list, shortcuts, credits and
+the contribution guide — keep the feature list updated when adding something a
+user can see. `Docs/Development.md` carries the developer half: build and release
+details, the language server table, and the per-file source layout map — keep
+that map updated when adding files.
