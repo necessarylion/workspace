@@ -121,7 +121,7 @@ missing ones, so you never have to work out which command it wanted.
 
 | Feature | What it does |
 | --- | --- |
-| Markdown | Rendered, not raw — tables, task lists, code chips — and saved as PDF with ⇧⌘E. |
+| Markdown | Rendered, not raw — tables, task lists, code chips, and the pictures a README keeps beside itself — and saved as PDF with ⇧⌘E. |
 | Mermaid | ` ```mermaid ` fences drawn as diagrams. |
 | draw.io | `.drawio` files drawn as the diagram, with pages, zoom and layers. |
 | PDF | Read page by page, with a floating page and zoom bar. |

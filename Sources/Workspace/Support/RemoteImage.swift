@@ -2,7 +2,8 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// Downloads the pictures Markdown points at, once each.
+/// Loads the pictures Markdown points at, once each — downloaded when the
+/// address is a web one, read off the disk when it is a file beside the document.
 ///
 /// Same shape as `AvatarLoader`, and separate from it on purpose: an avatar is a
 /// small square that is drawn hundreds of times, while these are full-size
@@ -62,6 +63,16 @@ final class RemoteImageLoader {
     /// picture behind a login is one the reader opens in their browser, where
     /// they are already signed in.
     private static func download(_ url: URL) async -> Outcome {
+        // A picture in a README is a file in the same checkout, and that one is
+        // read rather than requested — no session, no cache policy, no waiting
+        // on a network that has nothing to do with it.
+        if url.isFileURL {
+            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+                  let image = NSImage(data: data)
+            else { return Outcome() }
+            return Outcome(image: image, bytes: data.count)
+        }
+
         var request = URLRequest(url: url)
         request.cachePolicy = .returnCacheDataElseLoad
         request.timeoutInterval = 30
@@ -121,9 +132,9 @@ struct MarkdownImage: View {
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))
                 .accessibilityLabel(alt.isEmpty ? "Image" : alt)
-                .onTapGesture { NSWorkspace.shared.open(url) }
+                .onTapGesture { open() }
                 .pointerCursor()
-                .help("Open in browser")
+                .help(url.isFileURL ? "Open this file" : "Open in browser")
         } else if isLoading {
             placeholder {
                 ProgressView().controlSize(.small)
@@ -146,17 +157,35 @@ struct MarkdownImage: View {
                     }
                 }
                 Spacer(minLength: 8)
-                Button("Open in Browser") { NSWorkspace.shared.open(url) }
+                Button(url.isFileURL ? "Show in Finder" : "Open in Browser") { reveal() }
                     .buttonStyle(.link)
                     .pointerCursor()
             }
         }
     }
 
+    /// Whatever the address points at, in the app that owns it — the browser for
+    /// a web one, Preview or whatever else the reader set for a file.
+    private func open() { NSWorkspace.shared.open(url) }
+
+    /// The way out of a placeholder. A file that would not draw is one to look
+    /// at rather than open, so Finder is where the button goes.
+    private func reveal() {
+        if url.isFileURL {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            open()
+        }
+    }
+
     /// Why it is a placeholder and not a picture. Only worth saying for a host
-    /// the app is known not to be able to reach — anything else failed for a
-    /// reason the reader can see for themselves by opening it.
+    /// the app is known not to be able to reach, or for a file that is there and
+    /// still would not draw — anything else failed for a reason the reader can
+    /// see for themselves by opening it.
     private var hint: String? {
+        if url.isFileURL {
+            return "This file is not a picture the app can draw."
+        }
         guard let host = url.host()?.lowercased(),
               host == "bitbucket.org" || host.hasSuffix(".bitbucket.org")
         else { return nil }

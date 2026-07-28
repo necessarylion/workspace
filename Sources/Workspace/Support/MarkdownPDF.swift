@@ -23,9 +23,12 @@ import WebKit
 enum MarkdownPDF {
     /// Asks where to save, writes the PDF there, then reports back. `onFinish`
     /// is not called at all when the reader cancels the save panel.
+    /// `source` is the file the Markdown was read from, so the pictures it
+    /// writes as paths beside itself land in the PDF too.
     static func save(
         markdown: String,
         suggestedName: String,
+        relativeTo source: URL? = nil,
         onFinish: @escaping (Result<URL, Error>) -> Void
     ) {
         let panel = NSSavePanel()
@@ -34,7 +37,7 @@ enum MarkdownPDF {
         panel.canCreateDirectories = true
         panel.title = "Save as PDF"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        write(markdown: markdown, title: suggestedName, to: url, onFinish: onFinish)
+        write(markdown: markdown, title: suggestedName, to: url, relativeTo: source, onFinish: onFinish)
     }
 
     /// Writes the PDF without asking — the save panel's other half, and the way
@@ -43,10 +46,16 @@ enum MarkdownPDF {
         markdown: String,
         title: String,
         to url: URL,
+        relativeTo source: URL? = nil,
         onFinish: @escaping (Result<URL, Error>) -> Void
     ) {
         do {
-            let renderer = try Renderer(markdown: markdown, title: title, destination: url)
+            let renderer = try Renderer(
+                markdown: markdown,
+                title: title,
+                destination: url,
+                source: source
+            )
             renderer.start(onFinish: onFinish)
         } catch {
             onFinish(.failure(error))
@@ -90,11 +99,11 @@ private final class Renderer: NSObject, WKNavigationDelegate {
     private let window: NSWindow
     private var onFinish: ((Result<URL, Error>) -> Void)?
 
-    init(markdown: String, title: String, destination: URL) throws {
+    init(markdown: String, title: String, destination: URL, source: URL?) throws {
         self.title = title
         self.destination = destination
 
-        let blocks = MarkdownText.blocks(in: markdown)
+        let blocks = MarkdownText.blocks(in: markdown, relativeTo: source)
         let needsDiagrams = MarkdownText.containsDiagram(blocks)
 
         // WebKit only reads local files out of a directory it was handed, and

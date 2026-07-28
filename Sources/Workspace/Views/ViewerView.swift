@@ -316,7 +316,9 @@ struct ViewerView: View {
             switch document.content {
             case .text:
                 if document.isMarkdown && store.markdownPreview {
-                    MarkdownPreview(text: document.text)
+                    // With the file's own address: a README's pictures are
+                    // paths beside it, and this is what they are beside.
+                    MarkdownPreview(text: document.text, baseURL: document.url)
                 } else if document.isDrawio && store.drawioPreview {
                     DrawioPreview(xml: document.text)
                 } else {

@@ -77,10 +77,14 @@ private struct CodeChipBackdrop: ViewModifier {
 /// Full-page Markdown view for `.md` files: `MarkdownText` in a scroll view.
 struct MarkdownPreview: View {
     let text: String
+    /// The file the text was read from, when it was read from one. A README
+    /// writes its pictures as paths beside itself — `![](assets/preview.jpeg)` —
+    /// and this is what those are paths from.
+    var baseURL: URL?
 
     var body: some View {
         ScrollView {
-            MarkdownText(text: text)
+            MarkdownText(text: text, relativeTo: baseURL)
                 .frame(maxWidth: 720, alignment: .leading)
                 .padding(28)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -101,11 +105,14 @@ struct MarkdownText: View {
     /// `MarkdownText`, and re-serialising them to Markdown to parse again would
     /// be work for nothing.
     private enum Source {
-        case markdown(String)
+        case markdown(String, base: URL?)
         case parsed([Block])
     }
 
-    init(text: String) { source = .markdown(text) }
+    /// `baseURL` is the file the Markdown came from, and only a file on disk has
+    /// one: it is what a picture written as a relative path is a path from. A PR
+    /// description or a comment has no folder, so it passes nothing.
+    init(text: String, relativeTo baseURL: URL? = nil) { source = .markdown(text, base: baseURL) }
 
     fileprivate init(blocks: [Block]) { source = .parsed(blocks) }
 
@@ -251,9 +258,12 @@ struct MarkdownText: View {
                 .padding(.vertical, 4)
         case .image(let address, let alt):
             // A picture is only drawn for an address the app could actually
-            // fetch; a relative one in a comment points into a repository
-            // checkout the viewer has no idea about, so it stays as its text.
-            if let url = URL(string: address), url.scheme == "http" || url.scheme == "https" {
+            // reach: one it can fetch, or a file `blocks(in:relativeTo:)` found
+            // beside the document. A relative one in a comment points into a
+            // repository checkout the viewer has no idea about — there is no
+            // folder to resolve it against — so it stays as its text.
+            if let url = URL(string: address),
+               url.scheme == "http" || url.scheme == "https" || url.isFileURL {
                 MarkdownImage(url: url, alt: alt)
                     .padding(.vertical, 2)
             } else {
@@ -422,7 +432,7 @@ struct MarkdownText: View {
     @MainActor
     private var blocks: [Block] {
         switch source {
-        case .markdown(let text): Self.cachedBlocks(in: text)
+        case .markdown(let text, let base): Self.cachedBlocks(in: text, relativeTo: base)
         case .parsed(let blocks): blocks
         }
     }
@@ -436,21 +446,103 @@ struct MarkdownText: View {
     /// keeps its colours. The cap only stops a long reading session from
     /// growing this without end.
     @MainActor
-    private static func cachedBlocks(in text: String) -> [Block] {
-        if let cached = cache[text] { return cached }
-        let parsed = blocks(in: text)
+    private static func cachedBlocks(in text: String, relativeTo base: URL?) -> [Block] {
+        // The folder is part of the key, not just the text: the same
+        // `![](assets/logo.png)` is a different picture in another repository.
+        let key = "\(base?.path ?? "")\n\(text)"
+        if let cached = cache[key] { return cached }
+        let parsed = blocks(in: text, relativeTo: base)
         if cache.count > 200 { cache.removeAll() }
-        cache[text] = parsed
+        cache[key] = parsed
         return parsed
     }
 
     @MainActor
     private static var cache: [String: [Block]] = [:]
 
-    static func blocks(in text: String) -> [Block] {
+    static func blocks(in text: String, relativeTo base: URL? = nil) -> [Block] {
         // The bookkeeping a bot hides in `<!-- … -->` goes first, so nothing
         // downstream has to know it was ever there.
-        parse(MarkdownHTMLText.strippingComments(text), depth: 0)
+        let parsed = parse(MarkdownHTMLText.strippingComments(text), depth: 0)
+        guard let base else { return parsed }
+        return resolvingImages(parsed, relativeTo: base)
+    }
+
+    /// Turns `![](assets/preview.jpeg)` into the file it means.
+    ///
+    /// A README is written to be read beside its own folder, and the pictures in
+    /// it are paths into that folder rather than addresses anything can fetch.
+    /// Nothing downstream has to know that happened: the block carries a
+    /// `file://` address, and the picture is loaded, cached and written into the
+    /// PDF by the same code an `https://` one goes through.
+    ///
+    /// It is done here rather than in the view because the parse is what is
+    /// cached, and because `MarkdownPDF` walks these very blocks.
+    private static func resolvingImages(_ blocks: [Block], relativeTo base: URL) -> [Block] {
+        blocks.map { block in
+            switch block {
+            case .image(let address, let alt):
+                guard let file = localFile(for: address, relativeTo: base) else { return block }
+                return .image(url: file.absoluteString, alt: alt)
+            // A picture inside a quote or a folded section is still a picture.
+            case .quote(let alert, let nested):
+                return .quote(alert, resolvingImages(nested, relativeTo: base))
+            case .disclosure(let summary, let isOpen, let nested):
+                return .disclosure(
+                    summary: summary,
+                    isOpen: isOpen,
+                    blocks: resolvingImages(nested, relativeTo: base)
+                )
+            default:
+                return block
+            }
+        }
+    }
+
+    /// The file a Markdown address points at, when it points at one at all.
+    ///
+    /// `https://…` and anything else with a scheme is somebody else's to fetch.
+    /// A leading `/` means the repository's root the way GitHub reads it, not
+    /// the disk's, so it is resolved against the checkout the file sits in and
+    /// dropped when there is none — `/etc/passwd` is not what a README meant.
+    ///
+    /// Only a path that is actually there becomes a picture. A broken one stays
+    /// the text the author wrote, which is what shows them it is broken.
+    private static func localFile(for address: String, relativeTo base: URL) -> URL? {
+        guard !address.isEmpty, URL(string: address)?.scheme == nil else { return nil }
+        // The `#fragment` and `?query` a host would answer without, and the
+        // escapes a path with a space in it is written with.
+        var path = address
+        if let hash = path.firstIndex(of: "#") { path = String(path[..<hash]) }
+        if let question = path.firstIndex(of: "?") { path = String(path[..<question]) }
+        path = path.removingPercentEncoding ?? path
+        guard !path.isEmpty else { return nil }
+
+        let directory = base.deletingLastPathComponent()
+        let resolved: URL
+        if path.hasPrefix("/") {
+            guard let root = repositoryRoot(above: directory) else { return nil }
+            resolved = root.appending(path: String(path.dropFirst()))
+        } else {
+            resolved = directory.appending(path: path)
+        }
+        let file = resolved.standardizedFileURL
+        return FileManager.default.fileExists(atPath: file.path) ? file : nil
+    }
+
+    /// The checkout the folder sits in, found the way git finds it — the nearest
+    /// `.git` at or above it. The count is only a backstop; a path has an end.
+    private static func repositoryRoot(above directory: URL) -> URL? {
+        var folder = directory.standardizedFileURL
+        for _ in 0..<64 {
+            if FileManager.default.fileExists(atPath: folder.appending(path: ".git").path) {
+                return folder
+            }
+            let parent = folder.deletingLastPathComponent().standardizedFileURL
+            if parent == folder { return nil }
+            folder = parent
+        }
+        return nil
     }
 
     /// True when `blocks` — or anything nested in them — holds a diagram.

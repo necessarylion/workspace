@@ -103,7 +103,11 @@ enum MarkdownHTML {
     /// behind it, most often.
     private static func dataURI(for address: String) -> String? {
         guard let url = URL(string: address),
-              let image = RemoteImageLoader.shared.cached(url),
+              // A file beside the document is read here and now — the export can
+              // be asked for from the source view, where the preview that would
+              // have loaded it was never on screen.
+              let image = RemoteImageLoader.shared.cached(url)
+                  ?? (url.isFileURL ? NSImage(contentsOf: url) : nil),
               let tiff = image.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: tiff),
               let png = bitmap.representation(using: .png, properties: [:])
