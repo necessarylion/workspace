@@ -42,9 +42,12 @@ extension JSONValue: Decodable {
     /// Decodes one line of JSONL. Returns nil for a line that is not JSON at
     /// all — a tool that writes a stray line to stdout should not kill the
     /// stream.
-    static func parse(_ line: String) -> JSONValue? {
-        guard let data = line.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(JSONValue.self, from: data)
+    ///
+    /// Bytes rather than a `String`: a line comes off the file as bytes and
+    /// goes into the decoder as bytes, and a transcript line can be a megabyte
+    /// of base64 that has no reason to become a `String` in between.
+    static func parse(_ line: Data) -> JSONValue? {
+        try? JSONDecoder().decode(JSONValue.self, from: line)
     }
 }
 
