@@ -33,8 +33,7 @@ final class TerminalSession: Identifiable {
         didSet { watchForClaudeName() }
     }
 
-    /// What the conversation is about — the first thing asked in it, read back
-    /// from the transcript.
+    /// What the conversation is about, read back from the transcript.
     ///
     /// `claude` names the terminal after *itself*, and "Claude Code" says
     /// nothing about which conversation this is when three of them are running
@@ -42,6 +41,11 @@ final class TerminalSession: Identifiable {
     /// answer the Past list shows, so a conversation is called one thing
     /// whether it is running or over.
     private(set) var claudeName: String?
+
+    /// Whether ``claudeName`` is the name Claude Code chose for the
+    /// conversation itself, rather than the first prompt standing in for it
+    /// until that lands. Nothing to look for once it is true.
+    @ObservationIgnored private var hasFinalClaudeName = false
 
     /// The name to put on this tab: the conversation, when there is one.
     var displayTitle: String { claudeName ?? title }
@@ -260,23 +264,31 @@ final class TerminalSession: Identifiable {
         }
     }
 
-    /// Looks for the conversation's name until it finds one.
+    /// Looks for the conversation's name until it finds the real one.
     ///
     /// It cannot simply be read when the tab opens: `claude` writes nothing
     /// until the **first prompt lands**, and that is however long the person
     /// takes to type it. So the file is asked for every couple of seconds, and
     /// after five minutes of nothing the look gives up rather than running for
     /// the life of the tab — a rename by the shell starts it over.
+    ///
+    /// The first prompt is only a stand-in: the CLI settles on a name of its
+    /// own a moment later, and stopping at the stand-in would leave this tab
+    /// called one thing while the same conversation is called another in the
+    /// Past list. So the look carries on until that name lands.
     private func watchForClaudeName() {
-        guard claudeName == nil, nameWatch == nil, let id = claudeSessionID else { return }
+        guard !hasFinalClaudeName, nameWatch == nil, let id = claudeSessionID else { return }
         nameWatch = Task { [weak self] in
             for attempt in 0..<150 {
                 if attempt > 0 { try? await Task.sleep(for: .seconds(2)) }
-                guard !Task.isCancelled, let self, claudeName == nil else { return }
-                if let name = await ClaudeSessionsIndex.title(of: id, in: directory) {
-                    claudeName = name
-                    nameWatch = nil
-                    return
+                guard !Task.isCancelled, let self, !hasFinalClaudeName else { return }
+                if let name = await ClaudeSessionsIndex.name(of: id, in: directory) {
+                    claudeName = name.text
+                    hasFinalClaudeName = name.isFinal
+                    if name.isFinal {
+                        nameWatch = nil
+                        return
+                    }
                 }
             }
             // Left clear, so the next rename can start another look.
