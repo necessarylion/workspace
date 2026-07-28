@@ -13,6 +13,7 @@ extension SyntaxPalette {
         lineNumber: NSColor(rgb: 0x49_51_62),
         currentLine: NSColor(rgb: 0x24_26_2B),
         indentGuide: NSColor(rgb: 0x22_23_26),
+        selection: NSColor(rgb: 0x2F_4A_63),
         styles: [
             "attribute": SyntaxStyle(color: NSColor(rgb: 0x9D_D2_74)),
             "boolean": SyntaxStyle(color: NSColor(rgb: 0xEE_96_D7)),

@@ -35,6 +35,9 @@ final class LanguageService {
     private(set) var status: Status = .notStarted
     /// Diagnostics per document URI, replaced whenever the server republishes.
     private(set) var diagnostics: [String: [LSP.Diagnostic]] = [:]
+    /// What the server asked for in its `initialize` reply. Read by the editor's
+    /// coordinator to decide whether it may send ranges or must send the file.
+    private(set) var syncKind: LSP.SyncKind = .full
 
     @ObservationIgnored private let connection: LSPConnection
     @ObservationIgnored private var versions: [String: Int] = [:]
@@ -92,7 +95,7 @@ final class LanguageService {
             }
 
             do {
-                _ = try await connection.request(
+                let reply = try await connection.request(
                     "initialize",
                     params: InitializeParams(
                         rootURI: root.absoluteString,
@@ -100,6 +103,12 @@ final class LanguageService {
                         initializationOptions: options
                     ),
                     timeout: 30
+                )
+                // The reply used to be thrown away. It carries the one thing the
+                // editor cannot guess — see ``LSP/SyncKind``.
+                let decoded = reply.flatMap { try? JSONSerialization.jsonObject(with: $0) }
+                syncKind = LSP.SyncKind.from(
+                    capabilities: (decoded as? [String: Any])?["capabilities"]
                 )
                 await connection.notify("initialized", params: EmptyParams())
                 // Pushed as well as answered on request: vtsls reads its plugin
@@ -131,34 +140,67 @@ final class LanguageService {
 
     // MARK: - Document sync
 
-    func open(uri: String, text: String) async {
-        guard await startIfNeeded() else { return }
+    /// - Parameter languageID: What to call the document, when that is not this
+    ///   server's own language. A companion server is holding a file belonging to
+    ///   the server it accompanies — vtsls opened alongside the Vue server holds a
+    ///   `.vue` file — and announcing it as `typescript` would be a lie with
+    ///   consequences: `@vue/typescript-plugin` serves a document only when it
+    ///   arrives as `vue`, so tsserver would instead try to read `<template>` as
+    ///   TypeScript and report a file full of syntax errors.
+    /// - Returns: Whether the server is now holding this document. False means the
+    ///   server never started — nothing was sent, and nothing may be sent, since
+    ///   every later notification is guarded on a document this one never opened.
+    @discardableResult
+    func open(uri: String, text: String, languageID: String? = nil) async -> Bool {
+        guard await startIfNeeded() else { return false }
         openCount[uri, default: 0] += 1
-        guard openCount[uri] == 1 else { return }
+        guard openCount[uri] == 1 else { return true }
         versions[uri] = 1
         await connection.notify(
             "textDocument/didOpen",
             params: DidOpenParams(
                 textDocument: .init(
                     uri: uri,
-                    languageId: definition.languageID,
+                    languageId: languageID ?? definition.languageID,
                     version: 1,
                     text: text
                 )
             )
         )
+        return true
     }
 
     /// Full-text sync: simple, and correct for every server.
+    ///
+    /// Still the route for a server that only advertised `full`, and for the
+    /// cases where the editor cannot say what changed — a reload from disk, or
+    /// an edit whose pre-edit range it could not resolve.
     func change(uri: String, text: String) async {
         guard status.isHealthy, openCount[uri] != nil else { return }
+        await send(uri: uri, changes: [DidChangeParams.Change(range: nil, text: text)])
+    }
+
+    /// Incremental sync: only the spans that changed.
+    ///
+    /// Ordered, and sent in one notification, because each range is stated
+    /// against the document the edits before it produced — see
+    /// ``LSP/TextChange``. Dropped rather than downgraded if the server never
+    /// asked for ranges; the caller checks ``syncKind`` and sends full text
+    /// instead, since one wrong range poisons every later answer.
+    func change(uri: String, changes: [LSP.TextChange]) async {
+        guard status.isHealthy, openCount[uri] != nil, !changes.isEmpty else { return }
+        guard syncKind == .incremental else { return }
+        await send(uri: uri, changes: changes.map { .init(range: $0.range, text: $0.text) })
+    }
+
+    private func send(uri: String, changes: [DidChangeParams.Change]) async {
         let version = (versions[uri] ?? 1) + 1
         versions[uri] = version
         await connection.notify(
             "textDocument/didChange",
             params: DidChangeParams(
                 textDocument: .init(uri: uri, version: version),
-                contentChanges: [.init(text: text)]
+                contentChanges: changes
             )
         )
     }
@@ -225,14 +267,23 @@ final class LanguageService {
         }
     }
 
-    func symbols(uri: String) async -> [LSP.Symbol] {
-        guard status.isHealthy else { return [] }
-        let result = try? await connection.request(
-            "textDocument/documentSymbol",
-            params: DocumentParams(textDocument: .init(uri: uri)),
-            timeout: 8
-        )
-        return LSP.decodeSymbols(Self.json(result))
+    /// Nil when the server never answered, for the same reason as ``definitions``
+    /// — and here the distinction is what keeps the outline honest. An empty
+    /// array is a real answer: the last declaration in the file was deleted, and
+    /// the outline should empty with it. Collapsing the two would leave the
+    /// window showing symbols that are no longer in the text.
+    func symbols(uri: String) async -> [LSP.Symbol]? {
+        guard status.isHealthy else { return nil }
+        do {
+            let result = try await connection.request(
+                "textDocument/documentSymbol",
+                params: DocumentParams(textDocument: .init(uri: uri)),
+                timeout: 8
+            )
+            return LSP.decodeSymbols(Self.json(result))
+        } catch {
+            return nil
+        }
     }
 
     private static func json(_ data: Data??) -> Any? {
@@ -284,14 +335,20 @@ final class LanguageService {
     /// Carries one question from the Vue server to the TypeScript server and
     /// the answer back.
     ///
-    /// This is the join that makes hybrid mode work, and there is no way round
-    /// it: the Vue server deliberately keeps no TypeScript project of its own —
-    /// that is the whole point, one `tsserver` for the repository instead of
-    /// two — so anything needing a type is asked of whatever `tsserver` the
-    /// *client* is running. It arrives as `[id, command, payload]`, goes out as
-    /// the `typescript.tsserverRequest` command vtsls exposes for exactly this,
-    /// and the answer goes back as a `tsserver/response` notification carrying
-    /// the same id.
+    /// **Only older Vue servers ask for this.** `@vue/language-server` 2.0.x had
+    /// the client relay every typed question: it arrived as `[id, command,
+    /// payload]`, went out as the `typescript.tsserverRequest` command vtsls
+    /// exposes for exactly this, and the answer came back as a
+    /// `tsserver/response` notification carrying the same id. From 2.1 the relay
+    /// is gone — `@vue/typescript-plugin` opens a named pipe inside `tsserver`
+    /// and the Vue server connects to it directly, so neither method name appears
+    /// in the package any more and this is never called. Kept because it is
+    /// correct for the servers that do ask, and costs nothing for the ones that
+    /// do not.
+    ///
+    /// What hybrid mode needs from us either way is in
+    /// ``LanguageServerConfiguration``: vtsls has to load the plugin, and has to
+    /// have the `.vue` file open, or there is no pipe and no project behind it.
     ///
     /// A question that cannot be delivered is still answered, with null. The
     /// Vue server waits on every id it issues, and one silently dropped is a
@@ -422,7 +479,11 @@ final class LanguageService {
     }
 
     private struct DidChangeParams: Encodable, Sendable {
+        /// No `range` is how the protocol spells "this is the whole document";
+        /// with one, only that span changed. The key has to be absent rather
+        /// than null, which is what `Encodable` does with a nil optional.
         struct Change: Encodable, Sendable {
+            var range: LSP.Range?
             let text: String
         }
         let textDocument: VersionedIdentifier

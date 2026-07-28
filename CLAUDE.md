@@ -63,10 +63,15 @@ The app is one window with three panes, and the mental model that drives the cod
   listed in `Themes.swift`; the first entry is the default. They are checked in
   rather than read from the user's VS Code at runtime, so a file looks the same
   on every Mac. `Scripts/import-vscode-theme.swift "Some Theme"` ports a new one.
-- **Editor** (`Editor/`) — hand-rolled, not a library: `CodeEditorController` wires
-  an `NSTextView` subclass (`CodeTextView`), the gutter (`LineNumberRuler`),
-  incremental tree-sitter highlighting (`TreeSitterHighlighter`), and LSP.
-  `CodeEditorView` is the SwiftUI bridge.
+- **Editor** (`Editor/`) — `CodeEditSourceEditor`, used with its own defaults:
+  highlighting, the gutter, find and replace and bracket matching are the
+  package's. `CodeEditorView` is the whole of the app's side — the text binding,
+  the caret the status bar reads, and the coordinators. Two of those exist:
+  one makes the scroll view clip (the gutter is a floating subview and would
+  otherwise draw up through the header), and `LanguageServerCoordinator` is the
+  language server join. `TreeSitterHighlighter` survives for the diff and for
+  markdown snippets, which live in no editor. Don't reach for an `NSTextView`
+  API here: the package's `TextView` is not one.
 - **Markdown** (`Views/MarkdownPreview.swift`) — a hand-rolled block renderer used
   for `.md` files, PR descriptions and comments. A fenced block is coloured by
   `Models/MarkdownCodeHighlighter.swift`, which runs the editor's
@@ -104,10 +109,15 @@ The app is one window with three panes, and the mental model that drives the cod
   reads page and scale back out of `PDFViewPageChanged`/`PDFViewScaleChanged`.
   `OpenDocument` detects the extension before its 4 MB text guard — PDFKit reads
   a document page by page.
-- **LSP** (`LSP/`) — hand-rolled JSON-RPC over stdio (`LSPConnection`), a typed
-  subset of the protocol (`LSPTypes`), one `LanguageService` per server, and
-  `LanguageServerRegistry` mapping language → server binary, started lazily per
-  project root. Servers are whatever is on PATH; nothing is bundled.
+- **LSP** (`LSP/` + `Editor/LanguageServerCoordinator.swift`) — hand-rolled
+  JSON-RPC over stdio (`LSPConnection`), a typed subset of the protocol
+  (`LSPTypes`), one `LanguageService` per server, and `LanguageServerRegistry`
+  mapping language → server binary, started lazily per project root. Servers are
+  whatever is on PATH; nothing is bundled. Deliberately **not** on ChimeHQ's
+  `LanguageClient`, and Vue is the reason — its hybrid mode needs two
+  non-protocol methods that `LanguageServerProtocol`'s closed enums cannot
+  carry. Read `Docs/LSP.md` before changing any of this; it records that
+  decision, and what the editor package does and does not offer.
 - **Updates** (`Models/AppUpdater.swift`) — the app updates itself from its own
   GitHub releases, over plain HTTPS to `api.github.com` and the release asset.
   **Not through `gh`**: `gh` is a tool the user installs and signs in to, and the

@@ -12,6 +12,8 @@ extension SyntaxPalette {
         lineNumber: NSColor(rgb: 0x63_6D_83),
         currentLine: NSColor(rgb: 0x99_BB_FF, alpha: 0.039),
         indentGuide: NSColor(rgb: 0xAB_B2_BF, alpha: 0.149),
+        // One Dark's own `editor.selectionBackground`.
+        selection: NSColor(rgb: 0x3E_44_51),
         styles: [
             "attribute": SyntaxStyle(color: NSColor(rgb: 0x61_AF_EF)),
             "boolean": SyntaxStyle(color: NSColor(rgb: 0xD1_9A_66)),

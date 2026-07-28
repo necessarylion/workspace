@@ -29,8 +29,27 @@ final class OpenDocument: Identifiable {
     var caretLine = 1
     var caretColumn = 1
     var languageServerStatus = ""
-    /// Set to ask the editor to scroll to a zero-based line.
+    /// Set to ask the editor to scroll to a zero-based line, and optionally to a
+    /// zero-based column on it.
+    ///
+    /// Read twice, and it has to be: by the editor's `onChange` while the file is
+    /// already open, and once as the editor is built — `WorkspaceStore.openFile`
+    /// sets this on a document it has only just made, so for a file that was not
+    /// already open the value is there from the first render and never changes.
     var revealLine: Int?
+    var revealColumn: Int?
+
+    /// The pending reveal, cleared as it is handed over, so whichever of the two
+    /// readers gets there first is the only one that acts on it.
+    ///
+    /// Zero-based going in, one-based coming out — the editor counts from one.
+    func takePendingReveal() -> (line: Int, column: Int)? {
+        guard let line = revealLine else { return nil }
+        let column = revealColumn ?? 0
+        revealLine = nil
+        revealColumn = nil
+        return (line + 1, column + 1)
+    }
     /// Bumped when the text was replaced from outside the editor.
     private(set) var externalRevision = 0
     /// Bumped on save, so the editor can tell the language server.
