@@ -652,9 +652,45 @@ final class WorkspaceStore {
         if viewer.index >= 0, viewer.index < viewer.history.count - 1 {
             viewer.history.removeSubrange((viewer.index + 1)...)
         }
+
+        // Reading a repository's changes is **one** place in the history,
+        // however many files it takes. Clicking down the Changes list is not
+        // going somewhere new each time — it is the same page showing another
+        // file — and stacking an entry per file meant ⎋ had to be pressed once
+        // per file read to get out, and Back walked the whole morning's list
+        // backwards. So one diff takes the other's slot, and the way out lands
+        // on whatever sent you into the diff.
+        if let outgoing = current, isAnotherFileOfTheSameDiff(outgoing, item) {
+            // Unified or split is how the diff is being *read*, so it carries
+            // to the next file rather than snapping back to split — the pane
+            // is the same page, and the outgoing item is about to be dropped.
+            item.diffLayout = outgoing.diffLayout
+            viewer.history[viewer.index] = item.id
+            items[outgoing.id] = nil
+            forgetItem(outgoing.id)
+            // The slot is the newest entry — the forward history has just gone
+            // — but dropping the outgoing diff may have taken an older entry
+            // for it out from under the index.
+            viewer.index = viewer.history.count - 1
+            return
+        }
+
         viewer.history.append(item.id)
         viewer.index = viewer.history.count - 1
         trimHistory()
+    }
+
+    /// Whether showing `item` is the diff on screen moving to another file
+    /// rather than a page of its own: both are the working tree of the same
+    /// repository, which is the Changes list being read down.
+    ///
+    /// A commit and a pull request are left out on purpose. Each is a thing in
+    /// its own right that happens to be shown as a diff, and stepping between
+    /// two of them is somewhere to be able to go Back from.
+    private func isAnotherFileOfTheSameDiff(_ outgoing: ViewerItem, _ item: ViewerItem) -> Bool {
+        guard case .workingDiff(let left, _, _) = outgoing.kind,
+              case .workingDiff(let right, _, _) = item.kind else { return false }
+        return left == right
     }
 
     /// Which repository's history an item belongs in.
