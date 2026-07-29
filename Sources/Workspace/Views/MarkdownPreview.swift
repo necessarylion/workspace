@@ -96,16 +96,25 @@ private struct GenerationCache<Key: Hashable, Value> {
     mutating func value(for key: Key) -> Value? {
         if let value = live[key] { return value }
         guard let value = previous[key] else { return nil }
+        // A promotion fills the live half exactly as an insert does, and a pass
+        // that finds everything it wants in the old half is all promotions: this
+        // has to count against the cap too, or the two halves grow past it.
+        rotateIfFull()
         live[key] = value
         return value
     }
 
     mutating func insert(_ value: Value, for key: Key) {
-        if live.count >= limit {
-            previous = live
-            live = [:]
-        }
+        rotateIfFull()
         live[key] = value
+    }
+
+    /// Sets the live half aside once it is full, which is the only thing that
+    /// ever drops anything: what was in the old half at that moment is gone.
+    private mutating func rotateIfFull() {
+        guard live.count >= limit else { return }
+        previous = live
+        live = [:]
     }
 }
 

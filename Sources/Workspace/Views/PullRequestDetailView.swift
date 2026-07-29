@@ -1367,7 +1367,17 @@ struct ConversationView<Header: View>: View {
                 mentions: mentions,
                 onPost: post
             )
+            // The draft lives inside the composer, so this is the only way to
+            // end it: a half-written comment belongs to the pull request it was
+            // written on, and this whole view is reused as the viewer moves
+            // between them. Without it the text typed for one is still in the
+            // box on the next, and the button posts it there.
+            .id(item.id)
         }
+        // The same argument for the reply box that is open under a comment. It
+        // is held here rather than inside the composer, so it can simply be put
+        // down; the comment it names is not on the pull request that arrived.
+        .onChange(of: item.id) { replyingTo = nil }
         // The pane's own colour, which the diff and the commit list each paint
         // for themselves and the conversation did not. It is the same shade the
         // viewer already draws behind all three, so nothing looks different at

@@ -62,17 +62,23 @@ struct SkeletonCircle: View {
 struct SkeletonGroup<Content: View>: View {
     @ViewBuilder var content: Content
 
+    /// SwiftUI's own reading of the setting rather than ``ViewerMotion``'s.
+    /// Both ask the same system for the same answer, but this one is watched:
+    /// turning Reduce Motion on with skeletons on screen has to stop a pulse
+    /// that is already running, and turning it off has to start one.
+    @Environment(\.accessibilityReduceMotion) private var isReduced
+
     @State private var isDim = false
 
     var body: some View {
         content
             .environment(\.skeletonPulse, isDim ? 0.45 : 0.85)
-            .onAppear {
-                guard !ViewerMotion.isReduced else { return }
-                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                    isDim = true
-                }
-            }
+            // The animation is chosen at the moment the value moves, so the
+            // reduced case is a plain assignment: nothing repeating is left
+            // running behind the blocks, which is what stopping it means here.
+            .animation(isReduced ? nil : .easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: isDim)
+            .onAppear { isDim = !isReduced }
+            .onChange(of: isReduced) { isDim = !isReduced }
     }
 }
 
