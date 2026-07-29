@@ -63,7 +63,11 @@ The app is one window with three panes, and the mental model that drives the cod
   interactive — so `InteractivePath` resolves `$PATH` once via `$SHELL -ilc` and
   injects it into every command. It quotes arguments, uses temp files instead of
   pipes (avoids deadlock), and enforces a timeout. Route any new git/gh/bkt/claude
-  invocation through it.
+  invocation through it. The one exception is a command **typed into the embedded
+  terminal** (`TerminalSession.send`/`runClaude`): that PTY is already an
+  interactive login shell, so it has the fuller PATH by itself, and `Shell` — no
+  terminal, output captured, watchdog timeout — cannot host a CLI a person is
+  talking to. Such a call still quotes outside values with `Shell.quote`.
 - **Host abstraction** — `PullRequest.swift` / `PullRequestComment.swift` define a
   unified PR model with separate `gh` and `bkt` loaders. New PR features must be
   implemented for both hosts.

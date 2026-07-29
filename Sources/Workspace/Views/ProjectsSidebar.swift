@@ -68,11 +68,11 @@ struct ProjectsSidebar: View {
                     }
                 }
                 .padding(.horizontal, 10)
-                // The working badge rides a few points above its card's top
+                // The working badge stands half its height above its card's top
                 // edge, and the scroll view clips at its own — without this the
                 // first card's badge would be the one card's badge that is cut
                 // in half.
-                .padding(.top, 9)
+                .padding(.top, ClaudeWorkingBadge.height / 2 + 2)
                 .padding(.bottom, 10)
                 .animation(.easeInOut(duration: 0.15), value: store.projects.map(\.id))
             }
@@ -359,7 +359,10 @@ struct CollapsedProjectsRail: View {
                         card(project)
                     }
                 }
-                .padding(.vertical, 8)
+                // Same headroom the wide list gives the badge, for the same
+                // reason: the top square's would otherwise be clipped.
+                .padding(.top, ClaudeWorkingBadge.height / 2 + 2)
+                .padding(.bottom, 8)
             }
 
             // The pane's footer, down to the two controls that belong to no
@@ -521,13 +524,20 @@ extension View {
     /// instead read as one more of the things in that row rather than as a
     /// state the whole repository is in. Nothing is drawn while no turn is
     /// running, so nothing is reserved for it either.
+    ///
+    /// It is lifted clear of the tile's own top inset rather than merely nudged
+    /// off the corner: the card puts its star in that corner too, and a badge
+    /// dipping into the header row would cover the star's top edge — and, being
+    /// the layer above, take the click meant for it — the moment a second
+    /// conversation widened the chip.
     func claudeWorkingBadge(count: Int) -> some View {
         overlay(alignment: .topTrailing) {
-            // Sat on the corner rather than over it: half the mark hanging past
+            // Sat on the corner rather than over it: half the badge hanging past
             // each edge is what reads as a badge, and any less has it looking
-            // like something that landed on the tile.
+            // like something that landed on the tile. Half its height above is
+            // also what clears a 10-point inset, so the two wants are one number.
             ClaudeWorkingBadge(count: count)
-                .offset(x: 6, y: -7)
+                .offset(x: 6, y: -ClaudeWorkingBadge.height / 2)
         }
     }
 }
@@ -543,14 +553,22 @@ extension View {
 /// only furniture.
 struct ClaudeWorkingBadge: View {
     let count: Int
-    private let size: CGFloat = 13
+
+    private static let size: CGFloat = 13
+    private static let verticalPadding: CGFloat = 3
+
+    /// What the badge stands, so `claudeWorkingBadge(count:)` can place it by
+    /// its own size rather than by a number that has to be kept in step with
+    /// one. The chip is held to it below, which is what makes it the truth for
+    /// any count — the digit's own line height would otherwise set it.
+    static let height = size + verticalPadding * 2
 
     @State private var isDim = false
 
     var body: some View {
         if count > 0 {
             HStack(spacing: 3) {
-                ClaudeMark(size: size)
+                ClaudeMark(size: Self.size)
                 // Only worth the width once there is more than one — a single
                 // "1" beside the mark says nothing the mark did not.
                 if count > 1 {
@@ -558,13 +576,14 @@ struct ClaudeWorkingBadge: View {
                         .font(.caption2.weight(.semibold).monospacedDigit())
                 }
             }
+            .frame(height: Self.size)
             // The chip is what keeps a second conversation from reading as a
             // digit dropped next to the mark: hanging off a card's corner over
             // whatever is behind it, the two need something to say they are one
             // badge. A single mark gets it too — the capsule closes to a disc
             // around it, so the badge grows rather than changing shape.
             .padding(.horizontal, 4)
-            .padding(.vertical, 3)
+            .padding(.vertical, Self.verticalPadding)
             .background(.regularMaterial, in: Capsule())
             .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 0.5))
             .opacity(isDim ? 0.35 : 1)

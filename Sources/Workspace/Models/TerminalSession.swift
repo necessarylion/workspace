@@ -238,6 +238,15 @@ final class TerminalSession: Identifiable {
     /// in the Claude tab claiming to be a conversation that was running. A shell
     /// that cannot find `claude` at all execs nothing and stays where it is,
     /// with the error on screen.
+    ///
+    /// Not routed through `Support/Shell.swift`, and cannot be: that runs a tool
+    /// with no terminal on the other end, captures its output into a file and
+    /// kills it on a watchdog — three things a full-screen CLI a person is
+    /// talking to survives none of. What is on the other end here is already a
+    /// shell, and an *interactive login* one, so it has read `~/.zshrc` and has
+    /// the `PATH` that `InteractivePath` exists to recover for commands that
+    /// have no such shell. `Shell.quote` is still what the call sites reach for
+    /// where a value is not the app's own — see `resumeClaude`.
     func runClaude(_ command: String) {
         isStartingClaude = true
         claudeStartupWatch?.cancel()
