@@ -83,20 +83,43 @@ struct NavigatorView: View {
         }
     }
 
+    /// The five lists, one at a time.
+    ///
+    /// They arrive the way a pull request's tabs do, and for the same reason:
+    /// the picker above them does not move, so what changed is the middle of a
+    /// pane rather than the pane itself.
+    ///
+    /// The transition sits on each list rather than on the `Group` holding
+    /// them. The group is always here; what arrives and leaves is the branch,
+    /// and a transition only runs on the view actually being inserted or
+    /// removed.
+    ///
+    /// The outgoing list leaves at once rather than fading out. This pane is
+    /// the narrow one, and two lists alive together would be two of them laid
+    /// out together — every row measuring against a width neither of them ends
+    /// up with, for the length of the fade.
     @ViewBuilder
     private func content(_ project: Project) -> some View {
-        switch store.navigatorTab {
-        case .files:
-            FileListView(project: project)
-        case .changes:
-            ChangeListView(project: project)
-        case .terminals:
-            TerminalListView(project: project)
-        case .claude:
-            ClaudeSessionListView(project: project)
-        case .info:
-            InfoPanelView(project: project)
+        Group {
+            switch store.navigatorTab {
+            case .files:
+                FileListView(project: project)
+                    .transition(ViewerMotion.contentArrival)
+            case .changes:
+                ChangeListView(project: project)
+                    .transition(ViewerMotion.contentArrival)
+            case .terminals:
+                TerminalListView(project: project)
+                    .transition(ViewerMotion.contentArrival)
+            case .claude:
+                ClaudeSessionListView(project: project)
+                    .transition(ViewerMotion.contentArrival)
+            case .info:
+                InfoPanelView(project: project)
+                    .transition(ViewerMotion.contentArrival)
+            }
         }
+        .animation(ViewerMotion.contentChange, value: store.navigatorTab)
     }
 }
 

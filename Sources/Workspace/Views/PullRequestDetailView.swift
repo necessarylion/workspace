@@ -51,11 +51,15 @@ struct PullRequestDetailView: View {
             // width, so a second column of anything there is a column taken
             // from the code.
             HStack(spacing: 0) {
+                // The transition rides on each tab rather than on the `Group`
+                // around them. The group is always here; what arrives and
+                // leaves is the branch, and a transition only runs on the view
+                // actually being inserted or removed.
                 Group {
                     switch item.pullRequestTab {
-                    case .details: detailsTab
-                    case .diff: diffTab
-                    case .commits: commitsTab
+                    case .details: detailsTab.transition(ViewerMotion.contentArrival)
+                    case .diff: diffTab.transition(ViewerMotion.contentArrival)
+                    case .commits: commitsTab.transition(ViewerMotion.contentArrival)
                     }
                 }
                 // A tab is a lighter thing than opening a pull request: the two
@@ -69,7 +73,6 @@ struct PullRequestDetailView: View {
                 // every frame of that — a diff re-laying a thousand rows to end
                 // up where it already was. Here the row snaps to its new widths
                 // at once and only the contents fade.
-                .transition(ViewerMotion.contentArrival)
                 .animation(ViewerMotion.contentChange, value: item.pullRequestTab)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
