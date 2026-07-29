@@ -37,6 +37,7 @@ struct DiffCommentThreads: View {
     @Binding var replyingTo: PullRequestComment?
     var mentions: MentionSource = .none
     let onReply: (PullRequestComment, String) async -> Void
+    var onResolve: ((PullRequestComment, Bool) async -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -47,7 +48,10 @@ struct DiffCommentThreads: View {
                     replyingTo: $replyingTo,
                     isPosting: isPosting,
                     mentions: mentions,
-                    onReply: onReply
+                    // The line it hangs under already says which file this is.
+                    isInline: true,
+                    onReply: onReply,
+                    onResolve: onResolve
                 )
             }
         }
@@ -61,6 +65,86 @@ struct DiffCommentThreads: View {
                 .fill(.tint.opacity(0.5))
                 .frame(width: 2)
         }
+    }
+}
+
+/// The green mark a settled thread wears, drawn like the review states beside
+/// it: a word in a tinted capsule.
+struct ResolvedChip: View {
+    var resolvedBy: String?
+
+    var body: some View {
+        Label("Resolved", systemImage: "checkmark.circle.fill")
+            .font(.caption2)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(.green.opacity(0.16), in: Capsule())
+            .foregroundStyle(.green)
+            .help(resolvedBy.map { "Resolved by \($0)" } ?? "Resolved")
+    }
+}
+
+/// The single row a settled thread is shown as until someone asks for the rest
+/// of it.
+///
+/// A resolved thread is answered business, and a long review leaves a page of
+/// them between the parts still worth reading — so it keeps only what says
+/// whose it was, that it is closed, and how much is behind the row.
+struct ResolvedThreadRow: View {
+    let node: PullRequestCommentNode
+    let isExpanded: Bool
+    /// Inline in the diff the path is dropped: the line it is drawn under is
+    /// the file, and there is no room for it.
+    var showsPath = true
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 6) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                AuthorAvatar(name: node.comment.author, url: node.comment.avatarURL, size: 18)
+                Text(node.comment.author)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(node.comment.authorColor)
+                ResolvedChip(resolvedBy: node.comment.resolvedBy)
+
+                if showsPath, let path = node.comment.path {
+                    Text(path)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                        // The preview is what the row is read for; the path
+                        // gives up its width first.
+                        .layoutPriority(-1)
+                }
+
+                if !isExpanded, !node.preview.isEmpty {
+                    Text(node.preview)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 4)
+
+                if node.totalReplies > 0 {
+                    Label("\(node.totalReplies)", systemImage: "arrowshape.turn.up.left")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .help(isExpanded ? "Hide this resolved thread" : "Show this resolved thread")
     }
 }
 

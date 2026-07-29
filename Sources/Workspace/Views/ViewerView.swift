@@ -224,20 +224,18 @@ struct ViewerView: View {
             if item.isDirty {
                 Circle().fill(.orange).frame(width: 6, height: 6)
             }
-            // Only a pull request has a page to link to, and this is where its
-            // number and title are — the link is for pasting into a chat or a
-            // ticket, so it belongs next to what it points at.
+            // Only a pull request has a page of its own, and this is where its
+            // number and title are — so the way over to it belongs next to what
+            // it points at. No toast: the browser coming forward says it.
             if let url = item.pullRequest?.url {
                 Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(url.absoluteString, forType: .string)
-                    store.showStatus("Pull request link copied")
+                    NSWorkspace.shared.open(url)
                 } label: {
-                    Image(systemName: "link")
+                    Image(systemName: "safari")
                         .font(.caption)
                 }
                 .foregroundStyle(.secondary)
-                .help("Copy the link to \(item.title)")
+                .help("Open \(item.title) on the host in your browser")
                 .pointerCursor()
             }
             // A commit gets the same treatment, for the same reason: the hash is

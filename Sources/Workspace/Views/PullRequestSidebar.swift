@@ -34,15 +34,9 @@ struct PullRequestSidebar: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color(nsColor: AppColors.viewerBackground))
-        // The CI runs cost a call to the host, so they are read the first time
-        // the panel is on screen rather than with the pull request. A failure is
-        // not retried on its own — that is what the reload button is for.
-        .task {
-            guard item.builds.isEmpty, !item.isLoadingBuilds, item.buildsError == nil else {
-                return
-            }
-            await store.loadBuilds(item, project: project, pr: pr)
-        }
+        // Reading the runs, and going on reading them, belongs to the view
+        // above this one: the badge in its summary bar shows them on the tabs
+        // where this panel is not drawn at all. See `watchBuilds`.
     }
 
     // MARK: - Reviewers

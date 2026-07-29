@@ -89,12 +89,14 @@ missing ones, so you never have to work out which command it wanted.
 | --- | --- |
 | The board | Open PRs as a table: title, age, activity, reviewers, CI — one row each. |
 | Read it all | Details, Diff and Commits tabs. Markdown, images and mentions rendered properly. |
-| Threads | Replies nested under what they answer, every author in a colour of their own. |
-| Write back | Comment, reply, edit the description, approve, request changes, merge, reject. |
+| Threads | Replies nested under what they answer, every author in a colour of their own. A resolved one folds to a single row — author, file and first line, under a green **Resolved** chip — in the conversation and in the diff alike; click it to read the rest. |
+| Write back | Comment, reply, resolve a thread or open it again, edit the description, approve, request changes, merge, reject. |
 | Reviewers | See who approved, add more from a searchable list of the people who can be asked. |
 | `@` anyone | Type `@` in any comment box and pick a name from the repo. |
-| Builds beside you | CI runs for the head commit in a side panel, failures first. |
+| Builds beside you | CI runs for the head commit in a side panel, failures first, kept current on their own while the panel is in front of you. |
 | Update from main | One button when the branch has fallen behind. |
+| Read it again | One button in the summary bar re-reads the whole request from the host — title, state, diff, conversation, reviewers and builds. |
+| Off to the host | The button beside the title opens the pull request in your browser. |
 
 ### Code and diffs
 

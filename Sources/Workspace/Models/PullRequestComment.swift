@@ -44,8 +44,28 @@ struct PullRequestComment: Identifiable, Sendable, Hashable {
     /// The host's own identifier for this comment, set only when the host can
     /// attach a reply to it. `nil` means "reply is not possible here".
     var replyToken: String?
+    /// Whether the thread this comment belongs to has been marked resolved.
+    ///
+    /// Resolution belongs to the thread rather than to any one comment, and
+    /// every host records it on the thread's first comment, so the flag is left
+    /// where the host put it and read back off the root — see
+    /// `PullRequestCommentNode.isResolved`. Copying it onto every reply would
+    /// mean the tree builder had to know what a thread is, which it does not.
+    var isResolved: Bool = false
+    /// Who resolved it, when the host says.
+    var resolvedBy: String?
+    /// The handle the host wants when the thread is resolved or opened again.
+    /// GitHub resolves a review *thread* by its GraphQL node id, Bitbucket the
+    /// comment the thread hangs off; `nil` means this thread cannot be resolved
+    /// from here and the button is not drawn.
+    var resolveToken: String?
+    /// Bitbucket Data Center refuses to write a comment back without the
+    /// version it last read, so it is carried along with the handle.
+    var resolveVersion: Int?
 
     var canReply: Bool { replyToken != nil }
+
+    var canResolve: Bool { resolveToken != nil }
 
     /// Where in the diff this comment belongs, when it belongs anywhere.
     var anchor: DiffLineAnchor? {
@@ -67,6 +87,23 @@ struct PullRequestCommentNode: Identifiable, Sendable, Hashable {
     var replies: [PullRequestCommentNode] = []
 
     var id: String { comment.id }
+
+    /// Whether the whole thread is settled. The root carries the host's answer,
+    /// so a reply never has to be consulted.
+    var isResolved: Bool { comment.isResolved }
+
+    /// Everything said under this comment, however deep it is nested.
+    var totalReplies: Int {
+        replies.reduce(replies.count) { $0 + $1.totalReplies }
+    }
+
+    /// The first line with anything in it, for a thread shown as one row.
+    var preview: String {
+        comment.body
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? ""
+    }
 }
 
 extension PullRequestComment {
@@ -202,9 +239,110 @@ extension PullRequestService {
             )
         }
 
-        items.append(contentsOf: await gitHubReviewComments(for: pr, in: directory))
+        var inline = await gitHubReviewComments(for: pr, in: directory)
+        await applyGitHubThreads(to: &inline, for: pr, in: directory)
+        items.append(contentsOf: inline)
 
         return items.sorted { ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast) }
+    }
+
+    /// Marks the review comments whose thread has been resolved, and records the
+    /// handle each thread is resolved by.
+    ///
+    /// The REST endpoint the comments themselves come from says nothing about
+    /// resolution — it exists only in GraphQL, and only per thread — so this is
+    /// a second call over the same comments. It is allowed to fail: a token
+    /// without the scope, an enterprise host on an older schema, or no `gh` at
+    /// all leaves every thread looking open, which is what the app showed
+    /// before and still reads correctly.
+    private static func applyGitHubThreads(
+        to comments: inout [PullRequestComment],
+        for pr: PullRequest,
+        in directory: URL
+    ) async {
+        guard !comments.isEmpty,
+              let repository = await gitHubRepository(for: pr, in: directory)
+        else { return }
+
+        // `gh api graphql` does not expand {owner}/{repo} the way `gh api` does,
+        // so the names are passed as variables.
+        let query = "query($owner:String!,$repo:String!,$number:Int!)"
+            + "{repository(owner:$owner,name:$repo)"
+            + "{pullRequest(number:$number){reviewThreads(first:100){nodes"
+            + "{id isResolved comments(first:100){nodes{databaseId}}}}}}}"
+        let result = await GitHubCLI.run(
+            ["api", "graphql",
+             "-f", "query=\(query)",
+             "-f", "owner=\(repository.owner)",
+             "-f", "repo=\(repository.name)",
+             "-F", "number=\(pr.number)"],
+            in: directory,
+            timeout: 60
+        )
+        guard result.isSuccess else { return }
+
+        struct Response: Decodable {
+            struct Root: Decodable { let repository: Repository? }
+            struct Repository: Decodable { let pullRequest: PullRequestNode? }
+            struct PullRequestNode: Decodable { let reviewThreads: Threads? }
+            struct Threads: Decodable { let nodes: [Thread]? }
+            struct Thread: Decodable {
+                struct Comments: Decodable { let nodes: [Comment]? }
+                struct Comment: Decodable { let databaseId: Int? }
+                let id: String?
+                let isResolved: Bool?
+                let comments: Comments?
+            }
+            let data: Root?
+        }
+
+        guard let response = try? JSONDecoder().decode(Response.self, from: Data(result.stdout.utf8)),
+              let threads = response.data?.repository?.pullRequest?.reviewThreads?.nodes
+        else { return }
+
+        var byCommentID: [String: (token: String, isResolved: Bool)] = [:]
+        for thread in threads {
+            guard let token = thread.id else { continue }
+            for comment in thread.comments?.nodes ?? [] {
+                guard let databaseId = comment.databaseId else { continue }
+                byCommentID["review-comment-\(databaseId)"] = (token, thread.isResolved ?? false)
+            }
+        }
+
+        for index in comments.indices {
+            guard let thread = byCommentID[comments[index].id] else { continue }
+            comments[index].resolveToken = thread.token
+            comments[index].isResolved = thread.isResolved
+        }
+    }
+
+    /// The owner and name GraphQL needs, from the pull request when the remote
+    /// named them and from `gh` itself otherwise.
+    private static func gitHubRepository(
+        for pr: PullRequest,
+        in directory: URL
+    ) async -> (owner: String, name: String)? {
+        if !pr.repositoryOwner.isEmpty, !pr.repositorySlug.isEmpty {
+            return (pr.repositoryOwner, pr.repositorySlug)
+        }
+        let result = await GitHubCLI.run(
+            ["repo", "view", "--json", "owner,name"],
+            in: directory,
+            timeout: 30
+        )
+        guard result.isSuccess else { return nil }
+
+        struct Repository: Decodable {
+            struct Owner: Decodable { let login: String? }
+            let owner: Owner?
+            let name: String?
+        }
+
+        guard let decoded = try? JSONDecoder().decode(Repository.self, from: Data(result.stdout.utf8)),
+              let owner = decoded.owner?.login, let name = decoded.name,
+              !owner.isEmpty, !name.isEmpty
+        else { return nil }
+        return (owner, name)
     }
 
     /// Inline review comments. `gh pr view` does not expose them, and they are
@@ -365,6 +503,11 @@ extension PullRequestService {
             let toLine = inline?["to"] as? Int
             let fromLine = inline?["from"] as? Int
 
+            // Cloud hangs a `resolution` object off the thread's first comment
+            // and leaves it out entirely while the thread is open, so its mere
+            // presence is the answer.
+            let resolution = item["resolution"] as? [String: Any]
+
             return PullRequestComment(
                 id: identifier,
                 parentID: parent.map { "\($0)" },
@@ -376,7 +519,10 @@ extension PullRequestService {
                 path: inline?["path"] as? String,
                 line: toLine ?? fromLine,
                 side: toLine != nil ? .new : .old,
-                replyToken: identifier
+                replyToken: identifier,
+                isResolved: resolution != nil,
+                resolvedBy: BitbucketUser.name(from: resolution?["user"] as? [String: Any]),
+                resolveToken: identifier
             )
         }
         .sorted { ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast) }
@@ -432,6 +578,15 @@ extension PullRequestService {
             // Cloud-style parenting; Data Center nests instead, handled below.
             let parent = (dictionary["parent"] as? [String: Any])?["id"]
 
+            // Data Center names the thread's standing in `state`; Cloud, which
+            // can reach this decoder through `bkt pr view`, still says it with
+            // a `resolution` object.
+            let resolution = dictionary["resolution"] as? [String: Any]
+            let isResolved = (dictionary["state"] as? String)?.uppercased() == "RESOLVED"
+                || resolution != nil
+            let resolver = (dictionary["resolver"] as? [String: Any])
+                ?? (resolution?["user"] as? [String: Any])
+
             return PullRequestComment(
                 id: identifier,
                 parentID: parent.map { "\($0)" },
@@ -443,7 +598,11 @@ extension PullRequestService {
                 path: path,
                 line: toLine ?? fromLine ?? anchorLine,
                 side: isOldSide ? .old : .new,
-                replyToken: dictionary["id"].map { "\($0)" }
+                replyToken: dictionary["id"].map { "\($0)" },
+                isResolved: isResolved,
+                resolvedBy: BitbucketUser.name(from: resolver),
+                resolveToken: dictionary["id"].map { "\($0)" },
+                resolveVersion: dictionary["version"] as? Int
             )
         }
 
@@ -696,6 +855,86 @@ extension PullRequestService {
                 lastMessage = result.failureMessage
             }
             throw PullRequestError.commandFailed(lastMessage)
+
+        case .unknown:
+            throw PullRequestError.unsupportedHost
+        }
+    }
+
+    /// Settles a thread, or opens it again. `comment` is the thread's root, the
+    /// only comment either host records resolution on.
+    static func setResolved(
+        _ resolved: Bool,
+        for comment: PullRequestComment,
+        on pr: PullRequest,
+        in directory: URL
+    ) async throws {
+        guard let token = comment.resolveToken else {
+            throw PullRequestError.commandFailed(
+                "This host does not let that thread be resolved from here."
+            )
+        }
+
+        switch pr.host {
+        case .github:
+            // Resolution is a GraphQL-only idea on GitHub, and it names the
+            // review thread rather than any comment in it — which is why the
+            // conversation is loaded with that node id already in hand.
+            let mutation = "mutation($id:ID!){"
+                + (resolved ? "resolveReviewThread" : "unresolveReviewThread")
+                + "(input:{threadId:$id}){thread{id isResolved}}}"
+            let result = await GitHubCLI.run(
+                ["api", "graphql", "-f", "query=\(mutation)", "-f", "id=\(token)"],
+                in: directory,
+                timeout: 60
+            )
+            guard result.isSuccess else {
+                throw PullRequestError.commandFailed(result.failureMessage)
+            }
+
+        case .bitbucket:
+            guard !pr.repositoryOwner.isEmpty, !pr.repositorySlug.isEmpty else {
+                throw PullRequestError.commandFailed(
+                    "This repository's workspace and slug are unknown, so the thread cannot be resolved."
+                )
+            }
+
+            // Cloud has an endpoint of its own for it, where the method is the
+            // whole message: PUT settles the thread, DELETE opens it again.
+            let cloud = await Shell.run(
+                ["bkt", "api",
+                 "/2.0/repositories/\(pr.repositoryOwner)/\(pr.repositorySlug)"
+                     + "/pullrequests/\(pr.number)/comments/\(token)/resolve",
+                 "--method", resolved ? "PUT" : "DELETE"],
+                in: directory,
+                timeout: 60
+            )
+            if cloud.isSuccess { return }
+
+            // Data Center instead writes the comment back with a new `state`,
+            // and refuses the write unless it is told which version is being
+            // replaced. Without one there is nothing honest to send, so Cloud's
+            // refusal is what the user is shown.
+            guard let version = comment.resolveVersion,
+                  let data = try? JSONSerialization.data(withJSONObject: [
+                      "state": resolved ? "RESOLVED" : "OPEN",
+                      "version": version,
+                  ])
+            else {
+                throw PullRequestError.commandFailed(cloud.failureMessage)
+            }
+            let dataCenter = await Shell.run(
+                ["bkt", "api",
+                 "/rest/api/1.0/projects/\(pr.repositoryOwner)/repos/\(pr.repositorySlug)"
+                     + "/pull-requests/\(pr.number)/comments/\(token)",
+                 "--method", "PUT",
+                 "--input", String(decoding: data, as: UTF8.self)],
+                in: directory,
+                timeout: 60
+            )
+            guard dataCenter.isSuccess else {
+                throw PullRequestError.commandFailed(dataCenter.failureMessage)
+            }
 
         case .unknown:
             throw PullRequestError.unsupportedHost

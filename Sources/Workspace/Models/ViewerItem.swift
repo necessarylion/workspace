@@ -138,6 +138,11 @@ final class ViewerItem: Identifiable {
     var syncState: PullRequestSyncState?
     var isCheckingSync = false
     var isRunningPullRequestAction = false
+    /// Whether everything about the pull request is being read again. It is not
+    /// `isRunningPullRequestAction`: that one means something is being *changed*
+    /// on the host and greys out the whole action bar, and a refresh changes
+    /// nothing. Two flags also keep two spinners from turning at once.
+    var isRefreshingPullRequest = false
 
     var isLoading = false
     var errorMessage: String?

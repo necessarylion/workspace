@@ -307,7 +307,10 @@ struct DiffView: View {
                 isPosting: comments?.isPosting ?? false,
                 replyingTo: $replyingTo,
                 mentions: comments?.mentions ?? .none,
-                onReply: { parent, body in await comments?.reply(parent, body) }
+                onReply: { parent, body in await comments?.reply(parent, body) },
+                // Flattened: chaining through an optional bundle onto an
+                // optional closure would otherwise nest one inside the other.
+                onResolve: comments?.resolve ?? nil
             )
             .frame(width: width, alignment: .leading)
         case .composer:
@@ -361,6 +364,9 @@ struct DiffComments {
     var add: (DiffLineAnchor, String) async -> Void
     /// Replies to a comment in an existing thread.
     var reply: (PullRequestComment, String) async -> Void
+    /// Settles a thread, or opens it again. Nil for a diff that has no host
+    /// behind it to be told.
+    var resolve: ((PullRequestComment, Bool) async -> Void)?
 }
 
 extension DiffRow {

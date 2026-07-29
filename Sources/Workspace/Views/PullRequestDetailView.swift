@@ -93,6 +93,7 @@ struct PullRequestDetailView: View {
             descriptionDraft = nil
             isFetchingDescription = false
         }
+        .task(id: item.id) { await watchBuilds() }
         // Every button in the action bar ends up here first: one sheet, one
         // shape, and nothing sent to the host until it is confirmed.
         .sheet(item: $pendingAction) { action in
@@ -129,6 +130,38 @@ struct PullRequestDetailView: View {
                     }
                 )
             }
+        }
+    }
+
+    /// Reads the CI runs, and goes on reading them for as long as this pull
+    /// request is the one on screen.
+    ///
+    /// The app watches for things rather than polling for them, and this is the
+    /// deliberate exception: a build finishing is not an event either host
+    /// tells us about, so the window asks. It asks narrowly — SwiftUI cancels
+    /// this task when the pull request is closed or another takes its place, so
+    /// the loop dies with what it belongs to, and a window nobody is in front
+    /// of spends nothing on the host.
+    ///
+    /// It lives here rather than in the panel that draws the runs because the
+    /// badge in the summary bar reads them too, and that bar is on screen on
+    /// the Diff and Commits tabs, where the panel is not.
+    private func watchBuilds() async {
+        if item.builds.isEmpty, !item.isLoadingBuilds, item.buildsError == nil {
+            await store.loadBuilds(item, project: project, pr: pr)
+        }
+
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(for: .seconds(10))
+            } catch {
+                return
+            }
+            // Nothing behind a hidden window, and nothing on top of a reload
+            // already on its way with a spinner of its own. Either way the next
+            // tick tries again.
+            guard NSApplication.shared.isActive, !item.isLoadingBuilds else { continue }
+            await store.refreshBuilds(item, project: project, pr: pr)
         }
     }
 
@@ -211,6 +244,7 @@ struct PullRequestDetailView: View {
                     .foregroundStyle(.secondary)
             }
             tabPicker
+            refreshButton
             actionsMenu
         }
         .font(.caption.monospaced())
@@ -502,6 +536,30 @@ struct PullRequestDetailView: View {
         .pointerCursor()
     }
 
+    /// Everything about the pull request, read again from the host. It is the
+    /// one thing here that is wanted often enough to be worth a click rather
+    /// than a trip through the menu, so it sits in the bar as well.
+    @ViewBuilder
+    private var refreshButton: some View {
+        // Same treatment the action bar gives a merge or a sync: while it is in
+        // flight the bar says so, and there is nothing to press.
+        if item.isRefreshingPullRequest {
+            ProgressView().controlSize(.small)
+        } else {
+            barButton(
+                "arrow.clockwise",
+                help: "Reload #\(pr.number) from \(pr.host.displayName)"
+            ) {
+                refresh()
+            }
+            .disabled(item.isRunningPullRequestAction)
+        }
+    }
+
+    private func refresh() {
+        Task { await store.refreshPullRequest(item, project: project, pr: pr) }
+    }
+
     /// What is left once copy and check out have their own buttons, folded into a
     /// menu so the bar stays one line tall.
     private var actionsMenu: some View {
@@ -537,19 +595,9 @@ struct PullRequestDetailView: View {
             }
             Divider()
             Button {
-                Task { await store.loadPullRequestDiff(item, project: project, pr: pr) }
+                refresh()
             } label: {
-                Label("Reload Diff", systemImage: "arrow.clockwise")
-            }
-            Button {
-                Task { await store.loadCommits(item, project: project, pr: pr) }
-            } label: {
-                Label("Reload Commits", systemImage: "arrow.clockwise")
-            }
-            Button {
-                Task { await store.loadBuilds(item, project: project, pr: pr) }
-            } label: {
-                Label("Reload Builds", systemImage: "arrow.clockwise")
+                Label("Refresh", systemImage: "arrow.clockwise")
             }
         } label: {
             Image(systemName: "ellipsis.circle")
@@ -750,6 +798,15 @@ struct PullRequestDetailView: View {
                             project: project,
                             pr: pr,
                             replyingTo: parent
+                        )
+                    },
+                    resolve: { comment, resolved in
+                        await store.setCommentResolved(
+                            resolved,
+                            for: comment,
+                            on: item,
+                            project: project,
+                            pr: pr
                         )
                     }
                 )
@@ -1063,6 +1120,15 @@ struct ConversationView<Header: View>: View {
                             mentions: mentions,
                             onReply: { parent, body in
                                 await post(body, replyingTo: parent)
+                            },
+                            onResolve: { comment, resolved in
+                                await store.setCommentResolved(
+                                    resolved,
+                                    for: comment,
+                                    on: item,
+                                    project: project,
+                                    pr: pr
+                                )
                             }
                         )
                     }
@@ -1154,65 +1220,98 @@ struct CommentThread: View {
     @Binding var replyingTo: PullRequestComment?
     let isPosting: Bool
     var mentions: MentionSource = .none
+    /// Drawn in the diff rather than in the conversation, where there is less
+    /// room and the file is already known.
+    var isInline = false
     let onReply: (PullRequestComment, String) async -> Void
+    /// Settles the thread, or opens it again. Nil where the host gave no way.
+    var onResolve: ((PullRequestComment, Bool) async -> Void)?
+
+    /// Whether a settled thread has been opened up to be read. It is deliberately
+    /// not remembered: a reload brings the conversation back the way the host
+    /// tells it, which is with the answered parts out of the way.
+    @State private var isExpanded = false
 
     /// Stop indenting past this depth so deep threads stay readable.
     private static let maxIndentedDepth = 4
     private static let indent: CGFloat = 18
 
+    /// Only a root stands for a thread, and only a thread can be resolved — a
+    /// reply under it is part of what was settled, not a thing of its own.
+    private var isSettled: Bool { depth == 0 && node.isResolved }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            CommentBubble(
-                comment: node.comment,
-                replyCount: depth == 0 ? totalReplies : 0,
-                isReplying: replyingTo == node.comment,
-                onReplyTapped: {
-                    replyingTo = replyingTo == node.comment ? nil : node.comment
-                }
-            )
-
-            if replyingTo == node.comment {
-                CommentComposer(
-                    prompt: "Reply to \(node.comment.author)…  @ to name someone",
-                    sendTitle: "Reply",
-                    isPosting: isPosting,
-                    mentions: mentions,
-                    onCancel: { replyingTo = nil },
-                    onSend: { body in await onReply(node.comment, body) }
+            if isSettled {
+                ResolvedThreadRow(
+                    node: node,
+                    isExpanded: isExpanded,
+                    showsPath: !isInline,
+                    onTap: { isExpanded.toggle() }
                 )
-                .padding(.leading, Self.indent)
             }
 
-            if !node.replies.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(node.replies) { reply in
-                        CommentThread(
-                            node: reply,
-                            depth: depth + 1,
-                            replyingTo: $replyingTo,
-                            isPosting: isPosting,
-                            mentions: mentions,
-                            onReply: onReply
-                        )
-                    }
-                }
-                .padding(.leading, depth < Self.maxIndentedDepth ? Self.indent : 0)
-                .overlay(alignment: .leading) {
-                    // The rule that ties a reply back to what it answers.
-                    Rectangle()
-                        .fill(.quaternary)
-                        .frame(width: 1)
-                        .padding(.vertical, 2)
-                }
+            if !isSettled || isExpanded {
+                thread
             }
         }
     }
 
-    /// Every descendant, not just the direct children.
-    private var totalReplies: Int {
-        node.replies.reduce(node.replies.count) { total, reply in
-            total + reply.replies.reduce(0) { $0 + 1 + $1.replies.count }
+    @ViewBuilder
+    private var thread: some View {
+        CommentBubble(
+            comment: node.comment,
+            replyCount: depth == 0 ? node.totalReplies : 0,
+            isReplying: replyingTo == node.comment,
+            isBusy: isPosting,
+            onReplyTapped: {
+                replyingTo = replyingTo == node.comment ? nil : node.comment
+            },
+            onResolveTapped: resolveAction
+        )
+
+        if replyingTo == node.comment {
+            CommentComposer(
+                prompt: "Reply to \(node.comment.author)…  @ to name someone",
+                sendTitle: "Reply",
+                isPosting: isPosting,
+                mentions: mentions,
+                onCancel: { replyingTo = nil },
+                onSend: { body in await onReply(node.comment, body) }
+            )
+            .padding(.leading, Self.indent)
         }
+
+        if !node.replies.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(node.replies) { reply in
+                    CommentThread(
+                        node: reply,
+                        depth: depth + 1,
+                        replyingTo: $replyingTo,
+                        isPosting: isPosting,
+                        mentions: mentions,
+                        isInline: isInline,
+                        onReply: onReply,
+                        onResolve: onResolve
+                    )
+                }
+            }
+            .padding(.leading, depth < Self.maxIndentedDepth ? Self.indent : 0)
+            .overlay(alignment: .leading) {
+                // The rule that ties a reply back to what it answers.
+                Rectangle()
+                    .fill(.quaternary)
+                    .frame(width: 1)
+                    .padding(.vertical, 2)
+            }
+        }
+    }
+
+    /// What the Resolve button does, or nil where it is not drawn at all.
+    private var resolveAction: (() -> Void)? {
+        guard depth == 0, node.comment.canResolve, let onResolve else { return nil }
+        return { Task { await onResolve(node.comment, !node.isResolved) } }
     }
 }
 
@@ -1857,7 +1956,12 @@ struct CommentBubble: View {
     /// Shown on a thread root so a collapsed-looking thread still reads as one.
     var replyCount: Int = 0
     var isReplying = false
+    /// A write is already on its way to the host, so nothing else may be asked.
+    var isBusy = false
     var onReplyTapped: (() -> Void)?
+    /// Settles the thread this comment heads, or opens it again. Nil where the
+    /// host offers no handle for it, and then no button is drawn.
+    var onResolveTapped: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -1909,17 +2013,40 @@ struct CommentBubble: View {
                     .font(.callout)
             }
 
-            if comment.canReply, let onReplyTapped {
-                Button(action: onReplyTapped) {
-                    Label(
-                        isReplying ? "Cancel reply" : "Reply",
-                        systemImage: "arrowshape.turn.up.left"
-                    )
-                    .font(.caption)
+            if (comment.canReply && onReplyTapped != nil) || onResolveTapped != nil {
+                HStack(spacing: 12) {
+                    if comment.canReply, let onReplyTapped {
+                        Button(action: onReplyTapped) {
+                            Label(
+                                isReplying ? "Cancel reply" : "Reply",
+                                systemImage: "arrowshape.turn.up.left"
+                            )
+                            .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .pointerCursor()
+                    }
+
+                    if let onResolveTapped {
+                        Button(action: onResolveTapped) {
+                            Label(
+                                comment.isResolved ? "Unresolve" : "Resolve",
+                                systemImage: comment.isResolved
+                                    ? "arrow.uturn.backward.circle"
+                                    : "checkmark.circle"
+                            )
+                            .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(comment.isResolved ? Color.secondary : Color.green)
+                        .disabled(isBusy)
+                        .pointerCursor(!isBusy)
+                        .help(comment.isResolved
+                            ? "Mark this thread unresolved"
+                            : "Mark this thread resolved")
+                    }
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .pointerCursor()
                 .padding(.top, 1)
             }
         }

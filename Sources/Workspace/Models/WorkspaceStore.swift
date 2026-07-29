@@ -1109,6 +1109,78 @@ final class WorkspaceStore {
         }
     }
 
+    /// Reads everything this pull request is made of again, from the host.
+    ///
+    /// The same things ``openPullRequest(_:project:)`` fetches the first time
+    /// round, minus the shortcuts it takes: the request itself — its title,
+    /// state, draft flag, approvals and description all live on that one object
+    /// — the diff, the conversation, who is reviewing, the CI runs and how far
+    /// the branch has drifted. The commits come along only if the tab that
+    /// shows them has already been opened; a review that never went there
+    /// should not start paying for the call now.
+    ///
+    /// They are independent reads, so they go out together the way the
+    /// dashboard's do: the wait is the slowest host call rather than the sum of
+    /// them, and each writes what it owns as it lands.
+    func refreshPullRequest(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        // Not while a merge, a rejection or a sync is on its way: what comes
+        // back would be the state from before it landed. One refresh at a time,
+        // too — the button is easy to lean on.
+        guard !item.isRefreshingPullRequest, !item.isRunningPullRequestAction else { return }
+        item.isRefreshingPullRequest = true
+        defer { item.isRefreshingPullRequest = false }
+
+        async let request: Void = reloadPullRequest(item, project: project, pr: pr)
+        async let diff: Void = loadPullRequestDiff(item, project: project, pr: pr)
+        async let comments: Void = loadComments(item, project: project, pr: pr)
+        async let builds: Void = loadBuilds(item, project: project, pr: pr)
+        async let commits: Void = reloadCommitsIfShown(item, project: project, pr: pr)
+        // Fetching first, because the branch may well have moved on the host
+        // since it was last counted here.
+        async let sync: Void = refreshSyncState(item, project: project, pr: pr, fetching: true)
+        _ = await (request, diff, comments, builds, commits, sync)
+
+        showStatus("#\(pr.number) refreshed")
+    }
+
+    /// The pull request object itself, re-read from the host. It is what the
+    /// summary bar and the header are drawn from, so a refresh that left it
+    /// alone would reload the diff under a title, a state and an approvals
+    /// count from whenever the request was opened.
+    private func reloadPullRequest(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        guard let remote = project.remote, remote.kind != .unknown else { return }
+        var latest = pr
+        do {
+            latest = try await PullRequestService.load(
+                number: pr.number,
+                for: remote,
+                in: project.url
+            )
+            item.pullRequest = latest
+            // The header names the pull request by its title, and a title is
+            // one of the things that can have changed on the host.
+            item.title = latest.title
+        } catch {
+            // Whatever else lands is still worth showing, so this says what
+            // went wrong and leaves the rest of the refresh to finish.
+            showError(error.localizedDescription)
+        }
+        // Both hosts hand the reviewers over with the request, so this usually
+        // costs nothing beyond the call just made.
+        await loadReviewers(item, project: project, pr: latest)
+        if let named = await PullRequestService.namedMentions(in: latest, directory: project.url) {
+            item.pullRequest?.body = named
+        }
+    }
+
+    /// The commits, but only for a Commits tab that has already been opened —
+    /// see ``loadCommits(_:project:pr:)`` for why they are not fetched with
+    /// everything else in the first place.
+    private func reloadCommitsIfShown(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        guard !item.commits.isEmpty else { return }
+        await loadCommits(item, project: project, pr: pr)
+    }
+
     /// Opens a pull request known only by its number — a `#123` written in a
     /// commit message. The list the navigator holds is of open requests only,
     /// and a commit usually names one that has already merged, so anything not
@@ -1285,6 +1357,11 @@ final class WorkspaceStore {
         item.isLoadingCommits = false
     }
 
+    /// The CI runs, read out loud: the spinner turns while it is in flight, and
+    /// a refusal replaces the list with what the host said. This is the first
+    /// look at the panel and the reload button — both are somebody waiting for
+    /// an answer, so both are allowed to say they are working and to fail
+    /// visibly.
     func loadBuilds(_ item: ViewerItem, project: Project, pr: PullRequest) async {
         item.isLoadingBuilds = true
         item.buildsError = nil
@@ -1295,6 +1372,23 @@ final class WorkspaceStore {
             item.buildsError = error.localizedDescription
         }
         item.isLoadingBuilds = false
+    }
+
+    /// The same runs, read quietly, for the panel's ticker.
+    ///
+    /// Nobody asked for this one, so it says nothing: no spinner to flash every
+    /// ten seconds, and a `gh` or `bkt` that stumbles once leaves the last good
+    /// list where it is rather than emptying the panel under someone reading it.
+    /// The list is only assigned when it has actually changed, so a tick that
+    /// finds the same jobs redraws nothing.
+    func refreshBuilds(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        guard let builds = try? await PullRequestService.builds(for: pr, in: project.url) else {
+            return
+        }
+        if item.builds != builds { item.builds = builds }
+        // The host is answering again, so whatever the last failure left on
+        // screen is out of date.
+        if item.buildsError != nil { item.buildsError = nil }
     }
 
     /// Opens one commit inside the Commits tab and fetches its patch.
@@ -1497,6 +1591,36 @@ final class WorkspaceStore {
                 in: project.url
             )
             showStatus("Comment posted on \(anchor.path):\(anchor.line)")
+            await loadComments(item, project: project, pr: pr)
+        } catch {
+            item.commentError = error.localizedDescription
+        }
+        item.isPostingComment = false
+    }
+
+    /// Settles a comment thread, or opens it again. The conversation is read
+    /// back afterwards rather than edited in place: resolution is the host's
+    /// word, and a thread someone else has already touched should come back
+    /// saying so.
+    func setCommentResolved(
+        _ resolved: Bool,
+        for comment: PullRequestComment,
+        on item: ViewerItem,
+        project: Project,
+        pr: PullRequest
+    ) async {
+        item.isPostingComment = true
+        item.commentError = nil
+        do {
+            try await PullRequestService.setResolved(
+                resolved,
+                for: comment,
+                on: pr,
+                in: project.url
+            )
+            showStatus(resolved
+                ? "Thread resolved on #\(pr.number)"
+                : "Thread reopened on #\(pr.number)")
             await loadComments(item, project: project, pr: pr)
         } catch {
             item.commentError = error.localizedDescription
