@@ -148,8 +148,15 @@ enum GitLineStatusLoader {
     ///
     /// The last `+` field rather than the first, so a combined diff — `@@@` with a
     /// field per parent — still yields the side that is the file on screen.
+    ///
+    /// Only the range spec between the markers is read. Git appends the enclosing
+    /// function's own text after the closing `@@`, and a token in it that starts
+    /// with `+` — `a += b`, `+foo` — would win the scan, parse to no digits, and
+    /// restart the hunk at line 1, putting every deletion wedge in it somewhere
+    /// it does not belong.
     private static func newStart(of header: String) -> Int {
-        let fields = header.split(separator: " ")
+        let spec = header.split(separator: "@", omittingEmptySubsequences: true).first ?? ""
+        let fields = spec.split(separator: " ")
         guard let field = fields.last(where: { $0.hasPrefix("+") }) else { return 1 }
         let digits = field.dropFirst().prefix { $0.isNumber }
         return Int(digits) ?? 1

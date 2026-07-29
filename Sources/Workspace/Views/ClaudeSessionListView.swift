@@ -6,10 +6,10 @@ import SwiftUI
 ///
 /// Each one is a **floating panel** running the real `claude`, which is what
 /// lets several be under way at once — separate processes in separate shells, a
-/// turn working away in one while another is typed into. Only two are on screen
-/// at a time, so this pane is not a convenience: it is the *only* way back to a
-/// conversation that a newer one has pushed out of sight, and it says on the row
-/// which of the running ones those are.
+/// turn working away in one while another is typed into. Nothing pushes a panel
+/// out of sight; a conversation is off screen only when it has been folded down
+/// to the dock, and this pane is the other way back to one — the row says which
+/// of the running ones are folded away.
 ///
 /// The past ones come off disk rather than out of this window, so a session
 /// started in a shell of your own is in the list too.
@@ -223,9 +223,9 @@ struct ClaudeSessionListView: View {
 }
 
 /// One conversation running in this window — a floating panel with `claude` in
-/// it, whether or not it is one of the two being shown. The row says which; the
-/// stop button under the pointer ends that conversation alone, and the others
-/// keep going.
+/// it, whether it is on screen or folded away to the dock. The row says which;
+/// the stop button under the pointer ends that conversation alone, and the
+/// others keep going.
 private struct LiveClaudeRow: View {
     let panel: ChatPanel
     let isOnScreen: Bool

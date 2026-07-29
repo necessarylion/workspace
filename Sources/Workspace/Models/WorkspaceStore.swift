@@ -449,6 +449,9 @@ final class WorkspaceStore {
     /// it owed goes out on the first tick after the app is in front again.
     @ObservationIgnored private var missedAutoRefresh = false
 
+    /// The one re-read of the diff on screen; see ``reloadPresentedWorkingDiff``.
+    @ObservationIgnored private var presentedDiffReload: Task<Void, Never>?
+
     /// The five-minute sweep of the sidebar. Called once, from the window's
     /// `task` — starting it from `init` would put a `gh` call per repository on
     /// the launch, and would run in the throwaway store SwiftUI can build.
@@ -527,6 +530,12 @@ final class WorkspaceStore {
     /// Only the item actually being looked at: a diff sitting in the back stack
     /// costs a `git diff` to refresh and will be reloaded when it is opened
     /// again anyway.
+    ///
+    /// One reload at a time, and the newest wins. The debounce in front of this
+    /// is 400ms and a `git diff` over a large file while Claude Code works can
+    /// take longer, so two reads can be in flight — and without the cancel it is
+    /// whichever finishes last, not whichever was asked for last, that ends up
+    /// on screen.
     private func reloadPresentedWorkingDiff(of project: Project) {
         guard !showsDashboard,
               let item = current,
@@ -534,8 +543,9 @@ final class WorkspaceStore {
               projectID == project.id
         else { return }
 
+        presentedDiffReload?.cancel()
         guard !path.isEmpty else {
-            Task { await loadAllChanges(item, project: project, quietly: true) }
+            presentedDiffReload = Task { await loadAllChanges(item, project: project, quietly: true) }
             return
         }
         // The change list is the fresher answer for a renamed file's second
@@ -543,7 +553,7 @@ final class WorkspaceStore {
         // the item's own `isUntracked` is only the fallback for one git no
         // longer lists at all.
         let change = project.gitStatus?.changes.first { $0.path == path }
-        Task {
+        presentedDiffReload = Task {
             await loadWorkingDiff(
                 item,
                 project: project,
@@ -995,7 +1005,12 @@ final class WorkspaceStore {
         if !quietly { item.isLoading = true }
         item.errorMessage = nil
         let text = await GitStatus.diff(paths: paths, in: project.url, isUntracked: isUntracked)
-        item.diff = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
+        let parsed = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
+        // A read this one was started to replace; leaving the item alone is the
+        // whole point of having been cancelled. Only a quiet reload is ever
+        // cancelled, so there is no spinner left running by returning here.
+        guard !Task.isCancelled else { return }
+        item.diff = parsed
         if item.diff?.isEmpty == true {
             item.errorMessage = "No textual changes to show for this file."
         }
@@ -1022,7 +1037,9 @@ final class WorkspaceStore {
             .filter { $0.label == "Untracked" }
             .map(\.path) ?? []
         let text = await GitStatus.diffAll(in: project.url, untrackedPaths: untracked)
-        item.diff = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
+        let parsed = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
+        guard !Task.isCancelled else { return }
+        item.diff = parsed
         if item.diff?.isEmpty == true {
             item.errorMessage = "No textual changes to show."
         }
@@ -2049,13 +2066,14 @@ final class WorkspaceStore {
     /// in a panel and in the centre would be one view two places want to host,
     /// and whichever drew it last would tear it out of the other.
     ///
-    /// **This list is not what is on screen.** Being visible is a matter of
-    /// recency — ``visibleChats`` is the two most recently raised — so starting
-    /// a third conversation pushes the oldest one out of sight and *nothing
-    /// else happens to it*: its shell, its process and its transcript carry on
-    /// exactly as they were, and raising it from the Claude list brings the
-    /// panel back with the turn it was running still running. Ending a
-    /// conversation is one thing and one thing only, and that is the ✕.
+    /// **Every conversation here is drawn** — ``visibleChats`` is this list — so
+    /// nothing is ever pushed out of sight to make room. The only way a running
+    /// conversation is off screen is folded to the dock, which the reader does
+    /// on purpose and *nothing else happens to it*: its shell, its process and
+    /// its transcript carry on exactly as they were, and unfolding it, or
+    /// raising it from the Claude list, brings the panel back with the turn it
+    /// was running still running. Ending a conversation is one thing and one
+    /// thing only, and that is the ✕.
     var chats: [ChatPanel] = []
 
     /// What the overlay draws: every conversation, in ``chats`` order rather
@@ -2200,10 +2218,10 @@ final class WorkspaceStore {
 
     /// Floats a new conversation for this repository, in front of the rest.
     ///
-    /// **Nothing is ever closed to make room.** A third conversation pushes the
-    /// least recently raised panel out of the visible two, and that is all it
-    /// does to it — the shell keeps running, the turn keeps going, and the
-    /// Claude list is the way back to it.
+    /// **Nothing is ever closed, folded or displaced to make room.** A new
+    /// conversation opens in front of the rest and that is the whole of what it
+    /// does to them — every other shell keeps running, every other turn keeps
+    /// going, and every other panel stays where the reader put it.
     private func floatChat(in project: Project, title: String) -> ChatPanel {
         let session = TerminalSession(directory: project.url, title: title)
         // A panel is only ever opened to hold a conversation, so this is settled
@@ -2270,10 +2288,9 @@ final class WorkspaceStore {
         }
     }
 
-    /// Brings a panel to the front — and, when it had fallen out of the visible
-    /// two, back on screen at the cost of whichever was raised longest ago.
-    /// Clicking anywhere in a panel does this, so the one being typed into is
-    /// never the one underneath.
+    /// Brings a panel to the front, over the ones it was under and at no cost to
+    /// any of them. Clicking anywhere in a panel does this, so the one being
+    /// typed into is never the one underneath.
     /// **Nothing happens at all when it is already in front**, and that guard
     /// has to be out here rather than inside ``raise(_:)``.
     ///

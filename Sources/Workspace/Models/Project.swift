@@ -321,14 +321,14 @@ final class Project: Identifiable {
         }
     }
 
-    /// Nil paths mean the watcher lost track and everything has to be checked;
-    /// see ``changedFilesUnknown``.
-
     /// One `npm install`, one `git checkout`, one Claude Code turn — each is a
     /// long burst of writes, and re-running `git status` per file in it would
     /// cost more than the work being watched. The reads wait for the burst to
     /// end, and the files it named pile up in the meantime so the callers still
     /// learn about every one of them.
+    ///
+    /// Nil paths mean the watcher lost track and everything has to be checked;
+    /// see ``changedFilesUnknown``.
     private func workingTreeChanged(_ paths: [URL]?) {
         if let paths { changedFiles.formUnion(paths) } else { changedFilesUnknown = true }
         workingTreeTask?.cancel()

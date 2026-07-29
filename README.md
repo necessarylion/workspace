@@ -112,6 +112,7 @@ missing ones, so you never have to work out which command it wanted.
 | Feature | What it does |
 | --- | --- |
 | Real editing | Tree-sitter colours, folding, multiple cursors, find and replace (⌘F), auto-indent. |
+| Change markers | What has changed since HEAD, down the edge of the gutter — green where lines were added, blue where they were changed, and a wedge where they were deleted. |
 | Language servers | Diagnostics, completions (⌃Space) and ⌘-click to definition for 20+ languages. |
 | Go to file (⌘P) | `item controller` finds `app/controllers/item_controller.rb`. Punctuation optional. |
 | Search in files | ripgrep, grouped by file, every hit marked in the file you open. |
