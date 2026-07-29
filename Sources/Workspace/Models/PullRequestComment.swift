@@ -19,6 +19,24 @@ struct PullRequestComment: Identifiable, Sendable, Hashable {
         }
     }
 
+    /// What the host wants named when a comment's text is replaced.
+    ///
+    /// Three kinds of GitHub comment arrive from three different APIs and are
+    /// edited through three different calls, so the loader — the only thing that
+    /// knows which one it read — says so here rather than leaving the writer to
+    /// guess it back out of an id.
+    enum EditTarget: Sendable, Hashable {
+        /// A comment on the conversation tab, by its GraphQL node id.
+        case gitHubIssueComment(String)
+        /// A review's summary, by its GraphQL node id.
+        case gitHubReview(String)
+        /// An inline review comment, by its REST id.
+        case gitHubReviewComment(String)
+        /// A Bitbucket comment. Data Center refuses an edit that does not name
+        /// the version it replaces; Cloud has no such idea and sends nothing.
+        case bitbucket(id: String, version: Int?)
+    }
+
     /// Which column of the diff a line number refers to.
     enum Side: String, Sendable, Hashable {
         /// The file before the change — a removed or context line.
@@ -34,6 +52,14 @@ struct PullRequestComment: Identifiable, Sendable, Hashable {
     /// The author's picture, when the host tells us where to find one.
     var avatarURL: URL?
     var body: String
+    /// The Markdown the host itself stores, when that is not what `body` says.
+    ///
+    /// Bitbucket Cloud writes a mention as an account id and the app puts the
+    /// person's name in its place for reading — see ``BitbucketMarkup``. Saving
+    /// that back would post the name as plain words and lose the mention, so an
+    /// edit starts from what the host actually holds. Nil everywhere else, where
+    /// `body` is already the original.
+    var rawBody: String?
     var createdAt: Date?
     var kind: Kind
     /// Set when the comment is anchored to a file in the diff.
@@ -59,10 +85,20 @@ struct PullRequestComment: Identifiable, Sendable, Hashable {
     /// comment the thread hangs off; `nil` means this thread cannot be resolved
     /// from here and the button is not drawn.
     var resolveToken: String?
+    /// The handle the host wants when this comment's text is replaced. `nil`
+    /// means it cannot be edited from here — someone else wrote it, or the host
+    /// gave no way to tell whose it is.
+    var editTarget: EditTarget?
 
     var canReply: Bool { replyToken != nil }
 
     var canResolve: Bool { resolveToken != nil }
+
+    var canEdit: Bool { editTarget != nil }
+
+    /// The text an edit box opens with: what the host stores, which is not
+    /// always what is on screen — see ``rawBody``.
+    var editableBody: String { rawBody ?? body }
 
     /// Where in the diff this comment belongs, when it belongs anywhere.
     var anchor: DiffLineAnchor? {
@@ -173,6 +209,82 @@ extension PullRequestComment {
     }
 }
 
+/// Who `bkt` is signed in as, so a comment of one's own can be told from
+/// everyone else's.
+///
+/// GitHub answers that question itself — every comment in GraphQL carries
+/// `viewerCanUpdate` — and Bitbucket has nothing of the kind on either flavour,
+/// so the account has to be looked up and matched by hand. Cloud gives an
+/// account id, which is what a comment carries too; Data Center has only the
+/// handle, which is what its comments carry.
+///
+/// Read once per checkout and kept: one answer covers every comment on every
+/// pull request in it, and a failed read is not cached, so a `bkt` that was
+/// signed out and back in is picked up on the next conversation.
+actor BitbucketIdentity {
+    static let shared = BitbucketIdentity()
+
+    struct Account: Sendable, Hashable {
+        var accountID: String?
+        var uuid: String?
+        var login: String?
+
+        /// Whether a comment's `user` object is this account. The id is the
+        /// answer wherever there is one; the handle is what Data Center leaves.
+        func owns(_ user: [String: Any]?) -> Bool {
+            guard let user else { return false }
+            if let accountID, !accountID.isEmpty, user["account_id"] as? String == accountID {
+                return true
+            }
+            if let uuid, !uuid.isEmpty, user["uuid"] as? String == uuid {
+                return true
+            }
+            guard let login, !login.isEmpty,
+                  let theirs = BitbucketUser.login(from: user)
+            else { return false }
+            return theirs.caseInsensitiveCompare(login) == .orderedSame
+        }
+    }
+
+    private var accounts: [String: Account] = [:]
+
+    func current(in directory: URL) async -> Account? {
+        let key = directory.path
+        if let known = accounts[key] { return known }
+        guard let account = await Self.read(in: directory) else { return nil }
+        accounts[key] = account
+        return account
+    }
+
+    private static func read(in directory: URL) async -> Account? {
+        // Cloud hands over the whole account, id and all.
+        let cloud = await Shell.run(["bkt", "api", "/2.0/user"], in: directory, timeout: 30)
+        if cloud.isSuccess,
+           let object = try? JSONSerialization.jsonObject(with: Data(cloud.stdout.utf8)) as? [String: Any],
+           object["account_id"] != nil || object["uuid"] != nil {
+            return Account(
+                accountID: object["account_id"] as? String,
+                uuid: object["uuid"] as? String,
+                login: BitbucketUser.login(from: object)
+            )
+        }
+
+        // Data Center has no such endpoint, but `bkt` knows what it signed in
+        // with. This is also where a Cloud token without the `account` scope
+        // lands, and there the handle it gives — the username — is not the
+        // nickname a Cloud comment is signed with, so nothing matches and no
+        // comment offers an edit. That is the same shape of retreat resolution
+        // already makes when GraphQL is out of reach.
+        let status = await Shell.run(["bkt", "auth", "status", "--json"], in: directory, timeout: 30)
+        guard status.isSuccess,
+              let object = try? JSONSerialization.jsonObject(with: Data(status.stdout.utf8)) as? [String: Any],
+              let hosts = object["hosts"] as? [[String: Any]],
+              let login = hosts.compactMap({ $0["username"] as? String }).first(where: { !$0.isEmpty })
+        else { return nil }
+        return Account(login: login)
+    }
+}
+
 extension PullRequestService {
 
     // MARK: - Reading
@@ -260,23 +372,28 @@ extension PullRequestService {
             )
         }
 
-        var inline = await gitHubReviewComments(for: pr, in: directory)
-        await applyGitHubThreads(to: &inline, for: pr, in: directory)
-        items.append(contentsOf: inline)
+        items.append(contentsOf: await gitHubReviewComments(for: pr, in: directory))
+        await applyGitHubThreadsAndEditRights(to: &items, for: pr, in: directory)
 
         return items.sorted { ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast) }
     }
 
-    /// Marks the review comments whose thread has been resolved, and records the
-    /// handle each thread is resolved by.
+    /// Marks the review comments whose thread has been resolved, records the
+    /// handle each thread is resolved by, and says which comments the signed-in
+    /// account is allowed to rewrite.
     ///
-    /// The REST endpoint the comments themselves come from says nothing about
-    /// resolution — it exists only in GraphQL, and only per thread — so this is
-    /// a second call over the same comments. It is allowed to fail: a token
-    /// without the scope, an enterprise host on an older schema, or no `gh` at
-    /// all leaves every thread looking open, which is what the app showed
-    /// before and still reads correctly.
-    private static func applyGitHubThreads(
+    /// All three are GraphQL-only. The REST endpoint the inline comments come
+    /// from says nothing about resolution — it exists per thread, and nowhere
+    /// else — and neither `gh pr view` nor REST will say whether an edit would
+    /// be accepted, which `viewerCanUpdate` answers for every kind of comment at
+    /// once. So one query covers the conversation, the review summaries and the
+    /// inline comments together.
+    ///
+    /// It is allowed to fail: a token without the scope, an enterprise host on
+    /// an older schema, or no `gh` at all leaves every thread looking open and
+    /// nothing editable, which is what the app showed before and still reads
+    /// correctly.
+    private static func applyGitHubThreadsAndEditRights(
         to comments: inout [PullRequestComment],
         for pr: PullRequest,
         in directory: URL
@@ -289,8 +406,11 @@ extension PullRequestService {
         // so the names are passed as variables.
         let query = "query($owner:String!,$repo:String!,$number:Int!)"
             + "{repository(owner:$owner,name:$repo)"
-            + "{pullRequest(number:$number){reviewThreads(first:100){nodes"
-            + "{id isResolved comments(first:100){nodes{databaseId}}}}}}}"
+            + "{pullRequest(number:$number){"
+            + "comments(first:100){nodes{id viewerCanUpdate}}"
+            + "reviews(first:100){nodes{id viewerCanUpdate}}"
+            + "reviewThreads(first:100){nodes"
+            + "{id isResolved comments(first:100){nodes{databaseId viewerCanUpdate}}}}}}}"
         let result = await GitHubCLI.run(
             ["api", "graphql",
              "-f", "query=\(query)",
@@ -305,11 +425,25 @@ extension PullRequestService {
         struct Response: Decodable {
             struct Root: Decodable { let repository: Repository? }
             struct Repository: Decodable { let pullRequest: PullRequestNode? }
-            struct PullRequestNode: Decodable { let reviewThreads: Threads? }
+            struct PullRequestNode: Decodable {
+                let comments: Nodes?
+                let reviews: Nodes?
+                let reviewThreads: Threads?
+            }
+            /// A conversation comment or a review summary: the node id the
+            /// mutation names, and whether it would take one.
+            struct Nodes: Decodable { let nodes: [Node]? }
+            struct Node: Decodable {
+                let id: String?
+                let viewerCanUpdate: Bool?
+            }
             struct Threads: Decodable { let nodes: [Thread]? }
             struct Thread: Decodable {
                 struct Comments: Decodable { let nodes: [Comment]? }
-                struct Comment: Decodable { let databaseId: Int? }
+                struct Comment: Decodable {
+                    let databaseId: Int?
+                    let viewerCanUpdate: Bool?
+                }
                 let id: String?
                 let isResolved: Bool?
                 let comments: Comments?
@@ -318,22 +452,40 @@ extension PullRequestService {
         }
 
         guard let response = try? JSONDecoder().decode(Response.self, from: Data(result.stdout.utf8)),
-              let threads = response.data?.repository?.pullRequest?.reviewThreads?.nodes
+              let pullRequest = response.data?.repository?.pullRequest
         else { return }
 
-        var byCommentID: [String: (token: String, isResolved: Bool)] = [:]
-        for thread in threads {
+        // Keyed the way the loaders above spelled the ids, so each comment finds
+        // its own row whatever kind it is.
+        var threadByCommentID: [String: (token: String, isResolved: Bool)] = [:]
+        var editableByCommentID: [String: PullRequestComment.EditTarget] = [:]
+
+        for node in pullRequest.comments?.nodes ?? [] {
+            guard let id = node.id, node.viewerCanUpdate == true else { continue }
+            editableByCommentID["issue-\(id)"] = .gitHubIssueComment(id)
+        }
+        for node in pullRequest.reviews?.nodes ?? [] {
+            guard let id = node.id, node.viewerCanUpdate == true else { continue }
+            editableByCommentID["review-\(id)"] = .gitHubReview(id)
+        }
+        for thread in pullRequest.reviewThreads?.nodes ?? [] {
             guard let token = thread.id else { continue }
             for comment in thread.comments?.nodes ?? [] {
                 guard let databaseId = comment.databaseId else { continue }
-                byCommentID["review-comment-\(databaseId)"] = (token, thread.isResolved ?? false)
+                let key = "review-comment-\(databaseId)"
+                threadByCommentID[key] = (token, thread.isResolved ?? false)
+                if comment.viewerCanUpdate == true {
+                    editableByCommentID[key] = .gitHubReviewComment("\(databaseId)")
+                }
             }
         }
 
         for index in comments.indices {
-            guard let thread = byCommentID[comments[index].id] else { continue }
-            comments[index].resolveToken = thread.token
-            comments[index].isResolved = thread.isResolved
+            if let thread = threadByCommentID[comments[index].id] {
+                comments[index].resolveToken = thread.token
+                comments[index].isResolved = thread.isResolved
+            }
+            comments[index].editTarget = editableByCommentID[comments[index].id]
         }
     }
 
@@ -455,6 +607,10 @@ extension PullRequestService {
         for pr: PullRequest,
         in directory: URL
     ) async throws -> [PullRequestComment] {
+        // Which of these are the reader's own, and so may be rewritten. Nil
+        // where `bkt` would not say; then nothing offers an edit.
+        let account = await BitbucketIdentity.shared.current(in: directory)
+
         // Bitbucket Cloud: `bkt pr view` carries no comments at all, so go to
         // the REST API directly.
         if !pr.repositoryOwner.isEmpty, !pr.repositorySlug.isEmpty {
@@ -468,7 +624,7 @@ extension PullRequestService {
             if result.isSuccess,
                let object = try? JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any],
                let values = object["values"] as? [[String: Any]] {
-                return decodeCloudComments(values)
+                return decodeCloudComments(values, ownedBy: account)
             }
         }
 
@@ -493,13 +649,16 @@ extension PullRequestService {
             guard let object = try? JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) else {
                 continue
             }
-            return decodeBitbucketComments(from: object)
+            return decodeBitbucketComments(from: object, ownedBy: account)
         }
         throw PullRequestError.commandFailed(lastMessage)
     }
 
     /// Decodes the fixed shape of Bitbucket Cloud's `/pullrequests/N/comments`.
-    private static func decodeCloudComments(_ values: [[String: Any]]) -> [PullRequestComment] {
+    private static func decodeCloudComments(
+        _ values: [[String: Any]],
+        ownedBy account: BitbucketIdentity.Account?
+    ) -> [PullRequestComment] {
         values.enumerated().compactMap { index, item in
             if item["deleted"] as? Bool == true { return nil }
             if item["pending"] as? Bool == true { return nil }
@@ -535,6 +694,9 @@ extension PullRequestService {
                 author: author,
                 avatarURL: AvatarURL.hosted(avatar as? String),
                 body: body,
+                // Only when the name put in place of an account id made it
+                // something other than what the host holds.
+                rawBody: body == raw ? nil : raw,
                 createdAt: (item["created_on"] as? String).flatMap(parseTimestamp),
                 kind: .comment,
                 path: inline?["path"] as? String,
@@ -543,7 +705,12 @@ extension PullRequestService {
                 replyToken: identifier,
                 isResolved: resolution != nil,
                 resolvedBy: BitbucketUser.name(from: resolution?["user"] as? [String: Any]),
-                resolveToken: identifier
+                resolveToken: identifier,
+                // Cloud numbers a comment's revisions nowhere; only Data Center
+                // asks for the version an edit replaces.
+                editTarget: account?.owns(user) == true
+                    ? .bitbucket(id: identifier, version: nil)
+                    : nil
             )
         }
         .sorted { ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast) }
@@ -552,7 +719,10 @@ extension PullRequestService {
     /// Walks the JSON for any comment-shaped object. Data Center nests replies
     /// in a `comments` array on the parent, so descend into those explicitly
     /// and carry the parent's id down.
-    private static func decodeBitbucketComments(from object: Any) -> [PullRequestComment] {
+    private static func decodeBitbucketComments(
+        from object: Any,
+        ownedBy account: BitbucketIdentity.Account?
+    ) -> [PullRequestComment] {
         var found: [PullRequestComment] = []
         var seen: Set<String> = []
 
@@ -614,6 +784,7 @@ extension PullRequestService {
                 author: author,
                 avatarURL: AvatarURL.hosted(avatar),
                 body: content,
+                rawBody: content == raw ? nil : raw,
                 createdAt: timestamp.flatMap(parseTimestamp),
                 kind: .comment,
                 path: path,
@@ -622,7 +793,12 @@ extension PullRequestService {
                 replyToken: dictionary["id"].map { "\($0)" },
                 isResolved: isResolved,
                 resolvedBy: BitbucketUser.name(from: resolver),
-                resolveToken: dictionary["id"].map { "\($0)" }
+                resolveToken: dictionary["id"].map { "\($0)" },
+                // Data Center takes an edit only against the revision it is
+                // replacing, and counts them here.
+                editTarget: account?.owns(userDictionary) == true
+                    ? .bitbucket(id: identifier, version: dictionary["version"] as? Int)
+                    : nil
             )
         }
 
@@ -879,6 +1055,146 @@ extension PullRequestService {
         case .unknown:
             throw PullRequestError.unsupportedHost
         }
+    }
+
+    /// Replaces what a comment says.
+    ///
+    /// `comment` has to be one the conversation was loaded with: the handle each
+    /// host wants rides on it, and only the loader knew which kind of comment it
+    /// was reading — see ``PullRequestComment/EditTarget``.
+    static func updateComment(
+        _ body: String,
+        of comment: PullRequestComment,
+        on pr: PullRequest,
+        in directory: URL
+    ) async throws {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw PullRequestError.commandFailed(
+                "A comment cannot be emptied. Delete it on the host instead."
+            )
+        }
+        guard let target = comment.editTarget else {
+            throw PullRequestError.editUnsupported
+        }
+
+        switch target {
+        case .gitHubIssueComment(let nodeID):
+            try await updateGitHubNode(
+                nodeID,
+                to: trimmed,
+                mutation: "updateIssueComment",
+                idField: "id",
+                in: directory
+            )
+
+        case .gitHubReview(let nodeID):
+            try await updateGitHubNode(
+                nodeID,
+                to: trimmed,
+                mutation: "updatePullRequestReview",
+                idField: "pullRequestReviewId",
+                in: directory
+            )
+
+        case .gitHubReviewComment(let id):
+            // The one kind with a REST id in hand, and so the one that needs no
+            // GraphQL at all.
+            let result = await GitHubCLI.run(
+                ["api", "--method", "PATCH",
+                 "repos/{owner}/{repo}/pulls/comments/\(id)",
+                 "-f", "body=\(trimmed)"],
+                in: directory,
+                timeout: 60
+            )
+            guard result.isSuccess else {
+                throw PullRequestError.commandFailed(result.failureMessage)
+            }
+
+        case .bitbucket(let id, let version):
+            try await updateBitbucketComment(
+                trimmed,
+                id: id,
+                version: version,
+                on: pr,
+                in: directory
+            )
+        }
+    }
+
+    /// One of GitHub's two "change the text" mutations, which differ only in
+    /// what they call the id. Neither has a REST equivalent that takes what is
+    /// in hand: `gh pr view` reports a conversation comment and a review by
+    /// their GraphQL node ids, and those are exactly what GraphQL wants.
+    private static func updateGitHubNode(
+        _ nodeID: String,
+        to body: String,
+        mutation: String,
+        idField: String,
+        in directory: URL
+    ) async throws {
+        let query = "mutation($id:ID!,$body:String!){"
+            + "\(mutation)(input:{\(idField):$id,body:$body}){clientMutationId}}"
+        let result = await GitHubCLI.run(
+            ["api", "graphql",
+             "-f", "query=\(query)",
+             "-f", "id=\(nodeID)",
+             "-f", "body=\(body)"],
+            in: directory,
+            timeout: 60
+        )
+        guard result.isSuccess else {
+            throw PullRequestError.commandFailed(result.failureMessage)
+        }
+    }
+
+    /// The same edit on both Bitbucket flavours: Cloud takes the new Markdown
+    /// under `content.raw`, Data Center takes it as `text` and insists on the
+    /// version it is replacing. Tried in that order, like every other write here.
+    private static func updateBitbucketComment(
+        _ body: String,
+        id: String,
+        version: Int?,
+        on pr: PullRequest,
+        in directory: URL
+    ) async throws {
+        guard !pr.repositoryOwner.isEmpty, !pr.repositorySlug.isEmpty else {
+            throw PullRequestError.commandFailed(
+                "This repository's workspace and slug are unknown, so the comment cannot be edited."
+            )
+        }
+
+        var dataCenter: [String: Any] = ["text": body]
+        if let version { dataCenter["version"] = version }
+
+        let attempts: [(path: String, payload: [String: Any])] = [
+            (
+                "/2.0/repositories/\(pr.repositoryOwner)/\(pr.repositorySlug)"
+                    + "/pullrequests/\(pr.number)/comments/\(id)",
+                ["content": ["raw": body]]
+            ),
+            (
+                "/rest/api/1.0/projects/\(pr.repositoryOwner)/repos/\(pr.repositorySlug)"
+                    + "/pull-requests/\(pr.number)/comments/\(id)",
+                dataCenter
+            ),
+        ]
+
+        var lastMessage = "Could not save the comment."
+        for attempt in attempts {
+            guard let data = try? JSONSerialization.data(withJSONObject: attempt.payload) else {
+                continue
+            }
+            let result = await Shell.run(
+                ["bkt", "api", attempt.path, "--method", "PUT",
+                 "--input", String(decoding: data, as: UTF8.self)],
+                in: directory,
+                timeout: 60
+            )
+            if result.isSuccess { return }
+            lastMessage = result.failureMessage
+        }
+        throw PullRequestError.commandFailed(lastMessage)
     }
 
     /// Settles a thread, or opens it again. `comment` is the thread's root, the

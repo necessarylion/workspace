@@ -149,6 +149,7 @@ enum PullRequestError: LocalizedError {
     case commandFailed(String)
     case unsupportedHost
     case replyUnsupported
+    case editUnsupported
 
     var errorDescription: String? {
         switch self {
@@ -160,6 +161,8 @@ enum PullRequestError: LocalizedError {
             "This repository's remote is neither GitHub nor Bitbucket."
         case .replyUnsupported:
             "This host cannot thread a reply onto that comment."
+        case .editUnsupported:
+            "That comment cannot be edited from here."
         }
     }
 }

@@ -781,6 +781,15 @@ struct PullRequestDetailView: View {
                                 project: project,
                                 pr: pr
                             )
+                        },
+                        edit: { comment, body in
+                            await store.updateComment(
+                                body,
+                                of: comment,
+                                on: item,
+                                project: project,
+                                pr: pr
+                            )
                         }
                     )
                 )
@@ -1282,6 +1291,8 @@ struct ConversationView<Header: View>: View {
 
     /// The comment whose inline reply box is open, if any.
     @State private var replyingTo: PullRequestComment?
+    /// The comment being rewritten, if any.
+    @State private var editing: PullRequestComment?
 
     /// Who an `@` names here, in the composer and in every reply box under it.
     private var mentions: MentionSource {
@@ -1333,6 +1344,7 @@ struct ConversationView<Header: View>: View {
                             node: thread,
                             depth: 0,
                             replyingTo: $replyingTo,
+                            editing: $editing,
                             isPosting: item.isPostingComment,
                             mentions: mentions,
                             onReply: { parent, body in
@@ -1342,6 +1354,15 @@ struct ConversationView<Header: View>: View {
                                 await store.setCommentResolved(
                                     resolved,
                                     for: comment,
+                                    on: item,
+                                    project: project,
+                                    pr: pr
+                                )
+                            },
+                            onEdit: { comment, body in
+                                await store.updateComment(
+                                    body,
+                                    of: comment,
                                     on: item,
                                     project: project,
                                     pr: pr
@@ -1377,7 +1398,10 @@ struct ConversationView<Header: View>: View {
         // The same argument for the reply box that is open under a comment. It
         // is held here rather than inside the composer, so it can simply be put
         // down; the comment it names is not on the pull request that arrived.
-        .onChange(of: item.id) { replyingTo = nil }
+        .onChange(of: item.id) {
+            replyingTo = nil
+            editing = nil
+        }
         // The pane's own colour, which the diff and the commit list each paint
         // for themselves and the conversation did not. It is the same shade the
         // viewer already draws behind all three, so nothing looks different at
@@ -1489,6 +1513,9 @@ struct CommentThread: View {
     let node: PullRequestCommentNode
     let depth: Int
     @Binding var replyingTo: PullRequestComment?
+    /// The comment whose text is being rewritten. Shared across the whole
+    /// conversation like `replyingTo`, so opening one box closes the last.
+    @Binding var editing: PullRequestComment?
     let isPosting: Bool
     var mentions: MentionSource = .none
     /// Drawn in the diff rather than in the conversation, where there is less
@@ -1497,6 +1524,8 @@ struct CommentThread: View {
     let onReply: (PullRequestComment, String) async -> Void
     /// Settles the thread, or opens it again. Nil where the host gave no way.
     var onResolve: ((PullRequestComment, Bool) async -> Void)?
+    /// Replaces what a comment says. Nil where nothing here may be edited.
+    var onEdit: ((PullRequestComment, String) async -> Void)?
 
     /// Whether a settled thread has been opened up to be read. It is deliberately
     /// not remembered: a reload brings the conversation back the way the host
@@ -1540,9 +1569,16 @@ struct CommentThread: View {
             comment: node.comment,
             replyCount: depth == 0 ? node.totalReplies : 0,
             isReplying: replyingTo == node.comment,
+            isEditing: isEditing,
             isBusy: isPosting,
+            mentions: mentions,
             onReplyTapped: openReply,
-            onResolveTapped: resolveAction
+            onResolveTapped: resolveAction,
+            onEditTapped: editAction,
+            onEditCancelled: { setEditing(nil) },
+            onEditSubmitted: onEdit.map { edit in
+                { body in await edit(node.comment, body) }
+            }
         )
 
         if replyingTo == node.comment {
@@ -1565,11 +1601,13 @@ struct CommentThread: View {
                         node: reply,
                         depth: depth + 1,
                         replyingTo: $replyingTo,
+                        editing: $editing,
                         isPosting: isPosting,
                         mentions: mentions,
                         isInline: isInline,
                         onReply: onReply,
-                        onResolve: onResolve
+                        onResolve: onResolve,
+                        onEdit: onEdit
                     )
                 }
             }
@@ -1598,12 +1636,41 @@ struct CommentThread: View {
         } else {
             withAnimation(ViewerMotion.contentChange) { replyingTo = next }
         }
+        if next != nil { setEditing(nil) }
     }
 
     /// What the Resolve button does, or nil where it is not drawn at all.
     private var resolveAction: (() -> Void)? {
         guard depth == 0, node.comment.canResolve, let onResolve else { return nil }
         return { Task { await onResolve(node.comment, !node.isResolved) } }
+    }
+
+    private var isEditing: Bool { editing == node.comment }
+
+    /// What the Edit button does, or nil when this comment is not the reader's
+    /// to change.
+    private var editAction: (() -> Void)? {
+        guard node.comment.canEdit, onEdit != nil else { return nil }
+        return {
+            setEditing(isEditing ? nil : node.comment)
+            replyingTo = nil
+        }
+    }
+
+    /// Opening the box is the same transaction question as opening a reply box —
+    /// see ``openReply``.
+    ///
+    /// Nothing closes it on the way back: an edit that lands reloads the
+    /// conversation, and the comment that arrives says something else, so it is
+    /// no longer the one `editing` names. An edit the host refused leaves the
+    /// comment exactly as it was, and the box stays open with the text still in
+    /// it — which is the whole point of not clearing it here.
+    private func setEditing(_ comment: PullRequestComment?) {
+        if isInline {
+            editing = comment
+        } else {
+            withAnimation(ViewerMotion.contentChange) { editing = comment }
+        }
     }
 }
 
@@ -2271,12 +2338,22 @@ struct CommentBubble: View {
     /// Shown on a thread root so a collapsed-looking thread still reads as one.
     var replyCount: Int = 0
     var isReplying = false
+    /// Whether the box that rewrites this comment is open in place of its text.
+    var isEditing = false
     /// A write is already on its way to the host, so nothing else may be asked.
     var isBusy = false
+    /// Who an `@` names in that box.
+    var mentions: MentionSource = .none
     var onReplyTapped: (() -> Void)?
     /// Settles the thread this comment heads, or opens it again. Nil where the
     /// host offers no handle for it, and then no button is drawn.
     var onResolveTapped: (() -> Void)?
+    /// Opens the box, or puts it away again. Nil where this comment is not the
+    /// reader's to change.
+    var onEditTapped: (() -> Void)?
+    var onEditCancelled: (() -> Void)?
+    /// Sends the rewritten text. The box is drawn only when this is given.
+    var onEditSubmitted: ((String) async -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -2319,7 +2396,21 @@ struct CommentBubble: View {
                     .truncationMode(.head)
             }
 
-            if comment.body.isEmpty {
+            if isEditing, let onEditSubmitted {
+                // In place of the text rather than under it: what is in the box
+                // *is* the comment, and showing both reads as two of them. The
+                // header above still says whose it is and when it was written.
+                CommentComposer(
+                    prompt: "Edit this comment…  @ to name someone",
+                    sendTitle: "Save",
+                    sendSymbol: "checkmark",
+                    isPosting: isBusy,
+                    mentions: mentions,
+                    startingFrom: comment.editableBody,
+                    onCancel: { onEditCancelled?() },
+                    onSend: onEditSubmitted
+                )
+            } else if comment.body.isEmpty {
                 Text("(no message)")
                     .font(.callout)
                     .foregroundStyle(.tertiary)
@@ -2328,7 +2419,9 @@ struct CommentBubble: View {
                     .font(.callout)
             }
 
-            if (comment.canReply && onReplyTapped != nil) || onResolveTapped != nil {
+            // While the box is open it carries its own Cancel and Save, and a
+            // row of other verbs under it is only in the way.
+            if !isEditing, hasActions {
                 HStack(spacing: 12) {
                     if comment.canReply, let onReplyTapped {
                         Button(action: onReplyTapped) {
@@ -2341,6 +2434,18 @@ struct CommentBubble: View {
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
                         .pointerCursor()
+                    }
+
+                    if comment.canEdit, let onEditTapped {
+                        Button(action: onEditTapped) {
+                            Label("Edit", systemImage: "pencil")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .disabled(isBusy)
+                        .pointerCursor(!isBusy)
+                        .help("Change what this comment says")
                     }
 
                     if let onResolveTapped {
@@ -2368,6 +2473,13 @@ struct CommentBubble: View {
         .padding(11)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.22), in: RoundedRectangle(cornerRadius: 9))
+    }
+
+    /// Whether anything at all can be done to this comment from here.
+    private var hasActions: Bool {
+        (comment.canReply && onReplyTapped != nil)
+            || (comment.canEdit && onEditTapped != nil)
+            || onResolveTapped != nil
     }
 
     private var tint: Color {
