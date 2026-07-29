@@ -39,6 +39,12 @@ struct DiffView: View {
     @State private var colouredFiles: [DiffFile.ID: DiffFile] = [:]
     /// The parse `colouredFiles` was built from; anything older is thrown away.
     @State private var colouredRevision: UUID?
+    /// Set the moment a different file is picked out of the index, and cleared
+    /// on the pass after — which is what gives the file arriving something to
+    /// fade up from. It is one opacity on the whole scrolling body: the rows
+    /// are never animated, because a large diff has thousands of them and the
+    /// thing that changed is the pane, not the lines.
+    @State private var isSwappingFile = false
 
     /// A flattened diff, together with the parse it was built from.
     ///
@@ -94,7 +100,12 @@ struct DiffView: View {
         .onChange(of: diff.revision, initial: true) { rebuild() }
         .onChange(of: collapsedFiles) { rebuild() }
         .onChange(of: composing) { rebuild() }
-        .onChange(of: currentFile) { rebuild() }
+        .onChange(of: currentFile) {
+            rebuild()
+            // The fade is the whole of the motion here, so Reduce Motion means
+            // no fade rather than a shorter one — the file simply changes.
+            if !ViewerMotion.isReduced { isSwappingFile = true }
+        }
         // The lines that carry a thread, not the threads themselves: flattening
         // only asks which lines to leave room under, and comparing the comment
         // trees instead walked every reply on this pull request each time the
@@ -153,6 +164,18 @@ struct DiffView: View {
                     }
                 }
                 .background(Color(nsColor: AppColors.viewerBackground))
+            }
+            // Picking a file replaces every row under an offset that is about
+            // to be thrown to the top anyway, which read as a flicker. Two
+            // steps, because there is no transition to hang this on: the body
+            // is drawn at nothing on the pass that carries the new file, and
+            // the pass after brings it up. The index beside it and the bar
+            // above are outside this, so the only thing that moves is the part
+            // that changed.
+            .opacity(isSwappingFile ? 0 : 1)
+            .task(id: isSwappingFile) {
+                guard isSwappingFile else { return }
+                withAnimation(ViewerMotion.contentChange) { isSwappingFile = false }
             }
         }
     }

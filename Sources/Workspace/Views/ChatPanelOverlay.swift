@@ -59,11 +59,12 @@ struct ChatPanelOverlay: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(
-                ChatPanelClickMonitor(
+                WindowClickMonitor(
                     // Open panels only. A folded one has no rectangle to name —
                     // its bar is on a strip that scrolls — and it needs none:
                     // nothing there swallows a click the way a live terminal
-                    // does, so the strip's own gestures are enough.
+                    // does, so the strip's own gestures are enough, and the tap
+                    // that brings one back is what focuses it.
                     panels: panels
                         .filter { !$0.isCollapsed }
                         .map { ($0, store.chatPanelFrame(of: $0).onScreenRect) }
@@ -306,7 +307,8 @@ private struct ChatDockBar: View {
     }
 }
 
-/// Raises the panel that was clicked in, whatever was clicked.
+/// What a click in this window means: which conversation comes to the front,
+/// and where the keyboard goes.
 ///
 /// A click on the title bar is a gesture this app owns and could act on
 /// directly; a click **in the terminal** is not — `GhosttySurfaceView` answers
@@ -315,7 +317,16 @@ private struct ChatDockBar: View {
 /// way the panel underneath can be brought forward by clicking the part of it
 /// you can see. Nothing is ever swallowed: the event carries on to the terminal
 /// exactly as it would have.
-private struct ChatPanelClickMonitor: NSViewRepresentable {
+///
+/// **Focus is settled here too, and in one place on purpose.** Raising a panel
+/// and putting the cursor in it are the same click and the same hit test, and
+/// two monitors both reaching for first responder in the same turn of the
+/// runloop would be a race whose loser is whatever the user just clicked. So
+/// this one answers for the whole window rather than only for the overlay it is
+/// attached to: it is what releases the keys from the **centre pane's** terminal
+/// as well, when a click lands on the dashboard or a file or a repository.
+/// ``TerminalFocus`` has the moves; this has the policy.
+private struct WindowClickMonitor: NSViewRepresentable {
     /// Each panel with the rectangle it is drawn in — which is its own frame, or
     /// its bar on the dock when it is folded away.
     let panels: [(panel: ChatPanel, rect: CGRect)]
@@ -370,7 +381,7 @@ private struct ChatPanelClickMonitor: NSViewRepresentable {
         private func startWatching() {
             guard monitor == nil else { return }
             monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-                self?.raisePanel(under: event)
+                self?.settle(event)
                 return event
             }
         }
@@ -381,18 +392,39 @@ private struct ChatPanelClickMonitor: NSViewRepresentable {
             self.monitor = nil
         }
 
-        private func raisePanel(under event: NSEvent) {
+        /// One click, three answers.
+        ///
+        /// There is no `panels.count > 1` short cut out here any more, and there
+        /// cannot be: releasing the keyboard has to work with one conversation
+        /// open and with none at all. Raising is still free in that case —
+        /// ``WorkspaceStore/raiseChatPanel(_:)`` is a no-op for a panel already
+        /// in front, which is the guard that comment is about.
+        private func settle(_ event: NSEvent) {
             // One monitor sees every window's clicks; Settings and any sheet are
             // somebody else's business.
-            guard let window, event.window === window, panels.count > 1 else { return }
+            guard let window, event.window === window else { return }
+            let terminal = TerminalFocus.surface(under: event.locationInWindow, in: window)
             let point = convert(event.locationInWindow, from: nil)
             // Front to back, so a click where two panels overlap raises the one
             // that was actually clicked rather than the one behind it.
-            guard let hit = panels
+            let hit = panels
                 .sorted(by: { $0.panel.depth > $1.panel.depth })
                 .first(where: { $0.rect.contains(point) })
-            else { return }
-            raise(hit.panel)
+
+            if let hit {
+                raise(hit.panel)
+                // The conversation itself needs nothing from us — the surface
+                // takes the keyboard in its own `mouseDown`. The rest of the
+                // panel is what had no answer: its title bar, its edges, the gap
+                // beside its buttons. Clicking any of those is still a person
+                // saying which conversation they are in.
+                if terminal == nil { TerminalFocus.give(to: hit.panel.session) }
+            } else if terminal == nil {
+                // Nowhere near a terminal, and something else is about to be
+                // clicked. Whether that leaves the keys anywhere is its own
+                // business; what matters is that they stop going to Claude.
+                TerminalFocus.release(in: window)
+            }
         }
     }
 }

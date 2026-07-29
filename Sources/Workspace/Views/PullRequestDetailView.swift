@@ -58,6 +58,19 @@ struct PullRequestDetailView: View {
                     case .commits: commitsTab
                     }
                 }
+                // A tab is a lighter thing than opening a pull request: the two
+                // bars above and the panel beside stay exactly where they are,
+                // so the arriving tab only fades up rather than rising the way
+                // a whole new item does.
+                //
+                // The animation is scoped to this view rather than put on the
+                // row on purpose. The panel comes and goes with Details, and an
+                // animated row would drag the width of whatever is open through
+                // every frame of that — a diff re-laying a thousand rows to end
+                // up where it already was. Here the row snaps to its new widths
+                // at once and only the contents fade.
+                .transition(ViewerMotion.contentArrival)
+                .animation(ViewerMotion.contentChange, value: item.pullRequestTab)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 if item.pullRequestTab == .details {

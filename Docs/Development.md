@@ -157,6 +157,9 @@ Sources/Workspace/
   Support/AuthorAvatar.swift  author pictures: where to find one, cache, disc view
   Support/WindowKeyMonitor.swift  keys the terminal would otherwise eat (⌃⇥, ⎋)
   Support/EscapeKey.swift     ⎋ = close, and who keeps ⎋ for themselves
+  Support/InitialFocus.swift  a window that opens with the keyboard in nobody's field
+  Support/TerminalFocus.swift  the keys into a conversation you click, and out of one you leave
+  Support/ViewerMotion.swift  how long a screen takes to arrive, in one place
   Support/PullRequestReference.swift  finding a `#123` written in a commit message
   Support/FileOperations.swift  what the Files tab does to disk: create, copy, move, rename, trash
   Support/MarkdownPDF.swift   the preview as a PDF: measure, render, cut into sheets

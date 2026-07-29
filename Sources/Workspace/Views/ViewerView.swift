@@ -29,22 +29,62 @@ struct ViewerView: View {
         }
     }
 
+    /// What the pane is showing, as one value. The transition below fires on
+    /// any change to it — a different item, or the dashboard taking the pane
+    /// back — and on nothing else, so a diff reloading or a comment landing
+    /// still redraws in place.
+    private var openItemKey: String {
+        guard let item = store.current, !store.showsDashboard else { return "dashboard" }
+        return item.id
+    }
+
     /// The open item, or the dashboard when there is none. It carries the
     /// pane's colour itself — the window's own background sits below it.
     private var mainContent: some View {
         VStack(spacing: 0) {
-            if let item = store.current, !store.showsDashboard {
-                content(item)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // Only an editor has a status bar. For everything else the row
-                // had nothing to say but the repository's name, which the
-                // sidebar and the breadcrumb both already show.
-                if let document = item.document, case .text = document.content {
-                    Divider()
-                    StatusBar(document: document)
+            // Stacked rather than laid out one after another: what leaves and
+            // what arrives share the pane for the length of the fade, and in a
+            // column they would briefly be two panes instead of one. Both fill
+            // it, so nothing is resized on the way through.
+            ZStack {
+                if let item = store.current, !store.showsDashboard {
+                    content(item)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        // Two files are two screens, not one screen with
+                        // different text in it — without this, opening a file
+                        // over a file changes no identity, and there is nothing
+                        // for a transition to happen to.
+                        //
+                        // The key is the item's, which is its path, hash or
+                        // number: it does not turn over when a diff reloads
+                        // under the reader or a comment lands, so nothing that
+                        // deliberately keeps its place loses it. What it does
+                        // rebuild is a second pull request or a second diff,
+                        // where the view used to be handed the new item
+                        // instead. Both are keyed to the item they draw and
+                        // build from state cached on it, so that is the same
+                        // work either way — and ``CodeEditorView`` already
+                        // keyed itself on the file's address for its own
+                        // reasons, which is the one case that had to stay
+                        // exactly as it was.
+                        .id(item.id)
+                        .transition(ViewerMotion.itemArrival(isTerminal: item.isTerminal))
+                } else {
+                    WelcomeView()
+                        .transition(ViewerMotion.itemArrival(isTerminal: false))
                 }
-            } else {
-                WelcomeView()
+            }
+            .animation(ViewerMotion.itemChange, value: openItemKey)
+
+            // Only an editor has a status bar. For everything else the row had
+            // nothing to say but the repository's name, which the sidebar and
+            // the breadcrumb both already show. It is outside the animation on
+            // purpose: the row appearing shortens the pane above it, and a
+            // height that moves is a text view relaid every frame.
+            if !store.showsDashboard, let document = store.current?.document,
+               case .text = document.content {
+                Divider()
+                StatusBar(document: document)
             }
         }
         .background(Color(nsColor: AppColors.viewerBackground))

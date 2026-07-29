@@ -2408,6 +2408,10 @@ final class WorkspaceStore {
     /// Ends one panel's conversation — the ✕, and nothing else. Being replaced
     /// on screen is not this: see ``chats``.
     func closeChatPanel(_ panel: ChatPanel) {
+        // Same reason as folding, one step further: the surface is about to be
+        // torn down, and a first responder that has been closed is a window with
+        // nowhere for the keys to go.
+        TerminalFocus.relinquish(panel.session)
         panel.remember()
         panel.session.terminate()
         withAnimation(Self.chatPanelMotion) {
@@ -2421,7 +2425,7 @@ final class WorkspaceStore {
     /// **Nothing happens at all when it is already in front**, and that guard
     /// has to be out here rather than inside ``raise(_:)``.
     ///
-    /// `ChatPanelClickMonitor` calls this on *every* left mouse-down in the
+    /// `WindowClickMonitor` calls this on *every* left mouse-down in the
     /// window, which is what lets a click anywhere in a panel bring it forward.
     /// With the check inside `raise`, the mutation was correctly skipped but
     /// `withAnimation` had already opened a transaction — so every click on the
@@ -2442,6 +2446,15 @@ final class WorkspaceStore {
 
     /// The same, unfolded: what the Claude list, a banner and a resumed
     /// conversation all want, since each of them is a request to *read* it.
+    ///
+    /// And to type in it, which is why the keyboard comes with it. Every way
+    /// into this — the bar on the dock, the Claude list, a banner — is somebody
+    /// asking for a conversation by name, and landing them in it with the cursor
+    /// still somewhere else would make the next thing they do a click they
+    /// should not have had to make.
+    ///
+    /// The panel's terminal never left the window (see ``chats``), so there is
+    /// nothing to wait for: the surface is mounted and can take the keys now.
     func unfoldChatPanel(_ panel: ChatPanel) {
         withAnimation(Self.chatPanelMotion) {
             panel.isCollapsed = false
@@ -2453,6 +2466,7 @@ final class WorkspaceStore {
             panel.remember()
             raise(panel)
         }
+        TerminalFocus.give(to: panel.session)
     }
 
     private func raise(_ panel: ChatPanel) {
@@ -2492,6 +2506,13 @@ final class WorkspaceStore {
     /// buy by dropping the movement, and a panel that vanishes rather than
     /// folding gives the reader nothing to follow to the dock.
     func collapseChatPanel(_ panel: ChatPanel) {
+        // Before it goes: the chevron is inside the panel, so the mouse-down
+        // that reached it has just put the keyboard in this very terminal — and
+        // the mouse-up folds the terminal away. Left alone, the conversation
+        // would keep receiving everything typed at a window that no longer shows
+        // it. Only ever this panel's own focus, so folding one while reading
+        // another takes nothing from the one being read.
+        TerminalFocus.relinquish(panel.session)
         withAnimation(Self.chatPanelMotion) {
             panel.isCollapsed = true
             panel.remember()
