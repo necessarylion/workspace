@@ -59,9 +59,6 @@ struct PullRequestComment: Identifiable, Sendable, Hashable {
     /// comment the thread hangs off; `nil` means this thread cannot be resolved
     /// from here and the button is not drawn.
     var resolveToken: String?
-    /// Bitbucket Data Center refuses to write a comment back without the
-    /// version it last read, so it is carried along with the handle.
-    var resolveVersion: Int?
 
     var canReply: Bool { replyToken != nil }
 
@@ -83,19 +80,29 @@ struct DiffLineAnchor: Sendable, Hashable {
 
 /// One comment with its replies, ready to render.
 struct PullRequestCommentNode: Identifiable, Sendable, Hashable {
-    var comment: PullRequestComment
-    var replies: [PullRequestCommentNode] = []
+    let comment: PullRequestComment
+    let replies: [PullRequestCommentNode]
+
+    /// Everything said under this comment, however deep it is nested.
+    ///
+    /// Counted as the tree is built rather than each time it is read: the
+    /// number rides in a bubble's header and in every resolved thread's row,
+    /// both of which are drawn again for reasons that have nothing to do with
+    /// the conversation, and walking the whole subtree on each of those passes
+    /// is a cost that grows with the review.
+    let totalReplies: Int
+
+    init(comment: PullRequestComment, replies: [PullRequestCommentNode] = []) {
+        self.comment = comment
+        self.replies = replies
+        totalReplies = replies.reduce(replies.count) { $0 + $1.totalReplies }
+    }
 
     var id: String { comment.id }
 
     /// Whether the whole thread is settled. The root carries the host's answer,
     /// so a reply never has to be consulted.
     var isResolved: Bool { comment.isResolved }
-
-    /// Everything said under this comment, however deep it is nested.
-    var totalReplies: Int {
-        replies.reduce(replies.count) { $0 + $1.totalReplies }
-    }
 
     /// The first line with anything in it, for a thread shown as one row.
     var preview: String {
@@ -149,6 +156,20 @@ extension PullRequestComment {
         nodes += stranded.compactMap { placed.contains($0.id) ? nil : node(for: $0) }
 
         return nodes
+    }
+
+    /// The thread roots that hang off a line of the diff, keyed by that line.
+    /// A thread whose line is no longer in the diff simply does not appear; it
+    /// is still listed in the conversation, so nothing is lost.
+    static func inlineThreads(
+        in nodes: [PullRequestCommentNode]
+    ) -> [DiffLineAnchor: [PullRequestCommentNode]] {
+        var grouped: [DiffLineAnchor: [PullRequestCommentNode]] = [:]
+        for node in nodes {
+            guard let anchor = node.comment.anchor else { continue }
+            grouped[anchor, default: []].append(node)
+        }
+        return grouped
     }
 }
 
@@ -601,8 +622,7 @@ extension PullRequestService {
                 replyToken: dictionary["id"].map { "\($0)" },
                 isResolved: isResolved,
                 resolvedBy: BitbucketUser.name(from: resolver),
-                resolveToken: dictionary["id"].map { "\($0)" },
-                resolveVersion: dictionary["version"] as? Int
+                resolveToken: dictionary["id"].map { "\($0)" }
             )
         }
 
@@ -893,47 +913,25 @@ extension PullRequestService {
             }
 
         case .bitbucket:
-            guard !pr.repositoryOwner.isEmpty, !pr.repositorySlug.isEmpty else {
-                throw PullRequestError.commandFailed(
-                    "This repository's workspace and slug are unknown, so the thread cannot be resolved."
-                )
+            // `bkt` has the verb itself, and it knows both flavours: Cloud's
+            // resolve endpoint and Data Center's comment state are one command
+            // here. Going to the REST path directly instead is what a 403 was
+            // answering — Cloud's `/resolve` refuses the credential `bkt api`
+            // presents, and `bkt` is the thing that knows how to ask properly.
+            // It wants the thread's own comment, which is the only one this is
+            // ever called with.
+            var arguments = ["bkt", "pr", "comments",
+                             resolved ? "resolve" : "reopen",
+                             "\(pr.number)", token]
+            // The checkout usually says which repository this is, but bkt reads
+            // that from its own context; naming it keeps a context pointing
+            // somewhere else from settling the wrong thread.
+            if !pr.repositorySlug.isEmpty {
+                arguments += ["--repo", pr.repositorySlug]
             }
-
-            // Cloud has an endpoint of its own for it, where the method is the
-            // whole message: PUT settles the thread, DELETE opens it again.
-            let cloud = await Shell.run(
-                ["bkt", "api",
-                 "/2.0/repositories/\(pr.repositoryOwner)/\(pr.repositorySlug)"
-                     + "/pullrequests/\(pr.number)/comments/\(token)/resolve",
-                 "--method", resolved ? "PUT" : "DELETE"],
-                in: directory,
-                timeout: 60
-            )
-            if cloud.isSuccess { return }
-
-            // Data Center instead writes the comment back with a new `state`,
-            // and refuses the write unless it is told which version is being
-            // replaced. Without one there is nothing honest to send, so Cloud's
-            // refusal is what the user is shown.
-            guard let version = comment.resolveVersion,
-                  let data = try? JSONSerialization.data(withJSONObject: [
-                      "state": resolved ? "RESOLVED" : "OPEN",
-                      "version": version,
-                  ])
-            else {
-                throw PullRequestError.commandFailed(cloud.failureMessage)
-            }
-            let dataCenter = await Shell.run(
-                ["bkt", "api",
-                 "/rest/api/1.0/projects/\(pr.repositoryOwner)/repos/\(pr.repositorySlug)"
-                     + "/pull-requests/\(pr.number)/comments/\(token)",
-                 "--method", "PUT",
-                 "--input", String(decoding: data, as: UTF8.self)],
-                in: directory,
-                timeout: 60
-            )
-            guard dataCenter.isSuccess else {
-                throw PullRequestError.commandFailed(dataCenter.failureMessage)
+            let result = await Shell.run(arguments, in: directory, timeout: 60)
+            guard result.isSuccess else {
+                throw PullRequestError.commandFailed(result.failureMessage)
             }
 
         case .unknown:

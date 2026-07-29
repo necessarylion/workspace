@@ -1234,9 +1234,9 @@ final class WorkspaceStore {
         item.isLoadingComments = true
         item.commentError = nil
         do {
-            item.comments = try await PullRequestService.comments(for: pr, in: project.url)
+            item.setComments(try await PullRequestService.comments(for: pr, in: project.url))
         } catch {
-            item.comments = []
+            item.setComments([])
             item.commentError = error.localizedDescription
         }
         item.isLoadingComments = false
@@ -1407,7 +1407,10 @@ final class WorkspaceStore {
         // The tab may have gone back to the list, or on to another commit,
         // while this was in flight — the patch is still worth keeping.
         if let text {
-            item.commitDiffs[commit.sha] = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
+            item.cacheCommitDiff(
+                DiffHighlighter.highlight(await DiffParser.parseInBackground(text)),
+                for: commit.sha
+            )
         } else if item.selectedCommit?.sha == commit.sha {
             item.commitDiffError = "Could not load the changes in \(commit.shortSHA)."
         }

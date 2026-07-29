@@ -13,11 +13,6 @@ struct PullRequestDetailView: View {
     let pr: PullRequest
     let project: Project
 
-    /// How wide the side panel is, in this window. Unlike whether it is open —
-    /// which each pull request remembers for itself — a width is a habit of the
-    /// window rather than of the thing being read.
-    @State private var sidebarWidth: CGFloat = 268
-
     /// The button that was pressed, waiting to be confirmed. Nothing in the
     /// action bar reaches the host until this has been through the sheet — and
     /// one piece of state for all of them keeps it that way, where four separate
@@ -26,24 +21,16 @@ struct PullRequestDetailView: View {
     /// Kept out here so the sheet reopens on the way that was picked last.
     @State private var mergeStrategy: PullRequestMergeStrategy = .squash
 
-    /// The description being written, as Markdown — `nil` while it is only being
-    /// read, which is what tells the two apart. It starts from what the host
-    /// stores rather than from what is on screen, and `isFetchingDescription`
-    /// covers the moment in between.
+    /// The description the editor was opened on, as Markdown — `nil` while it is
+    /// only being read, which is what tells the two apart. It starts from what
+    /// the host stores rather than from what is on screen, and
+    /// `isFetchingDescription` covers the moment in between.
+    ///
+    /// What is *typed* lives in the editor's own state rather than here: a
+    /// keystroke landing on this view would redraw the conversation under it,
+    /// comment by comment, on every letter.
     @State private var descriptionDraft: String?
     @State private var isFetchingDescription = false
-
-    /// Thread roots that hang off a line of the diff, keyed by that line. A
-    /// thread whose line is no longer in the diff simply does not appear here;
-    /// it is still listed in the conversation, so nothing is lost.
-    private var inlineThreads: [DiffLineAnchor: [PullRequestCommentNode]] {
-        var grouped: [DiffLineAnchor: [PullRequestCommentNode]] = [:]
-        for node in PullRequestComment.tree(from: item.comments) {
-            guard let anchor = node.comment.anchor else { continue }
-            grouped[anchor, default: []].append(node)
-        }
-        return grouped
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -74,16 +61,13 @@ struct PullRequestDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 if item.pullRequestTab == .details {
-                    PaneResizer(width: $sidebarWidth, range: 210...420, growsLeftwards: true)
-                    PullRequestSidebar(
+                    PullRequestSidebarPane(
                         item: item,
                         pr: pr,
                         project: project,
                         isOpen: isOpen,
                         onAddReviewers: { pendingAction = .addReviewers }
                     )
-                    .frame(width: sidebarWidth)
-                    .frame(maxHeight: .infinity)
                 }
             }
         }
@@ -231,7 +215,10 @@ struct PullRequestDetailView: View {
                 badge(review, color: review == "Approved" ? .green : .orange)
             }
             approvalsBadge
-            buildsBadge
+            // Its own view, and it is the view that reads the runs: the ticker
+            // behind them writes every ten seconds, and this bar is the top of
+            // the page the conversation hangs under.
+            PullRequestBuildsBadge(item: item) { item.pullRequestTab = .details }
 
             Spacer(minLength: 8)
 
@@ -322,52 +309,6 @@ struct PullRequestDetailView: View {
         if item.reviewers.hasChangesRequested { return .orange }
         if item.reviewers.isFullyApproved { return .green }
         return .secondary
-    }
-
-    /// How CI stands, in one glyph beside the approvals. It is the reason the
-    /// Builds tab could go: the news is in the bar whichever tab is open, and
-    /// clicking it goes to the list — back to Details, where the panel is.
-    /// Nothing is drawn until something has run: an empty badge would only be
-    /// one more thing to read.
-    @ViewBuilder
-    private var buildsBadge: some View {
-        if !item.builds.isEmpty {
-            let state = worstBuildState
-            Button {
-                item.pullRequestTab = .details
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: state.symbol)
-                    Text("\(item.builds.count)")
-                }
-                .font(.caption.weight(.medium))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(state.color.opacity(0.18), in: Capsule())
-                .foregroundStyle(state.color)
-            }
-            .buttonStyle(.plain)
-            .help(buildsHelp)
-            .pointerCursor()
-        }
-    }
-
-    /// The worst news among the runs — a single failure decides the badge, the
-    /// same way it decides whether the pull request can be merged.
-    private var worstBuildState: PullRequestBuild.State {
-        for state in [PullRequestBuild.State.failed, .running, .pending] where
-            item.builds.contains(where: { $0.state == state }) {
-            return state
-        }
-        return item.builds.contains { $0.state == .passed } ? .passed : .unknown
-    }
-
-    private var buildsHelp: String {
-        let names = item.builds
-            .prefix(8)
-            .map { "\($0.name) — \($0.state.title.lowercased())" }
-            .joined(separator: "\n")
-        return "\(item.builds.count) builds on the head commit\n\(names)"
     }
 
     private var approvalsHelp: String {
@@ -653,7 +594,13 @@ struct PullRequestDetailView: View {
                 // down the right now, where it is on screen for the diff too.
 
                 if let draft = descriptionDraft {
-                    descriptionEditor(draft)
+                    PullRequestDescriptionEditor(
+                        initialText: draft,
+                        host: pr.host,
+                        isSaving: item.isRunningPullRequestAction,
+                        onCancel: { descriptionDraft = nil },
+                        onSave: { text in await saveDescription(text) }
+                    )
                 } else if !pr.body.isEmpty {
                     MarkdownText(text: pr.body)
                         .font(.callout)
@@ -693,73 +640,11 @@ struct PullRequestDetailView: View {
         .pointerCursor(!isFetchingDescription)
     }
 
-    /// The description as its Markdown source: what is typed here is what the
-    /// host stores, and the drawn version comes back once it is saved.
-    private func descriptionEditor(_ draft: String) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            TextEditor(text: Binding(
-                get: { descriptionDraft ?? "" },
-                set: { descriptionDraft = $0 }
-            ))
-            .font(.system(.callout, design: .monospaced))
-            .frame(height: editorHeight(for: draft))
-            .scrollContentBackground(.hidden)
-            .padding(6)
-            .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
-            .overlay(alignment: .topLeading) {
-                if draft.isEmpty {
-                    Text("Describe the change, in Markdown…")
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 12)
-                        .allowsHitTesting(false)
-                }
-            }
-
-            HStack(spacing: 8) {
-                Text(pr.host == .github ? "Markdown, saved with gh" : "Markdown, saved with bkt")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Button("Cancel") { descriptionDraft = nil }
-                    .controlSize(.small)
-                    .keyboardShortcut(.cancelAction)
-                    .disabled(item.isRunningPullRequestAction)
-                    .pointerCursor(!item.isRunningPullRequestAction)
-                Button {
-                    Task { await saveDescription(draft) }
-                } label: {
-                    if item.isRunningPullRequestAction {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Label("Save", systemImage: "checkmark")
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(item.isRunningPullRequestAction)
-                // Post belongs to the comment box further down the same page, so
-                // saving takes the app's Save key instead.
-                .shortcut(.save)
-                .pointerCursor(!item.isRunningPullRequestAction)
-                .shortcutHelp("Save the description", .save)
-            }
-        }
-    }
-
     /// Sends the description to the host, and closes the editor once it is
     /// there. A refusal leaves the box open with the text still in it.
     private func saveDescription(_ draft: String) async {
         let saved = await store.updateDescription(draft, on: item, project: project, pr: pr)
         if saved { descriptionDraft = nil }
-    }
-
-    /// How tall the box stands: as tall as what is in it, within reason. A box
-    /// that scrolls inside a page that scrolls is two scrolls fighting for the
-    /// same wheel, so a description of any usual length gets to be one page.
-    private func editorHeight(for draft: String) -> CGFloat {
-        let lines = draft.reduce(1) { $1 == "\n" ? $0 + 1 : $0 }
-        return min(560, max(140, CGFloat(lines) * 17 + 20))
     }
 
     @ViewBuilder
@@ -773,7 +658,7 @@ struct PullRequestDetailView: View {
                 layout: Binding(get: { item.diffLayout }, set: { item.diffLayout = $0 }),
                 selectedFile: Binding(get: { item.diffFile }, set: { item.diffFile = $0 }),
                 comments: DiffComments(
-                    threads: inlineThreads,
+                    threads: item.inlineCommentThreads,
                     isPosting: item.isPostingComment,
                     mentions: MentionSource(
                         people: item.reviewerCandidates,
@@ -1046,6 +931,190 @@ struct PullRequestDetailView: View {
     }
 }
 
+// MARK: - The bar's own pieces
+
+/// How CI stands, in one glyph beside the approvals. It is the reason the
+/// Builds tab could go: the news is in the bar whichever tab is open, and
+/// clicking it goes to the list — back to Details, where the panel is. Nothing
+/// is drawn until something has run: an empty badge would only be one more
+/// thing to read.
+///
+/// A view of its own so that **this** is what reads `builds`. The list is
+/// re-read every ten seconds for as long as the pull request is open, and while
+/// the badge lived in the bar's own body every one of those ticks that found a
+/// job had moved on redrew the page of comments below it.
+struct PullRequestBuildsBadge: View {
+    let item: ViewerItem
+    let onTap: () -> Void
+
+    @ViewBuilder
+    var body: some View {
+        if !item.builds.isEmpty {
+            let state = worstState
+            Button(action: onTap) {
+                HStack(spacing: 3) {
+                    Image(systemName: state.symbol)
+                    Text("\(item.builds.count)")
+                }
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(state.color.opacity(0.18), in: Capsule())
+                .foregroundStyle(state.color)
+            }
+            .buttonStyle(.plain)
+            .help(help)
+            .pointerCursor()
+        }
+    }
+
+    /// The worst news among the runs — a single failure decides the badge, the
+    /// same way it decides whether the pull request can be merged.
+    private var worstState: PullRequestBuild.State {
+        for state in [PullRequestBuild.State.failed, .running, .pending] where
+            item.builds.contains(where: { $0.state == state }) {
+            return state
+        }
+        return item.builds.contains { $0.state == .passed } ? .passed : .unknown
+    }
+
+    private var help: String {
+        let names = item.builds
+            .prefix(8)
+            .map { "\($0.name) — \($0.state.title.lowercased())" }
+            .joined(separator: "\n")
+        return "\(item.builds.count) builds on the head commit\n\(names)"
+    }
+}
+
+/// The side panel, and the seam that sizes it.
+///
+/// One view for the two of them because of what the seam does: a drag writes a
+/// width many times a second, and every one of those writes redraws whatever
+/// view holds it. Held a level up, beside the tab, that was the conversation —
+/// each frame of the drag rebuilding every comment on the pull request. Here
+/// the width reaches nothing but the panel it is the width of.
+struct PullRequestSidebarPane: View {
+    let item: ViewerItem
+    let pr: PullRequest
+    let project: Project
+    let isOpen: Bool
+    let onAddReviewers: () -> Void
+
+    /// How wide the panel is, in this window. Unlike whether it is open — which
+    /// each pull request remembers for itself — a width is a habit of the window
+    /// rather than of the thing being read.
+    @State private var width: CGFloat = 268
+
+    var body: some View {
+        HStack(spacing: 0) {
+            PaneResizer(width: $width, range: 210...420, growsLeftwards: true)
+            PullRequestSidebar(
+                item: item,
+                pr: pr,
+                project: project,
+                isOpen: isOpen,
+                onAddReviewers: onAddReviewers
+            )
+            .frame(width: width)
+            .frame(maxHeight: .infinity)
+        }
+    }
+}
+
+// MARK: - The description
+
+/// The description as its Markdown source: what is typed here is what the host
+/// stores, and the drawn version comes back once it is saved.
+///
+/// A view of its own so that the text being written lives beside the box it is
+/// written in. Held a level up, in the whole pull request's view, every letter
+/// redrew the summary bar, the side panel and every comment on the page.
+struct PullRequestDescriptionEditor: View {
+    /// What the host has, which is what the box opens on — see
+    /// `PullRequestService.editableDescription`.
+    let initialText: String
+    let host: GitHostKind
+    /// A save is already on its way, so nothing else may be asked.
+    let isSaving: Bool
+    let onCancel: () -> Void
+    let onSave: (String) async -> Void
+
+    @State private var draft: String
+
+    init(
+        initialText: String,
+        host: GitHostKind,
+        isSaving: Bool,
+        onCancel: @escaping () -> Void,
+        onSave: @escaping (String) async -> Void
+    ) {
+        self.initialText = initialText
+        self.host = host
+        self.isSaving = isSaving
+        self.onCancel = onCancel
+        self.onSave = onSave
+        _draft = State(initialValue: initialText)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            TextEditor(text: $draft)
+                .font(.system(.callout, design: .monospaced))
+                .frame(height: editorHeight)
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
+                .overlay(alignment: .topLeading) {
+                    if draft.isEmpty {
+                        Text("Describe the change, in Markdown…")
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 12)
+                            .allowsHitTesting(false)
+                    }
+                }
+
+            HStack(spacing: 8) {
+                Text(host == .github ? "Markdown, saved with gh" : "Markdown, saved with bkt")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .controlSize(.small)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(isSaving)
+                    .pointerCursor(!isSaving)
+                Button {
+                    Task { await onSave(draft) }
+                } label: {
+                    if isSaving {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label("Save", systemImage: "checkmark")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(isSaving)
+                // Post belongs to the comment box further down the same page, so
+                // saving takes the app's Save key instead.
+                .shortcut(.save)
+                .pointerCursor(!isSaving)
+                .shortcutHelp("Save the description", .save)
+            }
+        }
+    }
+
+    /// How tall the box stands: as tall as what is in it, within reason. A box
+    /// that scrolls inside a page that scrolls is two scrolls fighting for the
+    /// same wheel, so a description of any usual length gets to be one page.
+    private var editorHeight: CGFloat {
+        let lines = draft.reduce(1) { $1 == "\n" ? $0 + 1 : $0 }
+        return min(560, max(140, CGFloat(lines) * 17 + 20))
+    }
+}
+
 // MARK: - Conversation
 
 /// Existing comments, plus a box to add one.
@@ -1071,13 +1140,8 @@ struct ConversationView<Header: View>: View {
         self.header = header
     }
 
-    @State private var draft = ""
     /// The comment whose inline reply box is open, if any.
     @State private var replyingTo: PullRequestComment?
-
-    private var threads: [PullRequestCommentNode] {
-        PullRequestComment.tree(from: item.comments)
-    }
 
     /// Who an `@` names here, in the composer and in every reply box under it.
     private var mentions: MentionSource {
@@ -1111,7 +1175,9 @@ struct ConversationView<Header: View>: View {
                             .padding(.top, 8)
                     }
 
-                    ForEach(threads) { thread in
+                    // Threaded once, where the comments landed — see
+                    // `ViewerItem.commentThreads`.
+                    ForEach(item.commentThreads) { thread in
                         CommentThread(
                             node: thread,
                             depth: 0,
@@ -1138,13 +1204,62 @@ struct ConversationView<Header: View>: View {
             }
 
             Divider()
-            composer
+            // Its own view, so that what is being typed stays in the box: this
+            // one holds every comment on the pull request, and a letter landing
+            // here would draw all of them again.
+            ConversationComposer(
+                host: pr.host,
+                // Only once there is something above it to have failed against;
+                // an empty conversation says so where the comments would be.
+                error: item.comments.isEmpty ? nil : item.commentError,
+                isPosting: item.isPostingComment,
+                mentions: mentions,
+                onPost: post
+            )
         }
     }
 
-    private var composer: some View {
+    /// Posts what was written, and says whether it landed — which is what
+    /// empties the box.
+    private func post(_ body: String) async -> Bool {
+        await store.postComment(body, on: item, project: project, pr: pr)
+        return item.commentError == nil
+    }
+
+    /// Posts a reply and closes the inline box once it lands.
+    private func post(_ body: String, replyingTo parent: PullRequestComment) async {
+        await store.postComment(body, on: item, project: project, pr: pr, replyingTo: parent)
+        if item.commentError == nil {
+            replyingTo = nil
+        }
+    }
+}
+
+/// The box at the foot of the conversation, and the button that sends it.
+///
+/// It owns the text being written. The conversation above it is a page of
+/// comments, each of them a rendered piece of Markdown, and a draft held up
+/// there meant redrawing all of it on every keystroke.
+struct ConversationComposer: View {
+    let host: GitHostKind
+    /// What the host said about the last attempt, when there is a conversation
+    /// above for it to have failed against.
+    let error: String?
+    let isPosting: Bool
+    var mentions: MentionSource = .none
+    /// Sends the comment, and says whether it landed. It empties the box only
+    /// when it did — a refusal leaves what was written where it is.
+    let onPost: (String) async -> Bool
+
+    @State private var draft = ""
+
+    private var isEmpty: Bool {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            if let error = item.commentError, !item.comments.isEmpty {
+            if let error {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -1163,14 +1278,14 @@ struct ConversationView<Header: View>: View {
             )
 
             HStack {
-                Text(pr.host == .github ? "Posted with gh" : "Posted with bkt")
+                Text(host == .github ? "Posted with gh" : "Posted with bkt")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 Spacer()
                 Button {
                     Task { await post() }
                 } label: {
-                    if item.isPostingComment {
+                    if isPosting {
                         ProgressView().controlSize(.small)
                     } else {
                         Label("Comment", systemImage: "paperplane")
@@ -1178,15 +1293,9 @@ struct ConversationView<Header: View>: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .disabled(
-                    item.isPostingComment ||
-                    draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
+                .disabled(isPosting || isEmpty)
                 .shortcut(.submit)
-                .pointerCursor(
-                    !item.isPostingComment &&
-                    !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
+                .pointerCursor(!isPosting && !isEmpty)
                 .shortcutHelp("Post the comment", .submit)
             }
         }
@@ -1195,19 +1304,7 @@ struct ConversationView<Header: View>: View {
     }
 
     private func post() async {
-        let body = draft
-        await store.postComment(body, on: item, project: project, pr: pr)
-        if item.commentError == nil {
-            draft = ""
-        }
-    }
-
-    /// Posts a reply and closes the inline box once it lands.
-    private func post(_ body: String, replyingTo parent: PullRequestComment) async {
-        await store.postComment(body, on: item, project: project, pr: pr, replyingTo: parent)
-        if item.commentError == nil {
-            replyingTo = nil
-        }
+        if await onPost(draft) { draft = "" }
     }
 }
 
@@ -1384,40 +1481,51 @@ struct PullRequestReviewerSheet: View {
     @State private var picked: [String] = []
     @FocusState private var isSearching: Bool
 
-    /// Whoever is already on the pull request, keyed the way the picker's rows
-    /// are, so those rows can say so instead of offering them again.
-    private var alreadyAsked: Set<String> {
-        Set(item.reviewers.map { $0.id.lowercased() })
+    /// Everything the rows are drawn from, worked out once for the pass that
+    /// draws them.
+    ///
+    /// Each of these was a computed property before, and the body read them
+    /// several times over — `alreadyAsked` once per row, which built the set of
+    /// who is on the pull request as many times as there are people to offer.
+    /// A keystroke in the search box redraws all of this, so it is worked out
+    /// once and handed down.
+    private struct Offer {
+        /// Everybody the host offered, minus the author: nobody reviews their
+        /// own pull request. The list itself keeps them, because an `@` in a
+        /// comment names the author more often than it names anyone else.
+        var candidates: [ReviewerCandidate] = []
+        var matches: [ReviewerCandidate] = []
+        /// The typed handle itself, offered as a row when it is not in the list
+        /// — which is the only way in on a host that answered with nobody.
+        var typedHandle: String?
+        /// Whoever is already on the pull request, keyed the way the rows are,
+        /// so a row can say so instead of offering them again.
+        var alreadyAsked: Set<String> = []
     }
 
-    /// Everybody the host offered, minus the author: nobody reviews their own
-    /// pull request. The list itself keeps them, because an `@` in a comment
-    /// names the author more often than it names anyone else.
-    private var candidates: [ReviewerCandidate] {
-        item.reviewerCandidates.filter {
+    private func readOffer() -> Offer {
+        var offer = Offer()
+        offer.candidates = item.reviewerCandidates.filter {
             $0.name.caseInsensitiveCompare(pr.author) != .orderedSame
                 && $0.handle.caseInsensitiveCompare(pr.author) != .orderedSame
         }
-    }
+        offer.matches = offer.candidates.filter { $0.matches(query) }
+        offer.alreadyAsked = Set(item.reviewers.map { $0.id.lowercased() })
 
-    private var matches: [ReviewerCandidate] {
-        candidates.filter { $0.matches(query) }
-    }
-
-    /// The typed handle itself, offered as a row when it is not in the list —
-    /// which is the only way in on a host that answered with nobody.
-    private var typedHandle: String? {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count > 1 else { return nil }
-        let isKnown = candidates.contains {
-            $0.handle.caseInsensitiveCompare(trimmed) == .orderedSame
-                || $0.name.caseInsensitiveCompare(trimmed) == .orderedSame
+        if !trimmed.isEmpty, trimmed.count > 1 {
+            let isKnown = offer.candidates.contains {
+                $0.handle.caseInsensitiveCompare(trimmed) == .orderedSame
+                    || $0.name.caseInsensitiveCompare(trimmed) == .orderedSame
+            }
+            offer.typedHandle = isKnown ? nil : trimmed
         }
-        return isKnown ? nil : trimmed
+        return offer
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let offer = readOffer()
+        return VStack(alignment: .leading, spacing: 12) {
             header
 
             if !item.reviewers.isEmpty {
@@ -1435,15 +1543,15 @@ struct PullRequestReviewerSheet: View {
 
             // Says what the rows below are: with the box empty they are a
             // suggestion, and once something is typed they are what matched.
-            if !candidates.isEmpty {
+            if !offer.candidates.isEmpty {
                 Text(query.trimmingCharacters(in: .whitespaces).isEmpty
-                    ? "Suggested — \(candidates.count) people who can review"
-                    : "\(matches.count) of \(candidates.count) match “\(query)”")
+                    ? "Suggested — \(offer.candidates.count) people who can review"
+                    : "\(offer.matches.count) of \(offer.candidates.count) match “\(query)”")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            candidateList
+            candidateList(offer)
 
             if !picked.isEmpty {
                 Text(picked.joined(separator: ", "))
@@ -1509,7 +1617,7 @@ struct PullRequestReviewerSheet: View {
     }
 
     @ViewBuilder
-    private var candidateList: some View {
+    private func candidateList(_ offer: Offer) -> some View {
         if item.isLoadingReviewerCandidates {
             HStack(spacing: 7) {
                 ProgressView().controlSize(.small)
@@ -1518,8 +1626,8 @@ struct PullRequestReviewerSheet: View {
                     .foregroundStyle(.secondary)
             }
             .frame(height: 150, alignment: .top)
-        } else if matches.isEmpty && typedHandle == nil {
-            Text(candidates.isEmpty
+        } else if offer.matches.isEmpty && offer.typedHandle == nil {
+            Text(offer.candidates.isEmpty
                 ? "\(pr.host.displayName) did not say who can review this. Type a handle above and it is sent as it is."
                 : "Nobody here matches “\(query)”.")
                 .font(.callout)
@@ -1529,20 +1637,22 @@ struct PullRequestReviewerSheet: View {
         } else {
             ScrollView {
                 VStack(spacing: 4) {
-                    if let typedHandle {
+                    if let typedHandle = offer.typedHandle {
                         row(
                             handle: typedHandle,
                             name: "Ask “\(typedHandle)”",
                             detail: "Sent to \(pr.host.displayName) as typed",
-                            avatarURL: nil
+                            avatarURL: nil,
+                            alreadyAsked: offer.alreadyAsked
                         )
                     }
-                    ForEach(matches) { candidate in
+                    ForEach(offer.matches) { candidate in
                         row(
                             handle: candidate.handle,
                             name: candidate.name,
                             detail: candidate.detail,
-                            avatarURL: candidate.avatarURL
+                            avatarURL: candidate.avatarURL,
+                            alreadyAsked: offer.alreadyAsked
                         )
                     }
                 }
@@ -1557,7 +1667,8 @@ struct PullRequestReviewerSheet: View {
         handle: String,
         name: String,
         detail: String?,
-        avatarURL: URL?
+        avatarURL: URL?,
+        alreadyAsked: Set<String>
     ) -> some View {
         let isAsked = alreadyAsked.contains(handle.lowercased())
         let isPicked = picked.contains { $0.caseInsensitiveCompare(handle) == .orderedSame }

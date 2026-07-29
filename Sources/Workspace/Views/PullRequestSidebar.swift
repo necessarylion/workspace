@@ -42,23 +42,26 @@ struct PullRequestSidebar: View {
     // MARK: - Reviewers
 
     private var reviewers: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        // Sorted once for the pass: the header's summary and the rows under it
+        // are the same list, and `byStanding` sorts each time it is asked.
+        let ordered = item.reviewers.byStanding
+        return VStack(alignment: .leading, spacing: 8) {
             sectionHeader(
                 "Reviewers",
                 symbol: "person.2",
-                detail: item.reviewers.isEmpty ? nil : item.reviewers.approvalSummary,
+                detail: ordered.isEmpty ? nil : item.reviewers.approvalSummary,
                 isLoading: item.isLoadingReviewers
             ) {
                 EmptyView()
             }
 
-            if item.reviewers.isEmpty {
+            if ordered.isEmpty {
                 emptyNote(item.reviewersError
                     ?? (item.isLoadingReviewers
                         ? "Reading who is reviewing…"
                         : "Nobody is reviewing #\(pr.number) yet."))
             } else {
-                ForEach(item.reviewers.byStanding) { reviewer in
+                ForEach(ordered) { reviewer in
                     reviewerRow(reviewer)
                 }
             }
