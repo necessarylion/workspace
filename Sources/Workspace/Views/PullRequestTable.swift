@@ -103,12 +103,19 @@ struct PullRequestTable: View {
         VStack(spacing: 3) {
             header
             Divider().padding(.bottom, 2)
-            ForEach(Array(project.pullRequests.enumerated()), id: \.element.id) { index, pr in
-                PullRequestTableRow(
-                    pr: pr,
-                    isAlternate: index.isMultiple(of: 2) == false,
-                    open: { store.openPullRequest(pr, project: project) }
-                )
+            // Lazy, for the same reason the commit history below it is: the
+            // hosts are asked for fifty, and every row here carries a face, a
+            // row of reviewers and a build summary. A repository with a full
+            // board was building all of that on the way to a dashboard where
+            // three of them are on screen.
+            LazyVStack(spacing: 3) {
+                ForEach(Array(project.pullRequests.enumerated()), id: \.element.id) { index, pr in
+                    PullRequestTableRow(
+                        pr: pr,
+                        isAlternate: index.isMultiple(of: 2) == false,
+                        open: { store.openPullRequest(pr, project: project) }
+                    )
+                }
             }
         }
         .padding(.horizontal, Column.rowInset)

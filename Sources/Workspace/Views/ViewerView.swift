@@ -728,6 +728,10 @@ struct WelcomeView: View {
                 ? project.recentCommits
                 : Array(project.recentCommits.prefix(collapsedCommitCount))
 
+            // Grouped once for the pass. Asked for inside the `ForEach`, the
+            // whole history was walked again every time this view was drawn.
+            let days = CommitDay.group(shown)
+
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("Recent commits")
@@ -741,15 +745,23 @@ struct WelcomeView: View {
                     }
                 }
 
-                ForEach(CommitDay.group(shown)) { day in
-                    VStack(alignment: .leading, spacing: 6) {
-                        CommitDayHeading(title: day.title, count: day.commits.count)
-                        ForEach(day.commits) { commit in
-                            RepositoryCommitRow(
-                                commit: commit,
-                                open: { store.openCommit(commit, project: project) },
-                                openPullRequest: { store.openPullRequest(number: $0, project: project) }
-                            )
+                // **Lazy**, and it is the length of the history that decides it.
+                // "Show more" hands this every commit the repository has, and a
+                // plain stack builds all of them at once — every row parsing its
+                // message for a `#123` and reaching for a face — whether they are
+                // anywhere near the window or not. The rows below the fold are
+                // the ones nobody is looking at yet.
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(days) { day in
+                        VStack(alignment: .leading, spacing: 6) {
+                            CommitDayHeading(title: day.title, count: day.commits.count)
+                            ForEach(day.commits) { commit in
+                                RepositoryCommitRow(
+                                    commit: commit,
+                                    open: { store.openCommit(commit, project: project) },
+                                    openPullRequest: { store.openPullRequest(number: $0, project: project) }
+                                )
+                            }
                         }
                     }
                 }
