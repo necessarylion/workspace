@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 
 /// Single source of truth for the window.
 ///
@@ -30,6 +31,10 @@ final class WorkspaceStore {
             }
         }
 
+        /// Claude's is never drawn: `NavigatorView` gives that tab ``ClaudeMark``
+        /// instead, which is artwork and not a symbol name. It stays here so
+        /// every tab can answer the question, and so a caller that only has a
+        /// `String` to hand has something to fall back on.
         var symbol: String {
             switch self {
             case .files: "folder"
@@ -201,6 +206,7 @@ final class WorkspaceStore {
             return
         }
         let project = Project(url: url)
+        watchWorkingTree(of: project)
         projects.append(project)
         if makeSelected || selectedProjectID == nil {
             selectedProjectID = project.id
@@ -219,6 +225,13 @@ final class WorkspaceStore {
     func removeProject(_ project: Project) {
         projects.removeAll { $0.id == project.id }
         LanguageServerRegistry.shared.shutdownServices(inside: project.url)
+
+        // A floating conversation is rooted in the folder being removed, so it
+        // goes with it rather than being left over a repository that is gone.
+        for panel in chats where panel.projectID == project.id {
+            panel.session.terminate()
+        }
+        chats.removeAll { $0.projectID == project.id }
 
         // Forget anything that belonged to it, its shells included — the
         // window-wide terminal is untouched, it belongs to no repository.
@@ -436,6 +449,9 @@ final class WorkspaceStore {
     /// it owed goes out on the first tick after the app is in front again.
     @ObservationIgnored private var missedAutoRefresh = false
 
+    /// The one re-read of the diff on screen; see ``reloadPresentedWorkingDiff``.
+    @ObservationIgnored private var presentedDiffReload: Task<Void, Never>?
+
     /// The five-minute sweep of the sidebar. Called once, from the window's
     /// `task` — starting it from `init` would put a `gh` call per repository on
     /// the launch, and would run in the throwaway store SwiftUI can build.
@@ -449,6 +465,7 @@ final class WorkspaceStore {
     /// away, that is one sweep rather than one per five minutes missed.
     func startAutomaticRefresh() {
         guard autoRefreshTask == nil else { return }
+        startReloadingOnReturningToFront()
 
         autoRefreshTask = Task { [weak self] in
             // The loop runs a minute at a time and decides by the clock, so a
@@ -470,6 +487,108 @@ final class WorkspaceStore {
         }
     }
 
+    // MARK: - Files written outside the app
+
+    /// Hooks a project up to what it cannot do for itself.
+    ///
+    /// `Project` owns the watcher and reloads its own git status and file tree
+    /// — that much is its business. The editor showing one of those files and
+    /// the diff in the centre of the window are the store's, and the project
+    /// has no reference back to the store on purpose: the store is the single
+    /// source of truth, so it reaches down rather than being reached up to.
+    /// Both references are weak: the closure lives on the project it is about,
+    /// so holding it strongly would be a project that can never be removed.
+    private func watchWorkingTree(of project: Project) {
+        project.onWorkingTreeChanged = { [weak self, weak project] changed in
+            guard let self, let project else { return }
+            filesChangedOnDisk(in: project, changed: changed)
+        }
+    }
+
+    /// `changed` nil means something changed and nobody knows what, so
+    /// everything on screen is checked.
+    private func filesChangedOnDisk(in project: Project, changed: Set<URL>?) {
+        reloadOpenDocuments(changed: changed)
+        reloadPresentedWorkingDiff(of: project)
+    }
+
+    /// Re-reads the open editors whose file moved underneath them. The document
+    /// decides whether it actually will — see `reloadFromDiskIfChanged`, which
+    /// is what keeps unsaved edits and our own saves safe.
+    private func reloadOpenDocuments(changed: Set<URL>?) {
+        for document in openDocuments {
+            if let changed, !changed.contains(document.url.standardizedFileURL) { continue }
+            document.reloadFromDiskIfChanged()
+        }
+    }
+
+    /// Re-runs the load behind the working-tree diff on screen. The parsed patch
+    /// is cached on the item and an item already presented is never loaded
+    /// again, so without this the diff of a file Claude Code just rewrote keeps
+    /// showing the version before it.
+    ///
+    /// Only the item actually being looked at: a diff sitting in the back stack
+    /// costs a `git diff` to refresh and will be reloaded when it is opened
+    /// again anyway.
+    ///
+    /// One reload at a time, and the newest wins. The debounce in front of this
+    /// is 400ms and a `git diff` over a large file while Claude Code works can
+    /// take longer, so two reads can be in flight — and without the cancel it is
+    /// whichever finishes last, not whichever was asked for last, that ends up
+    /// on screen.
+    private func reloadPresentedWorkingDiff(of project: Project) {
+        guard !showsDashboard,
+              let item = current,
+              case .workingDiff(let projectID, let path, let isUntracked) = item.kind,
+              projectID == project.id
+        else { return }
+
+        presentedDiffReload?.cancel()
+        guard !path.isEmpty else {
+            presentedDiffReload = Task { await loadAllChanges(item, project: project, quietly: true) }
+            return
+        }
+        // The change list is the fresher answer for a renamed file's second
+        // path, and for a file that has been staged since the diff was opened;
+        // the item's own `isUntracked` is only the fallback for one git no
+        // longer lists at all.
+        let change = project.gitStatus?.changes.first { $0.path == path }
+        presentedDiffReload = Task {
+            await loadWorkingDiff(
+                item,
+                project: project,
+                paths: change?.gitPaths ?? [path],
+                isUntracked: change.map { $0.label == "Untracked" } ?? isUntracked,
+                quietly: true
+            )
+        }
+    }
+
+    /// Belt and braces for the app coming back to the front. FSEvents reaches a
+    /// background app too, but a stream can coalesce a long absence into less
+    /// than it was, and the reload is one `git status` per repository — cheap
+    /// enough to pay for the certainty that what the user is looking at when
+    /// they return is what is on disk.
+    ///
+    /// Registered from `startAutomaticRefresh` for the same reason that one is
+    /// called from the window rather than from `init`: the store SwiftUI builds
+    /// and throws away must not leave an observer behind.
+    private func startReloadingOnReturningToFront() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reloadEveryProjectFromDisk() }
+        }
+    }
+
+    private func reloadEveryProjectFromDisk() {
+        for project in projects {
+            Task { await project.reloadAfterReturningToFront() }
+        }
+    }
+
     private func persistProjects() {
         UserDefaults.standard.set(projects.map(\.url.path), forKey: projectsDefaultsKey)
         UserDefaults.standard.set(
@@ -486,6 +605,7 @@ final class WorkspaceStore {
             let project = Project(url: URL(fileURLWithPath: path))
             project.gitHubAccount = accounts[path]
             project.isPinned = pinned.contains(path)
+            watchWorkingTree(of: project)
             projects.append(project)
         }
         applyPinOrdering()
@@ -870,16 +990,27 @@ final class WorkspaceStore {
         }
     }
 
+    /// `quietly` is the reload nobody asked for — a file changed on disk under a
+    /// diff that is already on screen. `isLoading` swaps the whole patch for a
+    /// spinner, which for a diff being read while Claude Code works through the
+    /// repository would mean the pane blinking every few seconds; the new patch
+    /// simply replaces the old one when it lands.
     private func loadWorkingDiff(
         _ item: ViewerItem,
         project: Project,
         paths: [String],
-        isUntracked: Bool
+        isUntracked: Bool,
+        quietly: Bool = false
     ) async {
-        item.isLoading = true
+        if !quietly { item.isLoading = true }
         item.errorMessage = nil
         let text = await GitStatus.diff(paths: paths, in: project.url, isUntracked: isUntracked)
-        item.diff = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
+        let parsed = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
+        // A read this one was started to replace; leaving the item alone is the
+        // whole point of having been cancelled. Only a quiet reload is ever
+        // cancelled, so there is no spinner left running by returning here.
+        guard !Task.isCancelled else { return }
+        item.diff = parsed
         if item.diff?.isEmpty == true {
             item.errorMessage = "No textual changes to show for this file."
         }
@@ -899,14 +1030,16 @@ final class WorkspaceStore {
         Task { await loadAllChanges(item, project: project) }
     }
 
-    private func loadAllChanges(_ item: ViewerItem, project: Project) async {
-        item.isLoading = true
+    private func loadAllChanges(_ item: ViewerItem, project: Project, quietly: Bool = false) async {
+        if !quietly { item.isLoading = true }
         item.errorMessage = nil
         let untracked = project.gitStatus?.changes
             .filter { $0.label == "Untracked" }
             .map(\.path) ?? []
         let text = await GitStatus.diffAll(in: project.url, untrackedPaths: untracked)
-        item.diff = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
+        let parsed = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
+        guard !Task.isCancelled else { return }
+        item.diff = parsed
         if item.diff?.isEmpty == true {
             item.errorMessage = "No textual changes to show."
         }
@@ -1431,9 +1564,6 @@ final class WorkspaceStore {
         title: String?
     ) -> ViewerItem {
         let item = terminalItem(projectID: projectID)
-        // A conversation is a tab of this same item, so asking for a shell has
-        // to look past it: coming back to a Claude tab is the Claude tab's job,
-        // and reusing one here would answer "Open Terminal" with a chat.
         let reusable = command == nil && title == nil ? plainShell(of: item) : nil
         if let reusable {
             selectTerminal(reusable, in: item)
@@ -1499,11 +1629,13 @@ final class WorkspaceStore {
 
     /// The same list without the conversations, numbered from 1 again.
     ///
-    /// A Claude Code conversation is a terminal tab like any other, but it is
-    /// the Claude tab's to list: showing it here too would offer a second way
-    /// into the same shell, and bury the shells you opened yourself among the
-    /// chats. Everything the user thinks of as "the terminals" — the list, the
-    /// counts, the shell a plain "Open Terminal" comes back to — reads this.
+    /// Nothing puts a conversation in a terminal tab any more — they float over
+    /// the window (see ``chats``) — so on a live window this filters nothing
+    /// out. It stays because it is the promise the whole Terminals list is
+    /// built on: what is listed here is a shell the user opened, and never a
+    /// chat wearing a shell's clothes. Everything the user thinks of as "the
+    /// terminals" — the list, the counts, the shell a plain "Open Terminal"
+    /// comes back to — reads this.
     func shellTerminals(in scope: TerminalScope) -> [OpenTerminal] {
         // Renumbered rather than filtered alone: the number is only there to
         // tell same-named shells apart, and a list that ran 1, 3, 4 would read
@@ -1569,27 +1701,33 @@ final class WorkspaceStore {
         showMostRecentSession(of: tab)
     }
 
-    /// The newest of one list's sessions, back on screen. Nothing is started: a
-    /// repository with no shells — or no conversations — only gets its list,
-    /// where the first row is the one that starts one.
+    /// The newest of one list's sessions, back where it can be read. Nothing is
+    /// started: a repository with no shells — or no conversations — only gets
+    /// its list, where the first row is the one that starts one.
     private func showMostRecentSession(of tab: NavigatorTab) {
-        let sessions: [OpenTerminal]
         switch tab {
         case .terminals:
             // The scope the list itself shows, so what comes back is one of the
             // cards standing under the pointer rather than another folder's.
-            guard let scope = visibleTerminalScope else { return }
-            sessions = shellTerminals(in: scope)
+            guard let scope = visibleTerminalScope,
+                  let recent = shellTerminals(in: scope)
+                      .max(by: { $0.session.lastUsedAt < $1.session.lastUsedAt }),
+                  !isShowing(recent)
+            else { return }
+            showTerminal(recent)
         case .claude:
-            guard let project = selectedProject else { return }
-            sessions = runningClaudes(in: project)
+            // A conversation is never in the centre pane, so there is nothing to
+            // put back there — the panels are already over the window. Bringing
+            // the newest forward is exactly the click the list was about to be
+            // given: off the dock if it is folded, and out from under the others
+            // if it is not.
+            guard let project = selectedProject,
+                  let recent = chats(in: project).max(by: { $0.depth < $1.depth })
+            else { return }
+            unfoldChatPanel(recent)
         default:
             return
         }
-        guard let recent = sessions.max(by: { $0.session.lastUsedAt < $1.session.lastUsedAt }),
-              !isShowing(recent)
-        else { return }
-        showTerminal(recent)
     }
 
     /// The terminals list, and — when this repository already has a shell — its
@@ -1737,6 +1875,16 @@ final class WorkspaceStore {
     /// Brings a shell back on screen from outside the app — a banner clicked
     /// while Workspace was behind something else.
     func revealTerminal(id: UUID) {
+        // A conversation is nowhere in the terminal lists: it is a panel, so
+        // being reached from a banner means unfolding it and putting it in
+        // front rather than opening anything. `raiseChatPanel` is also what
+        // brings back one that had dropped out of sight behind two newer ones.
+        if let panel = chats.first(where: { $0.session.id == id }) {
+            unfoldChatPanel(panel)
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
+            return
+        }
         guard let terminal = openTerminals.first(where: { $0.session.id == id }) else { return }
         showTerminal(terminal)
         // The list the tab belongs to, so the rest of them are to hand too.
@@ -1809,7 +1957,7 @@ final class WorkspaceStore {
 
     // MARK: - External tools
 
-    /// Starts Claude Code on this repository, in a terminal tab of its own.
+    /// Starts Claude Code on this repository, in a floating panel of its own.
     ///
     /// A conversation is a shell here, not a pane of its own: `claude` is a
     /// terminal program, and the app used to drive it through a stream of JSON
@@ -1819,10 +1967,17 @@ final class WorkspaceStore {
     /// Claude Code works, flags and all, without the app having to know about
     /// any of them.
     ///
-    /// **Always a new tab.** As many conversations can run at once as you care
-    /// to start — separate processes in separate shells, so a turn working away
-    /// in one carries on while another is typed into, and the Claude tab is how
-    /// you get back to any of them.
+    /// **It floats, and there is no other way to open one.** Asking Claude
+    /// about a repository is asking about the file you are looking at, and a
+    /// conversation in the centre pane took that file off the screen to answer
+    /// a question about it. Over the window it does not, which is the whole of
+    /// why every route in — this, the navigator's New Conversation, the
+    /// dashboard button, ⇧⌘L — lands here.
+    ///
+    /// **Always a new conversation.** As many can run at once as you care to
+    /// start — separate processes in separate shells, so a turn working away in
+    /// one carries on while another is typed into. Only two are on screen at a
+    /// time (see ``chats``); the Claude list is how you get back to the rest.
     ///
     /// The conversation is given its **id up front** (`--session-id`) rather
     /// than being left to name itself. Without one there is no way to tell the
@@ -1831,17 +1986,21 @@ final class WorkspaceStore {
     /// and clicking it would start a second `claude` on the same file. A CLI too
     /// old for the flag simply goes without, and takes that duplicate row.
     func openClaude(in project: Project) {
-        // The tab is made now and the command typed in a moment later. The
+        // The panel is made now and the command typed in a moment later. The
         // shell needs about a second to draw its prompt either way, so asking
         // the CLI what it accepts costs nothing that was not already being
-        // waited for — and the tab is on screen while it happens.
-        let item = openTerminal(in: project, title: "Claude")
-        guard let session = item.selectedTerminal else { return }
-        session.runsClaude = true
+        // waited for — and the panel is on screen while it happens.
+        let panel = floatChat(in: project, title: "Claude")
+        startClaude(in: panel.session)
+    }
+
+    /// Starts a brand new conversation in a panel's shell: the flags this Mac's
+    /// `claude` takes, then the command. A resumed one skips this — it already
+    /// knows its session id, so there is nothing to ask about.
+    private func startClaude(in session: TerminalSession) {
         // Up before the question is even asked: what is behind it until the
         // answer lands is a shell prompt this tab was never opened for.
         session.beginClaudeStartup()
-        navigatorTab = .claude
 
         Task {
             let cli = await ClaudeCLI.shared.info()
@@ -1855,39 +2014,37 @@ final class WorkspaceStore {
         }
     }
 
-    /// Picks a past conversation up where it was left, in a terminal of its own.
+    /// Picks a past conversation up where it was left, in a panel of its own.
     ///
-    /// The tab is remembered by session id, so clicking the same row again comes
-    /// back to the shell already running it rather than starting a second
-    /// `claude` on the same transcript — which the CLI would let you do, and
-    /// which would leave two of them writing to one file. Different
-    /// conversations get different tabs, and all of them keep running.
+    /// A running conversation is remembered by session id, so clicking the same
+    /// row again comes back to the shell already running it rather than starting
+    /// a second `claude` on the same transcript — which the CLI would let you
+    /// do, and which would leave two of them writing to one file. Coming back to
+    /// it is a raise, not a restart, whether its panel was on screen, folded
+    /// away or behind two newer ones.
     func resumeClaude(_ past: ClaudePastSession, in project: Project) {
-        if let running = claudeTerminal(for: past.id, in: project) {
-            showTerminal(running)
-            navigatorTab = .claude
+        if let running = chats.first(where: { $0.session.claudeSessionID == past.id }) {
+            unfoldChatPanel(running)
             return
         }
         // The first prompt of a conversation is its title, and a prompt can be a
-        // paragraph. The shell renames the tab itself within a second or two;
+        // paragraph. The shell renames the panel itself within a second or two;
         // this is only what it is called until then.
         let title = past.title.count > 32
             ? String(past.title.prefix(32)) + "…"
             : past.title
-        let item = openTerminal(in: project, title: title)
-        guard let session = item.selectedTerminal else { return }
-        session.runsClaude = true
-        session.claudeSessionID = past.id
-        // Typed here rather than handed to the tab, so this start is covered
+        let panel = floatChat(in: project, title: title)
+        panel.session.claudeSessionID = past.id
+        // Typed here rather than handed to the shell, so this start is covered
         // by the same spinner a new conversation gets.
-        session.runClaude("claude --resume \(Shell.quote(past.id))")
-        navigatorTab = .claude
+        panel.session.runClaude("claude --resume \(Shell.quote(past.id))")
     }
 
     /// Every conversation this repository has running, in the order they were
-    /// started. What the Claude tab lists above the history.
-    func runningClaudes(in project: Project) -> [OpenTerminal] {
-        terminals(in: .project(project.id)).filter(\.session.runsClaude)
+    /// started — the ones on screen and the ones that have fallen behind them
+    /// alike. What the Claude list shows above the history.
+    func chats(in project: Project) -> [ChatPanel] {
+        chats.filter { $0.projectID == project.id }
     }
 
     /// How many of this repository's conversations are mid-turn, for the badge
@@ -1895,11 +2052,348 @@ final class WorkspaceStore {
     /// entirely, so the sidebar is where "something is still going" belongs —
     /// the banner only arrives once it is over.
     func workingClaudeCount(in project: Project) -> Int {
-        runningClaudes(in: project).count { $0.session.isWorking }
+        chats(in: project).count { $0.session.isWorking }
     }
 
-    private func claudeTerminal(for sessionID: String, in project: Project) -> OpenTerminal? {
-        terminals(in: .project(project.id)).first { $0.session.claudeSessionID == sessionID }
+    // MARK: - Floating chats
+
+    /// Every conversation alive in this window, in the order they were started.
+    ///
+    /// A chat is the same thing a shell is — a `TerminalSession` running the
+    /// real CLI — put somewhere you can keep reading code next to it. It is
+    /// deliberately **not** one of a terminal item's tabs: the shell's view is a
+    /// single `NSView` that lives on the session, so a conversation offered both
+    /// in a panel and in the centre would be one view two places want to host,
+    /// and whichever drew it last would tear it out of the other.
+    ///
+    /// **Every conversation here is drawn** — ``visibleChats`` is this list — so
+    /// nothing is ever pushed out of sight to make room. The only way a running
+    /// conversation is off screen is folded to the dock, which the reader does
+    /// on purpose and *nothing else happens to it*: its shell, its process and
+    /// its transcript carry on exactly as they were, and unfolding it, or
+    /// raising it from the Claude list, brings the panel back with the turn it
+    /// was running still running. Ending a conversation is one thing and one
+    /// thing only, and that is the ✕.
+    var chats: [ChatPanel] = []
+
+    /// What the overlay draws: every conversation, in ``chats`` order rather
+    /// than front-to-back.
+    ///
+    /// **There is no ceiling.** There used to be two, on the argument that a
+    /// third panel over a three-pane window leaves no window to read — but that
+    /// is the reader's call to make and they have the fold, the dock and the ✕
+    /// to make it with. A cap could only ever guess, and guessing wrong meant a
+    /// running conversation pushed somewhere the user had to go and find.
+    ///
+    /// What the ceiling really costs is the machine, not the screen: each panel
+    /// is a live `GhosttySurfaceView` on its own `CAMetalLayer`, **folded or
+    /// not**. Folding used to take the terminal out of the window and that is
+    /// what made coming back from the dock slow — a surface re-added to a window
+    /// re-applies its scale and its size and has to draw before anything is
+    /// there. The cost of keeping it is an idle Metal layer per conversation,
+    /// paid so that unfolding is instant; ending one is still the ✕.
+    ///
+    /// The order matters more than it looks. `ForEach` builds the view tree in
+    /// the order of the array it is given, so sorting this by depth would move
+    /// a panel's terminal inside the view hierarchy every time the front one
+    /// changed — and a `GhosttySurfaceView` pulled out and put back loses the
+    /// keyboard mid-sentence. Which panel is in front is ``ChatPanel/depth``
+    /// and `zIndex`, never position.
+    var visibleChats: [ChatPanel] { chats }
+
+    /// Whether this conversation is showing its terminal rather than sitting on
+    /// the dock. Every panel is drawn now — see ``visibleChats`` — so folded is
+    /// the only way one is out of sight, and it is the only thing the Claude
+    /// list has left to tell the reader about.
+    func isOnScreen(_ panel: ChatPanel) -> Bool {
+        !panel.isCollapsed
+    }
+
+    /// What every change to a panel that is not a drag eases with. Opening,
+    /// closing, folding to the dock and coming back from it, and one panel
+    /// giving way to another all move the same way, so they read as one
+    /// behaviour rather than four. Dragging and resizing are deliberately not on
+    /// this list: those follow the pointer, and a cursor the panel lags behind
+    /// by a fifth of a second feels broken.
+    static let chatPanelMotion = Animation.easeInOut(duration: 0.22)
+
+    /// The window's own size, as the overlay last laid itself out in. Kept here
+    /// because a panel is opened from a menu item, which knows nothing about any
+    /// window — and a corner cannot be measured from without one. The default
+    /// window size stands in until the overlay has been laid out once, and the
+    /// clamp the overlay does on its first pass corrects anything placed before
+    /// then.
+    private var chatPanelBounds = CGSize(width: 1360, height: 860)
+
+    /// The centre pane's own rectangle, in those same coordinates. Where the
+    /// dock runs.
+    ///
+    /// The window is the wrong place for it: the bottom-right corner of the
+    /// window belongs to the navigator, and a bar parked there sits on top of
+    /// the tools at the foot of that pane. The viewer is the one region nothing
+    /// else claims a corner of. ``ContentView`` reports it from the viewer's own
+    /// geometry, so folding a side pane away or dragging a seam moves the dock
+    /// with it rather than leaving the bars behind.
+    ///
+    /// A **free-floating** panel is not confined to it, deliberately: that one is
+    /// placed by hand, and a window-like thing you may not drop where you like is
+    /// not one. Only the dock — the placement the app does for you — is held to
+    /// the pane.
+    private var reportedDockRegion: CGRect?
+
+    /// The whole window until the viewer has been laid out once, which is what
+    /// this was before there was a viewer to ask.
+    var chatDockRegion: CGRect {
+        reportedDockRegion ?? CGRect(origin: .zero, size: chatPanelBounds)
+    }
+
+    /// The centre pane has been laid out, or moved. Called from `onAppear` and
+    /// `onChange` rather than from the layout itself: writing to the store while
+    /// the view tree is being built is a mutation inside an observation, and the
+    /// runtime says so out loud.
+    func chatDockDidLayout(_ rect: CGRect) {
+        guard rect.width > 0, rect.height > 0, rect != reportedDockRegion else { return }
+        reportedDockRegion = rect
+    }
+
+    /// Where a panel is drawn right now.
+    ///
+    /// A folded panel does not stay where it was: it goes down to the bottom of
+    /// the **centre pane**, where ``ChatDockStrip`` draws its bar — out of the
+    /// way of the code, and in the one place you would think to look for it. Its
+    /// stored ``ChatPanel/frame`` is left alone by that, so unfolding puts the
+    /// panel back exactly where and how big it was rather than approximately.
+    ///
+    /// What comes back here for a folded panel is not the bar: it is where the
+    /// panel *travels to* on the way down, a hairline at the dock's right end
+    /// with no height at all (see ``ChatPanelFrame/visibleHeight``). The bar the
+    /// user sees and clicks is the strip's, because the strip scrolls and this
+    /// rectangle could not say where a scrolled bar had got to.
+    func chatPanelFrame(of panel: ChatPanel) -> ChatPanelFrame {
+        guard panel.isCollapsed else { return panel.frame }
+        return ChatPanelFrame.foldedAway(panel.frame, into: chatDockRegion, barWidth: chatDockBarWidth)
+    }
+
+    /// The folded conversations in the order their bars sit on the dock, left to
+    /// right: the order they were folded in, until one is dragged somewhere else.
+    ///
+    /// Sorted by a key rather than by shuffling ``chats``, which is deliberate —
+    /// that array's order is the order the terminals sit in the view hierarchy,
+    /// and a `GhosttySurfaceView` moved inside it loses the keyboard mid-sentence.
+    /// A bar with no key of its own falls to the end, so a conversation just
+    /// folded lands at the right-hand end where the strip is already looking.
+    var dockedChats: [ChatPanel] {
+        chats.filter(\.isCollapsed)
+            .enumerated()
+            .sorted {
+                ($0.element.dockOrder ?? Int.max, $0.offset) < ($1.element.dockOrder ?? Int.max, $1.offset)
+            }
+            .map(\.element)
+    }
+
+    /// How wide every bar on the dock is right now. One width for all of them:
+    /// bars of different widths in a row read as different *kinds* of thing.
+    var chatDockBarWidth: CGFloat {
+        ChatPanelFrame.dockedBarWidth(for: dockedChats.count, in: chatDockRegion)
+    }
+
+    /// Where the user dropped a bar they dragged along the strip.
+    ///
+    /// The strip owns the layout, so this is an **order** and not a position: a
+    /// free x cannot survive a strip that scrolls — the point it names moves the
+    /// moment anything else is folded, and "off the end" means nothing when the
+    /// end is somewhere else a second later. Every bar is renumbered from the
+    /// result, so the keys stay dense and no two bars ever want the same slot.
+    func moveDockedChat(_ panel: ChatPanel, to index: Int) {
+        var order = dockedChats
+        guard let from = order.firstIndex(where: { $0 === panel }) else { return }
+        order.remove(at: from)
+        order.insert(panel, at: min(max(index, 0), order.count))
+        withAnimation(Self.chatPanelMotion) {
+            for (slot, docked) in order.enumerated() {
+                docked.dockOrder = slot
+            }
+        }
+    }
+
+    /// Floats a new conversation for this repository, in front of the rest.
+    ///
+    /// **Nothing is ever closed, folded or displaced to make room.** A new
+    /// conversation opens in front of the rest and that is the whole of what it
+    /// does to them — every other shell keeps running, every other turn keeps
+    /// going, and every other panel stays where the reader put it.
+    private func floatChat(in project: Project, title: String) -> ChatPanel {
+        let session = TerminalSession(directory: project.url, title: title)
+        // A panel is only ever opened to hold a conversation, so this is settled
+        // here rather than by whichever `claude` command is about to be typed.
+        session.runsClaude = true
+        let panel = ChatPanel(
+            projectID: project.id,
+            projectName: project.name,
+            session: session,
+            frame: ChatPanelFrame.opening(
+                remembered: ChatPanelFrame.saved(for: project.id),
+                in: chatPanelBounds,
+                beside: visibleChats.map { chatPanelFrame(of: $0) }
+            )
+        )
+        session.onExit = { [weak self, weak panel] in
+            guard let self, let panel else { return }
+            // `/exit`, ^D, or `claude` falling over: the panel goes the way a
+            // terminal tab does when its shell ends. Where it was is kept — the
+            // conversation ending is no reason to forget the corner it was read
+            // in — and `terminate` here is only the surface being handed back,
+            // the process behind it having already gone.
+            panel.remember()
+            panel.session.terminate()
+            withAnimation(Self.chatPanelMotion) {
+                chats.removeAll { $0 === panel }
+            }
+        }
+        session.onAttention = { [weak self, weak panel] body in
+            guard let self, let panel else { return }
+            // A panel folded down to the dock, or a window behind something
+            // else, is not a conversation the user is watching — the rest of the
+            // time the banner would say what is already on screen.
+            let watching = NSApp.isActive && !panel.isCollapsed
+            guard !watching else { return }
+            TerminalNotifier.shared.notify(
+                title: panel.session.notificationTitle,
+                subtitle: panel.projectName,
+                body: body,
+                sessionID: panel.session.id
+            )
+        }
+
+        withAnimation(Self.chatPanelMotion) {
+            chats.append(panel)
+            raise(panel)
+        }
+        // The list is where a conversation pushed out of sight is found again,
+        // so the navigator is left on it. Only the tab, not the pane: a chat
+        // opened with the navigator folded away was opened by somebody who
+        // wanted the room.
+        navigatorTab = .claude
+        session.startIfNeeded()
+        return panel
+    }
+
+    /// Ends one panel's conversation — the ✕, and nothing else. Being replaced
+    /// on screen is not this: see ``chats``.
+    func closeChatPanel(_ panel: ChatPanel) {
+        panel.remember()
+        panel.session.terminate()
+        withAnimation(Self.chatPanelMotion) {
+            chats.removeAll { $0 === panel }
+        }
+    }
+
+    /// Brings a panel to the front, over the ones it was under and at no cost to
+    /// any of them. Clicking anywhere in a panel does this, so the one being
+    /// typed into is never the one underneath.
+    /// **Nothing happens at all when it is already in front**, and that guard
+    /// has to be out here rather than inside ``raise(_:)``.
+    ///
+    /// `ChatPanelClickMonitor` calls this on *every* left mouse-down in the
+    /// window, which is what lets a click anywhere in a panel bring it forward.
+    /// With the check inside `raise`, the mutation was correctly skipped but
+    /// `withAnimation` had already opened a transaction — so every click on the
+    /// front panel re-evaluated the whole overlay under an animation for a
+    /// change that was not made. Clicking that panel's own fold button paid it
+    /// on the way down and only then, on mouse-up, got to the fold: the pause
+    /// before a fold began was this, not the fold.
+    func raiseChatPanel(_ panel: ChatPanel) {
+        guard isBehindAnother(panel) else { return }
+        withAnimation(Self.chatPanelMotion) { raise(panel) }
+    }
+
+    /// Whether any other conversation is level with this one or above it.
+    private func isBehindAnother(_ panel: ChatPanel) -> Bool {
+        guard let top = chats.filter({ $0 !== panel }).map(\.depth).max() else { return false }
+        return panel.depth <= top
+    }
+
+    /// The same, unfolded: what the Claude list, a banner and a resumed
+    /// conversation all want, since each of them is a request to *read* it.
+    func unfoldChatPanel(_ panel: ChatPanel) {
+        withAnimation(Self.chatPanelMotion) {
+            panel.isCollapsed = false
+            // Its place on the strip goes with the bar. A panel that has been
+            // read and folded again belongs where a newly folded one goes — the
+            // right-hand end — rather than back in a gap the other bars have
+            // long since closed over.
+            panel.dockOrder = nil
+            panel.remember()
+            raise(panel)
+        }
+    }
+
+    private func raise(_ panel: ChatPanel) {
+        // Already alone at the top: leaving it there is what keeps a click
+        // inside the front panel from redrawing the window for nothing. The
+        // comparison is `<=` because two panels on the same depth have no order
+        // between them, and one of them has just been asked to be in front.
+        guard let top = chats.filter({ $0 !== panel }).map(\.depth).max(),
+              panel.depth <= top
+        else { return }
+        panel.depth = top + 1
+    }
+
+    /// Folds a panel down to its bar on the dock, and back out again.
+    ///
+    /// The terminal is neither taken out of the window nor squashed: it stays
+    /// mounted at the size it had, and the panel shrinking around it crops it
+    /// away. Both of the other answers cost the user a wait they could see —
+    /// unmounting means the surface has to be re-added and redrawn before the
+    /// conversation is back, and resizing means `claude` rewrapping a whole
+    /// transcript to a 300pt bar and back again.
+    func toggleChatPanelCollapsed(_ panel: ChatPanel) {
+        if panel.isCollapsed {
+            unfoldChatPanel(panel)
+        } else {
+            collapseChatPanel(panel)
+        }
+    }
+
+    /// Folds a conversation down to the dock, eased like everything else here.
+    ///
+    /// This was briefly instant, on the theory that compositing the live
+    /// terminal through a moving clip was what a fold felt slow *because* of.
+    /// It was not: the pause came before the animation had started at all — see
+    /// ``raiseChatPanel``, which was animating a no-op on the mouse-down that
+    /// preceded the button's own mouse-up. With that gone there is nothing to
+    /// buy by dropping the movement, and a panel that vanishes rather than
+    /// folding gives the reader nothing to follow to the dock.
+    func collapseChatPanel(_ panel: ChatPanel) {
+        withAnimation(Self.chatPanelMotion) {
+            panel.isCollapsed = true
+            panel.remember()
+            raise(panel)
+        }
+    }
+
+    /// Where a drag or a resize left a panel. Written once it is over rather
+    /// than on every frame of it: the panel follows the pointer on its own while
+    /// the mouse is down, and a store this size redrawing the whole window sixty
+    /// times a second to move one rectangle is a stutter you can feel.
+    func placeChatPanel(_ panel: ChatPanel, frame: ChatPanelFrame) {
+        panel.frame = frame.clamped(to: chatPanelBounds)
+        panel.remember()
+    }
+
+    /// The overlay has been laid out: the window's size, and with it any panel
+    /// the window just got too small for. A folded panel is clamped the same
+    /// way, since what is being kept in bounds is where it will come *back* to;
+    /// its place on the dock is worked out afresh from ``chatDockRegion`` every
+    /// time it is asked for, so it follows a resized window on its own.
+    func chatPanelsDidLayout(in bounds: CGSize) {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        chatPanelBounds = bounds
+        for panel in chats {
+            let clamped = panel.frame.clamped(to: bounds)
+            guard clamped != panel.frame else { continue }
+            panel.frame = clamped
+        }
     }
 
     /// Opens the project in another editor, if it is installed.
@@ -2457,6 +2951,358 @@ final class WorkspaceStore {
             if recent.count >= limit { break }
         }
         return recent
+    }
+}
+
+/// One conversation floating over the window: a shell running `claude` in a
+/// repository, plus where on the window it sits.
+///
+/// It is a class and not a value because of the shell — a `TerminalSession`
+/// owns a running process and the `NSView` drawing it, and both have to survive
+/// every redraw the panel does while being dragged around.
+@MainActor
+@Observable
+final class ChatPanel: Identifiable {
+    nonisolated let id = UUID()
+    /// The repository this conversation was started in, which is also the folder
+    /// `claude` is running in and the key its geometry is remembered under.
+    nonisolated let projectID: URL
+    /// Kept rather than looked up: a banner naming the repository has to say
+    /// something even for a repository removed while the panel was up.
+    nonisolated let projectName: String
+    let session: TerminalSession
+
+    var frame: ChatPanelFrame
+
+    /// Folded down to the title bar, the way a chat window on a desktop browser
+    /// folds. The conversation carries on behind it.
+    var isCollapsed: Bool {
+        get { frame.isCollapsed }
+        set { frame.isCollapsed = newValue }
+    }
+
+    /// Which panel is in front. A counter rather than the array's order: two
+    /// panels swapping places in the array would move their views in the view
+    /// hierarchy, and a terminal pulled out and put back loses the keyboard
+    /// mid-sentence.
+    var depth = 0
+
+    /// Where this bar sits on the dock, once it has been dragged there — the
+    /// same trick as ``depth`` and for the same reason, a key the strip sorts by
+    /// instead of an order ``WorkspaceStore/chats`` is shuffled into.
+    ///
+    /// Not saved with the frame, and deliberately: it is an index among the
+    /// conversations folded *right now*, which is a fact about this window this
+    /// afternoon and not about the repository. A number written down would come
+    /// back next launch meaning a strip that no longer exists.
+    var dockOrder: Int?
+
+    /// What the panel is called: the conversation, once Claude Code has named
+    /// it, and whatever the shell is calling itself until then.
+    ///
+    /// The repository used to be the stand-in, and it was the wrong one twice
+    /// over. It is already on the line below, so a new conversation put the same
+    /// words on the bar twice — and it is a *constant*, so the bar then sat on
+    /// them: a name is only read back once the first prompt has been answered
+    /// and the transcript written, which is a whole turn of chatting away, and
+    /// nothing moved on the bar for the length of it. `claude` renames its own
+    /// terminal throughout, which is what the Claude list and the old
+    /// centre-pane tab have always fallen back to — so all three now say the
+    /// same thing at the same moment.
+    var title: String { session.displayTitle }
+
+    init(projectID: URL, projectName: String, session: TerminalSession, frame: ChatPanelFrame) {
+        self.projectID = projectID
+        self.projectName = projectName
+        self.session = session
+        self.frame = frame
+    }
+
+    /// Writes where this panel is, so the next one opened on this repository
+    /// comes back the same size in the same corner.
+    func remember() {
+        frame.save(for: projectID)
+    }
+}
+
+/// Where a floating chat is and how big, in the window's own coordinates with
+/// the origin at its top-left corner.
+///
+/// It is always the **unfolded** geometry, even while the panel is folded: a
+/// folded panel's bar belongs to the strip along the bottom of the centre pane,
+/// which lays its own bars out (see ``ChatDockStrip``) — so this is free to go
+/// on saying where the panel came from and where it goes back to.
+///
+/// A folded bar used to carry a `dockX` here as well, the free x the user had
+/// dragged it to. The strip replaced it with an order, so the field is gone; an
+/// old one still in `UserDefaults` decodes to nothing, since a key with no
+/// property to land in is simply dropped.
+struct ChatPanelFrame: Equatable, Codable {
+    var x: CGFloat
+    var y: CGFloat
+    var width: CGFloat
+    var height: CGFloat
+    var isCollapsed = false
+
+    /// A terminal narrower than about forty columns or shorter than ten rows is
+    /// not a terminal any more — `claude` draws a boxed prompt and wraps its own
+    /// spinner — so this is the floor for both the resize grip and anything read
+    /// back from disk.
+    static let minimumWidth: CGFloat = 340
+    static let minimumHeight: CGFloat = 240
+    /// The bar the panel is dragged by, and all that is left of it folded.
+    static let titleBarHeight: CGFloat = 30
+    /// How much of that bar has to stay inside the window. Enough to grab and to
+    /// read part of the name by, so a panel can be pushed most of the way off
+    /// the edge to get it out of the way without ever being lost.
+    private static let minimumVisible: CGFloat = 150
+
+    /// What the panel takes up where it floats — nothing at all once it is
+    /// folded, because by then the only part of it on screen is a bar on the
+    /// dock and that is the strip's to draw. What is left behind here is the
+    /// panel itself, cropped to a line: it goes on holding the live terminal at
+    /// full size, which is what makes coming back instant.
+    var visibleHeight: CGFloat { isCollapsed ? 0 : height }
+
+    /// The rectangle a click has to land in to be this panel's. Empty while it
+    /// is folded — a bar on a strip that scrolls has no rectangle this frame
+    /// could name.
+    var onScreenRect: CGRect {
+        CGRect(x: x, y: y, width: width, height: visibleHeight)
+    }
+
+    /// What a chat opens at when this repository has never had one.
+    static let defaultSize = CGSize(width: 460, height: 420)
+    /// The gap left to the window's edge, and between two panels.
+    static let margin: CGFloat = 18
+    /// The gap between two bars on the dock. Tighter than ``margin``, because
+    /// bars on a strip are one row of one thing and the strip's own inset is
+    /// what separates it from the pane.
+    static let dockedGap: CGFloat = 10
+    /// How wide a folded panel is on the dock. Narrower than the panel it came
+    /// from: what is left of it is a name and two buttons, and a bar the width
+    /// of the conversation would read as the conversation still being there.
+    private static let dockedWidth: CGFloat = 300
+    /// How narrow a bar is allowed to get, and now genuinely a floor. **The dock
+    /// is shared by every repository**, so a bar carries the project as well as
+    /// the conversation, and of the two the project is what has to survive — two
+    /// bars from two repositories called the same truncated thing is the dock
+    /// failing at the one job it has. The bar gives the project its width first
+    /// and truncates the conversation into whatever is left; this is the point
+    /// below which there is nothing left to give.
+    ///
+    /// Below it the bars used to be allowed to overlap, which was only ever the
+    /// least bad thing to do with bars there was no room for. The strip scrolls
+    /// now, so there is somewhere to put them and nothing to trade away.
+    private static let dockedMinimumWidth: CGFloat = 190
+
+    /// How many bars the dock shows at once — **two and a half**, and the half
+    /// is the point.
+    ///
+    /// Dividing the room by the real count is what made a fourth conversation
+    /// shrink every bar to `backend | ✳…`: the repository takes its width first,
+    /// so the conversation — the only thing telling two bars from the same
+    /// repository apart — is what disappeared, and the row became four identical
+    /// stubs. Fixing the number fixed that, but a row that ends exactly at the
+    /// edge of the pane is a row with nothing to say it goes on. A bar cut down
+    /// the middle says it, and says it without a scroller sitting over the bars
+    /// it is about — which on a 30pt row is most of them.
+    static let dockedBarsShown: CGFloat = 2.5
+
+    /// How wide each of `count` bars is on a dock this wide: the full width
+    /// while they fit, squeezed down towards the floor when they nearly do, and
+    /// no narrower than that — past it the strip scrolls instead.
+    static func dockedBarWidth(for count: Int, in region: CGRect) -> CGFloat {
+        let places = min(CGFloat(max(count, 1)), dockedBarsShown)
+        let room = region.width - margin * 2 - dockedGap * (places.rounded(.up) - 1)
+        return min(dockedWidth, max(room / places, dockedMinimumWidth))
+    }
+
+
+    /// The line the strip's bars sit on, in the overlay's coordinates.
+    static func dockLine(in region: CGRect) -> CGFloat {
+        max(region.maxY - margin - titleBarHeight, 0)
+    }
+
+    /// Where a panel goes as it folds: down to the right-hand end of the dock,
+    /// and to nothing. The strip is what the user then sees and clicks; this is
+    /// the travel that says the conversation went *there* rather than vanishing,
+    /// and the resting place of the panel that goes on holding the terminal.
+    static func foldedAway(_ frame: ChatPanelFrame, into region: CGRect, barWidth: CGFloat) -> ChatPanelFrame {
+        var result = frame
+        result.x = max(region.maxX - margin - barWidth, region.minX)
+        result.y = dockLine(in: region)
+        result.isCollapsed = true
+        return result
+    }
+
+    /// The frame a pull on one edge or corner leaves, with every edge that is
+    /// not being pulled left exactly where it was.
+    ///
+    /// That is the whole of what makes the top and the left different from the
+    /// bottom and the right: those two move the origin *and* change the size,
+    /// and doing one without the other is what makes a panel walk across the
+    /// window as it is being sized. Written in edges rather than in an origin
+    /// and a size for that reason — there is nothing left to get wrong.
+    func resized(pulling edges: ChatPanelEdges, by translation: CGSize, in bounds: CGSize) -> ChatPanelFrame {
+        var left = x
+        var right = x + width
+        var top = y
+        var bottom = y + height
+
+        if edges.contains(.leading) {
+            left = min(max(left + translation.width, 0), right - Self.minimumWidth)
+        }
+        if edges.contains(.trailing) {
+            right = max(min(right + translation.width, bounds.width), left + Self.minimumWidth)
+        }
+        if edges.contains(.top) {
+            top = min(max(top + translation.height, 0), bottom - Self.minimumHeight)
+        }
+        if edges.contains(.bottom) {
+            bottom = max(min(bottom + translation.height, bounds.height), top + Self.minimumHeight)
+        }
+
+        var result = self
+        result.x = left
+        result.y = top
+        result.width = right - left
+        result.height = bottom - top
+        return result
+    }
+
+    /// Where a chat opens: where this repository's last one was left, or the
+    /// bottom-right corner — where a chat window on a desktop browser lives, and
+    /// the one corner of this window nothing is ever read in.
+    ///
+    /// Never exactly on top of a panel already up: two chats are usually two
+    /// halves of one thought, and a second one landing on the first reads as the
+    /// first having vanished. It goes beside it while the window is wide enough
+    /// for both, and steps up and across when it is not.
+    static func opening(
+        remembered: ChatPanelFrame?,
+        in bounds: CGSize,
+        beside existing: [ChatPanelFrame]
+    ) -> ChatPanelFrame {
+        var frame = remembered ?? ChatPanelFrame(
+            x: bounds.width - defaultSize.width - margin,
+            y: bounds.height - defaultSize.height - margin,
+            width: defaultSize.width,
+            height: defaultSize.height
+        )
+        // Looped, not tested once. With no ceiling on how many conversations can
+        // be open, the first free-looking spot is routinely taken by the third
+        // panel and the fourth would land straight back on it. The step is
+        // bounded because a window can genuinely run out of distinct corners —
+        // past that the cascade wraps to the start and panels do overlap, which
+        // is what every window manager does and is honest about it.
+        let taken = { (frame: ChatPanelFrame) in
+            existing.contains { abs($0.x - frame.x) < 24 && abs($0.y - frame.y) < 24 }
+        }
+        var step = 0
+        while step < 12, taken(frame) {
+            let beside = frame.x - frame.width - margin
+            if step == 0, beside >= margin {
+                frame.x = beside
+            } else {
+                frame.x -= 28
+                frame.y -= 28
+                // Off the top or the left: back to the corner it started from,
+                // nudged in, so the pile stays somewhere the reader can reach.
+                if frame.x < margin || frame.y < margin {
+                    frame.x = bounds.width - frame.width - margin - CGFloat(step % 5) * 14
+                    frame.y = bounds.height - frame.height - margin - CGFloat(step % 5) * 14
+                }
+            }
+            step += 1
+        }
+        // Asking for a chat is asking for somewhere to type, so one that was
+        // left folded still comes back open.
+        frame.isCollapsed = false
+        return frame.clamped(to: bounds)
+    }
+
+    /// Pulls a frame back inside a window of this size, keeping enough of the
+    /// title bar in view to grab it by.
+    func clamped(to bounds: CGSize) -> ChatPanelFrame {
+        var result = self
+        result.width = min(max(width, Self.minimumWidth), max(bounds.width, Self.minimumWidth))
+        result.height = min(max(height, Self.minimumHeight), max(bounds.height, Self.minimumHeight))
+
+        let lastX = bounds.width - Self.minimumVisible
+        let firstX = Self.minimumVisible - result.width
+        result.x = min(max(x, firstX), max(firstX, lastX))
+        // The top edge stays inside on both sides: a bar dragged above the
+        // window is one nothing can reach, and the traffic lights are up there.
+        let lastY = bounds.height - Self.titleBarHeight
+        result.y = min(max(y, 0), max(0, lastY))
+        return result
+    }
+
+    // MARK: - Remembering it
+
+    /// Per repository, so the chat you keep in the bottom-right corner of one
+    /// project is in the bottom-right corner the next time it is opened — and
+    /// the next launch, since the geometry outlives the shell that is gone.
+    private static func key(for projectID: URL) -> String {
+        "workspace.chatPanel." + projectID.path
+    }
+
+    static func saved(for projectID: URL) -> ChatPanelFrame? {
+        guard let data = UserDefaults.standard.data(forKey: key(for: projectID)),
+              let frame = try? JSONDecoder().decode(ChatPanelFrame.self, from: data)
+        else { return nil }
+        return frame
+    }
+
+    func save(for projectID: URL) {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        UserDefaults.standard.set(data, forKey: Self.key(for: projectID))
+    }
+}
+
+/// Which sides of a panel a drag is pulling. A corner is two of them, which is
+/// the only reason this is an option set and not four cases.
+struct ChatPanelEdges: OptionSet, Sendable {
+    let rawValue: Int
+
+    static let top = ChatPanelEdges(rawValue: 1 << 0)
+    static let bottom = ChatPanelEdges(rawValue: 1 << 1)
+    static let leading = ChatPanelEdges(rawValue: 1 << 2)
+    static let trailing = ChatPanelEdges(rawValue: 1 << 3)
+
+    /// The pointer that says what a pull here would do. macOS ships no public
+    /// diagonal-resize cursor — the one every window uses is private — so a
+    /// corner keeps the crosshair the old bottom-right grip had rather than
+    /// reaching into `NSCursor`'s undeclared selectors for it.
+    @MainActor
+    /// The macOS 14 fallback, and the reason the corners look wrong on it:
+    /// there is no public diagonal `NSCursor`, so all four settle for a
+    /// crosshair. ``resizePosition`` is the real answer where it exists.
+    var cursor: NSCursor {
+        switch self {
+        case .top, .bottom: .resizeUpDown
+        case .leading, .trailing: .resizeLeftRight
+        default: .crosshair
+        }
+    }
+
+    /// The same eight places, named the way SwiftUI names them — which draws the
+    /// proper diagonal at a corner, and settles against the other pointer
+    /// regions on the panel instead of being overruled by them. See
+    /// `View.resizePointer(_:)`.
+    @available(macOS 15.0, *)
+    var resizePosition: FrameResizePosition {
+        switch self {
+        case .top: .top
+        case .bottom: .bottom
+        case .leading: .leading
+        case .trailing: .trailing
+        case [.top, .leading]: .topLeading
+        case [.top, .trailing]: .topTrailing
+        case [.bottom, .leading]: .bottomLeading
+        default: .bottomTrailing
+        }
     }
 }
 

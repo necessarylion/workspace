@@ -845,7 +845,7 @@ struct AskClaudeButton: View {
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
         .pointerCursor()
-        .help("Start a Claude Code conversation about this repository, in a terminal")
+        .help("Start a Claude Code conversation about this repository, in a panel over the window")
         .fixedSize()
     }
 }

@@ -1,6 +1,7 @@
 import AppKit
 import CodeEditLanguages
 import CodeEditSourceEditor
+import CodeEditTextView
 import SwiftUI
 
 /// The editor pane: a thin wrapper around `SourceEditor` from
@@ -32,12 +33,21 @@ struct CodeEditorView: View {
     /// here, the change also resets the `@State` below — which is what keeps a
     /// language server conversation from outliving the file it was about.
     ///
-    /// The revision is in the identity as well, and that is the only way it could
-    /// be. `SourceEditor`'s text binding runs one way — the text view writes to
-    /// it, and a value written *into* it is never read back — so a file that
-    /// changed on disk cannot be pushed into the editor at all. Rebuilding it is
-    /// what reload means here; the cost is that the caret goes back to the top,
-    /// where it used to be kept.
+    /// **A file changing on disk is not one of those**, though the revision used
+    /// to be in here too. `SourceEditor`'s text binding runs one way — the text
+    /// view writes to it, and a value written *into* it is never read back — so
+    /// rebuilding looked like the only way to show text that had changed
+    /// underneath. It cost the reader their place in the file every time, which
+    /// is the wrong trade when the thing writing the file is an agent working
+    /// while they read. ``ReloadTextInPlace`` goes to the controller instead, and
+    /// the editor now survives a reload.
+    ///
+    /// What is still here is `isLargeFile`, and only because it can turn over. A
+    /// file that grows past the threshold while open wants a different editor
+    /// altogether — no highlighting, no language server, wrapping forced on, not
+    /// editable — and none of that can be swapped underneath a live one. It is
+    /// rare enough to be worth a rebuild, and a rebuild is exactly right when it
+    /// happens.
     var body: some View {
         EditorPane(
             document: document,
@@ -45,7 +55,7 @@ struct CodeEditorView: View {
             theme: theme,
             store: store
         )
-        .id("\(document.url.absoluteString)#\(document.externalRevision)")
+        .id("\(document.url.absoluteString)#\(document.isLargeFile)")
     }
 }
 
@@ -53,12 +63,18 @@ private struct EditorPane: View {
     let document: OpenDocument
     var wrapsLines: Bool
     var theme: SyntaxTheme
+    /// Held only to be observed: see the `gitRevision` change below. Nil for a
+    /// file opened from outside every added repository.
+    let project: Project?
 
     @State private var state = SourceEditorState()
     /// Held rather than made in `body`: a coordinator is handed over by
     /// reference and has to outlive the render that passed it.
     @State private var clipping = ClipFloatingSubviews()
+    @State private var finding = ScrollToFindMatch()
     @State private var revealing: RevealPendingPosition
+    @State private var reloading: ReloadTextInPlace
+    @State private var gitMarkers: GutterDiffMarkers?
     @State private var languageServer: LanguageServerCoordinator?
 
     init(document: OpenDocument, wrapsLines: Bool, theme: SyntaxTheme, store: WorkspaceStore) {
@@ -66,12 +82,22 @@ private struct EditorPane: View {
         self.wrapsLines = wrapsLines
         self.theme = theme
         _revealing = State(initialValue: RevealPendingPosition(document: document))
+        _reloading = State(initialValue: ReloadTextInPlace(document: document))
         // A file outside every added repository has no root to start a server
         // in, and a large one is deliberately left alone.
-        let root = store.project(containing: document.url)?.url
+        let project = store.project(containing: document.url)
+        self.project = project
+        let root = project?.url
         _languageServer = State(
             initialValue: document.isLargeFile ? nil : root.map {
                 LanguageServerCoordinator(document: document, root: $0, store: store)
+            }
+        )
+        // Same two conditions, for the same two reasons: no repository, no diff to
+        // draw; and a large file is one the stack only shows.
+        _gitMarkers = State(
+            initialValue: document.isLargeFile ? nil : root.map {
+                GutterDiffMarkers(file: document.url, projectRoot: $0)
             }
         )
     }
@@ -112,12 +138,42 @@ private struct EditorPane: View {
             guard line != nil else { return }
             revealing.apply()
         }
+        // The file was replaced under the reader — an agent halfway through a
+        // refactor, a save from another editor, a branch switched out from under
+        // it. Two things follow, and neither is implied by the other: the text
+        // goes into the editor that is already showing it, and the markers are
+        // asked for again, because the working tree they describe has just moved.
+        //
+        // The markers used to need no asking. `externalRevision` was in the
+        // editor's identity, so the whole pane was rebuilt and this coordinator
+        // loaded from scratch as it appeared; now that the editor survives the
+        // reload, nothing would tell it.
+        .onChange(of: document.externalRevision) { _, _ in
+            reloading.apply()
+            gitMarkers?.refresh()
+        }
+        // The same move made by this app rather than to it. ⌘S leaves the editor's
+        // text exactly as it is — there is nothing to reload — but it is still the
+        // moment the working tree stops matching what git last saw.
+        .onChange(of: document.saveRevision) { _, _ in
+            gitMarkers?.refresh()
+        }
+        // And the side the file cannot see at all. The markers are the working tree
+        // against HEAD, and a commit or a branch switch moves HEAD while every byte
+        // of this file stays where it was — so nothing above fires and the markers
+        // would go on describing a baseline that is gone. This is not a poll:
+        // `gitRevision` only moves when a status read actually happened, and those
+        // are themselves driven by the watchers.
+        .onChange(of: project?.gitRevision) { _, _ in
+            gitMarkers?.refresh()
+        }
     }
 
     /// Spelled out rather than built from a literal: the two have no type in
     /// common but the protocol, and an array literal of them infers the wrong one.
     private var coordinators: [any TextViewCoordinator] {
-        var list: [any TextViewCoordinator] = [clipping, revealing]
+        var list: [any TextViewCoordinator] = [clipping, finding, revealing, reloading]
+        if let gitMarkers { list.append(gitMarkers) }
         if let languageServer { list.append(languageServer) }
         return list
     }
@@ -254,6 +310,148 @@ private final class RevealPendingPosition: TextViewCoordinator, @unchecked Senda
     }
 }
 
+/// Puts text that changed on disk into the editor already showing it, and leaves
+/// the reader where they were.
+///
+/// The whole point is the second half. An agent editing the repository while
+/// someone reads it will touch the file they are looking at, and the old answer —
+/// rebuild the editor, see ``CodeEditorView`` — threw them back to the top of the
+/// file every time it did. Being a moment out of date is a smaller problem than
+/// losing your place.
+///
+/// `SourceEditor` will not carry the text in. `updateNSViewController` reads the
+/// state binding, the language and the configuration and never once looks at the
+/// text, so a value written into the binding is dropped on the floor. The
+/// controller does have `setText`, though, and reaching the controller the SwiftUI
+/// view built is what `TextViewCoordinator` is for.
+///
+/// **The scroll offset is what is restored, not the caret.** The two are the same
+/// thing only for someone who has not scrolled since they last clicked, which is
+/// not someone reading. The caret is put back as well, because the status bar
+/// shows it and it costs nothing, but it is not what the viewport is aimed at.
+///
+/// **And the offset is remembered as a line, not as a number of points.**
+/// `TextView.setText` swaps in a new `NSTextStorage` and resets the layout
+/// manager, which throws away every line height it had measured and rebuilds the
+/// document out of estimates. A y of 4,213 points therefore does not mean quite
+/// the same thing on the other side of the call. The line index at the top of the
+/// viewport does, so that — plus how far into that line the viewport had cut — is
+/// what is taken and what the offset is rebuilt from.
+private final class ReloadTextInPlace: TextViewCoordinator, @unchecked Sendable {
+    private let document: OpenDocument
+    /// What the pane around this was built for.
+    ///
+    /// A file that crosses the large-file threshold while open wants a different
+    /// editor, not the same one holding different text, and `CodeEditorView`'s
+    /// identity carries `isLargeFile` for exactly that reason. This is the same
+    /// fact from the other side: when it turns over, the reload stands down and
+    /// lets the rebuild happen rather than feeding a minified bundle to a
+    /// tree-sitter parser for one frame on the way past.
+    private let wasLargeFile: Bool
+    private weak var controller: TextViewController?
+
+    @MainActor
+    init(document: OpenDocument) {
+        self.document = document
+        self.wasLargeFile = document.isLargeFile
+    }
+
+    func prepareCoordinator(controller: TextViewController) {
+        MainActor.assumeIsolated { self.controller = controller }
+    }
+
+    func controllerDidAppear(controller: TextViewController) {
+        MainActor.assumeIsolated { self.controller = controller }
+    }
+
+    func destroy() {
+        MainActor.assumeIsolated { controller = nil }
+    }
+
+    /// Deferred a turn, for both of the reasons this file has met before.
+    ///
+    /// The change is still being delivered: this is called from an `onChange`,
+    /// and `setText` ends in a selection-changed notification that the package
+    /// turns into a write to `SourceEditorState` — a SwiftUI state write from
+    /// inside a view update. And the restore below would rather the text view had
+    /// been given its own layout pass at the new document first.
+    @MainActor
+    func apply() {
+        Task { @MainActor [weak self] in
+            guard let self,
+                  self.document.isLargeFile == self.wasLargeFile,
+                  let controller = self.controller,
+                  let scrollView = controller.scrollView,
+                  let textView = controller.textView else { return }
+
+            let origin = scrollView.contentView.bounds.origin
+            let anchor = textView.layoutManager.textLineForPosition(origin.y)
+            let anchorLine = anchor?.index
+            let intoLine = anchor.map { origin.y - $0.yPos } ?? 0
+            let carets = controller.cursorPositions
+
+            controller.setText(self.document.text)
+
+            // Before anything is asked about where things are: the scroll view
+            // clamps against the document view's frame, and that frame is still
+            // the old file's height until the next layout pass. A file that got
+            // shorter would take the viewport with it.
+            textView.updateFrameIfNeeded()
+
+            self.restoreCarets(carets, in: controller)
+            self.restoreScroll(to: anchorLine, intoLine: intoLine, x: origin.x, in: controller)
+        }
+    }
+
+    /// The caret, clamped rather than dropped.
+    ///
+    /// `setText` already carries the selection across — `setTextStorage` re-sets
+    /// the ranges it was holding — but it does it by handing the old ranges to a
+    /// selection manager that *filters* anything outside the new text. So a file
+    /// that got shorter loses the caret entirely, which reads in the status bar as
+    /// the file having no caret at all. Clamping puts it at the end instead.
+    @MainActor
+    private func restoreCarets(_ positions: [CursorPosition], in controller: TextViewController) {
+        let length = controller.textView.textStorage.length
+        let clamped = positions.compactMap { position -> CursorPosition? in
+            guard position.range.location != NSNotFound else { return nil }
+            let location = min(position.range.location, length)
+            return CursorPosition(
+                range: NSRange(location: location, length: min(position.range.length, length - location))
+            )
+        }
+        guard !clamped.isEmpty else { return }
+        controller.setCursorPositions(clamped)
+    }
+
+    /// Back to the line that was at the top of the viewport, and to the same point
+    /// within it.
+    ///
+    /// Two steps, and the first is there to make the second true. Straight after
+    /// `setText` the layout manager has measured nothing and every line above the
+    /// anchor is standing at an estimated height, so the y it reports for the
+    /// anchor is a guess — the cold-layout problem ``RevealPendingPosition``
+    /// describes at length, arrived at from a third direction. `scrollToRange` is
+    /// the way through it there and here: it asks the layout manager for the
+    /// offset's rect and lays lines out until the answer stops moving.
+    ///
+    /// That leaves the anchor's line flush with the top of the viewport, which is
+    /// only right for a reader who had happened to stop scrolling on a line
+    /// boundary. The second step asks where the line ended up now that it has
+    /// really been laid out, and puts the offset back exactly.
+    @MainActor
+    private func restoreScroll(to line: Int?, intoLine: CGFloat, x: CGFloat, in controller: TextViewController) {
+        guard let line, let textView = controller.textView, let scrollView = controller.scrollView,
+              let anchor = textView.layoutManager.textLineForIndex(line) else { return }
+
+        textView.scrollToRange(NSRange(location: anchor.range.location, length: 0), center: false)
+
+        guard let settled = textView.layoutManager.textLineForIndex(line) else { return }
+        scrollView.scroll(scrollView.contentView, to: CGPoint(x: x, y: max(settled.yPos + intoLine, 0)))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+}
+
 /// Makes the editor's scroll view clip, which it does not do on its own.
 ///
 /// The gutter is not inside the clip view — the package attaches it with
@@ -285,5 +483,86 @@ private final class ClipFloatingSubviews: TextViewCoordinator {
     /// scroll view wholesale afterwards.
     func controllerDidAppear(controller: TextViewController) {
         MainActor.assumeIsolated { controller.scrollView?.clipsToBounds = true }
+    }
+}
+
+/// Brings the find panel's current match on screen.
+///
+/// Cmd+F, a query, Enter — and the selection moves to the next match while the
+/// viewport does not, so the match the user asked for is somewhere they cannot
+/// see. It is the same failure `RevealPendingPosition` works around, arrived at
+/// from the other end.
+///
+/// The package does ask to be scrolled. `EmphasisManager` selects the current
+/// match with `setSelectedRanges` and then calls `scrollSelectionToVisible()`,
+/// which opens `lastFrame = .zero` and loops `while lastFrame != boundingRect`.
+/// A `TextSelection` is built with a `boundingRect` of `.zero` and only ever
+/// given a real one while being *drawn* — and a match below the fold is not
+/// drawn — so the condition fails on its first test and the body never runs.
+/// Deterministic, and the reason it looks like Enter does nothing at all.
+///
+/// So the scroll is made here instead, through `scrollToRange`, which asks the
+/// layout manager for the offset's rect and lays the line out to answer.
+///
+/// **Which selection change, and how it is told apart, is the whole design.**
+/// `textViewDidChangeSelection` is the coordinator protocol's own callback and it
+/// arrives for *every* selection — every arrow key the user presses included.
+/// Scrolling on all of them would fight the caret and be a worse bug than the one
+/// being fixed. The find panel offers nothing more specific: its view model, its
+/// notifications and its emphasis group name are all internal to the package.
+///
+/// What does distinguish a find move is the emphasis behind it. The panel puts one
+/// `Emphasis` per match into a group of its own and marks exactly the current one
+/// `selectInDocument`, which is what makes `EmphasisManager` set the selection at
+/// all — and it appends the group *before* setting it, so by the time this runs
+/// the group already names the match. Requiring the document's whole selection to
+/// be that one range is then enough: a caret move is an empty range and matches
+/// nothing, and a drag that happens to land on the current match exactly is
+/// already on screen, where `scrollToRange` returns without moving.
+///
+/// The group's name is the package's own and cannot be read from outside, so it is
+/// spelled out below. If it ever changes upstream the lookup finds nothing and this
+/// goes quiet — back to today's behaviour rather than into a wrong one.
+private final class ScrollToFindMatch: TextViewCoordinator, @unchecked Sendable {
+    /// `EmphasisGroup.find`, which CodeEditSourceEditor keeps to itself.
+    private static let findEmphasisGroup = "codeedit.find"
+
+    private weak var controller: TextViewController?
+
+    func prepareCoordinator(controller: TextViewController) {
+        MainActor.assumeIsolated { self.controller = controller }
+    }
+
+    func controllerDidAppear(controller: TextViewController) {
+        MainActor.assumeIsolated { self.controller = controller }
+    }
+
+    func destroy() {
+        MainActor.assumeIsolated { controller = nil }
+    }
+
+    func textViewDidChangeSelection(controller: TextViewController, newPositions: [CursorPosition]) {
+        MainActor.assumeIsolated {
+            self.controller = controller
+            scrollToCurrentMatch()
+        }
+    }
+
+    /// Deferred a turn, and for a sharper reason than `RevealPendingPosition`'s.
+    /// This callback is delivered from inside `setSelectedRanges`, which the
+    /// emphasis manager is part-way through calling, and `scrollToRange` drives
+    /// layout passes of its own. Taking the turn lets the package finish placing
+    /// the emphasis layers before the lines under them move.
+    @MainActor
+    private func scrollToCurrentMatch() {
+        Task { @MainActor [weak self] in
+            guard let textView = self?.controller?.textView,
+                  let current = textView.emphasisManager?
+                      .getEmphases(for: Self.findEmphasisGroup)
+                      .first(where: \.selectInDocument),
+                  textView.selectionManager?.textSelections.map(\.range) == [current.range] else { return }
+
+            textView.scrollToRange(current.range)
+        }
     }
 }

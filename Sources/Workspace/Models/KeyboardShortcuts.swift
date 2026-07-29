@@ -160,7 +160,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .goBack: "The item you were looking at before"
         case .goForward: "The item you came back from"
         case .refreshAll: "Re-read every repository's branch, changes and pull requests"
-        case .askClaude: "Open the Claude Code CLI in a tab"
+        case .askClaude: "A conversation in a panel over the window, next to the code"
         case .toggleTerminal: "The same key in and back out of the repository's shell"
         case .openTerminal: "Show the selected repository's terminal"
         case .newTerminalTab: "Another shell beside the current one"

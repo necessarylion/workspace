@@ -31,6 +31,7 @@ struct ContentView: View {
             }
             ViewerView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background { viewerBounds }
             if store.showsNavigator {
                 PaneResizer(width: $navigatorWidth, range: 230...460, growsLeftwards: true)
                 NavigatorView()
@@ -41,12 +42,21 @@ struct ContentView: View {
         // The panes draw their own header rows and make their own room for the
         // traffic lights, so none of them wants the title bar's safe area.
         .ignoresSafeArea()
+        // One space for the panes and the chat overlay both, so the rectangle
+        // `viewerBounds` measures below and the geometry the overlay lays its
+        // panels out in are the same numbers. Named on the view the overlay is
+        // attached to, which is what makes their origins one point.
+        .coordinateSpace(.named(Self.paneSpace))
         // The window opens with nothing focused rather than in the sidebar's
         // filter box, so ⎋ closes the open item from the first keystroke.
         .withoutInitialTextFocus()
         // Each pane draws its own header row, so the window needs no title of
         // its own; this only names the window in the Window menu.
         .navigationTitle("Workspace")
+        // First of the overlays, so the toast, the update notice and the two
+        // palettes all still come out on top of a floating chat: those are
+        // things the window is saying, and a panel is something in it.
+        .overlay { ChatPanelOverlay() }
         .overlay(alignment: .bottom) { statusToast }
         .overlay(alignment: .bottomTrailing) { UpdateBanner() }
         .overlay {
@@ -98,6 +108,28 @@ struct ContentView: View {
         // `git init` in a new folder, or a clone from a pasted URL.
         .sheet(item: $store.newRepository) { request in
             NewRepositorySheet(request: request)
+        }
+    }
+
+    private static let paneSpace = "workspace.panes"
+
+    /// The centre pane's rectangle, handed to the store because a folded chat
+    /// docks along the bottom of *this* pane rather than of the window — the
+    /// window's bottom-right corner is the navigator's, tools and all.
+    ///
+    /// A background rather than a measurement anywhere else: this is the one
+    /// view that is the viewer's shape, and it goes on being it through a pane
+    /// being folded away and through either seam being dragged, so the dock
+    /// tracks both without either of them having to know about it.
+    ///
+    /// Reported from `onAppear`/`onChange` and never from the body itself, which
+    /// would be a store written to in the middle of reading it.
+    private var viewerBounds: some View {
+        GeometryReader { proxy in
+            let frame = proxy.frame(in: .named(Self.paneSpace))
+            Color.clear
+                .onAppear { store.chatDockDidLayout(frame) }
+                .onChange(of: frame) { _, moved in store.chatDockDidLayout(moved) }
         }
     }
 

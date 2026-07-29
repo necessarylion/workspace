@@ -40,12 +40,25 @@ struct DiffView: View {
     /// The parse `colouredFiles` was built from; anything older is thrown away.
     @State private var colouredRevision: UUID?
 
-    /// A flattened diff, tagged with the parse it was built from. `body` runs
-    /// as soon as a new diff arrives but `onChange` rebuilds only afterwards,
-    /// and the entries index into `diff.files` — so the stale ones have to be
-    /// recognised rather than rendered.
+    /// A flattened diff, together with the parse it was built from.
+    ///
+    /// **Carrying the parse is what keeps the scroll position.** `body` runs as
+    /// soon as a new diff arrives but `onChange` rebuilds only afterwards, and
+    /// the entries are indices into `files` — so for that one frame the old
+    /// elements cannot be read against the new parse. Rendering nothing instead
+    /// was the obvious way out and a bad one: an empty stack collapses the
+    /// scroll view's content to the height of the viewport, AppKit clamps the
+    /// offset to the top, and the rows coming back a frame later cannot undo it.
+    /// That is the whole of "a diff that reloaded under me jumped to the top",
+    /// and with a file watcher reloading diffs by itself it stopped being rare.
+    ///
+    /// Holding the parse costs a retain rather than a copy — `Diff` is a struct
+    /// of arrays — and makes the stale elements safe to draw, so the stack never
+    /// empties and the offset is never clamped.
     private struct FlattenedDiff {
         var revision: UUID?
+        /// What ``elements`` index into. Nil only before the first rebuild.
+        var source: Diff?
         var elements: [DiffElement] = []
     }
 
@@ -119,7 +132,12 @@ struct DiffView: View {
                 ScrollViewReader { scroll in
                     ScrollView(.vertical) {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(flattened.revision == diff.revision ? flattened.elements : []) {
+                            // Unconditional, and deliberately so — see
+                            // `FlattenedDiff`. The elements are read against the
+                            // parse they were built from, so the frame between a
+                            // new diff arriving and `rebuild()` running draws the
+                            // old rows rather than none of them.
+                            ForEach(flattened.elements) {
                                 card($0, width: width, font: font)
                             }
                         }
@@ -148,6 +166,7 @@ struct DiffView: View {
         }
         flattened = FlattenedDiff(
             revision: diff.revision,
+            source: diff,
             elements: DiffElement.flatten(
                 diff,
                 only: currentFile,
@@ -171,10 +190,16 @@ struct DiffView: View {
     }
 
     /// The file to draw, which for a file-by-file diff is the coloured copy
-    /// once there is one — `diff.files` holds the plain parse.
+    /// once there is one — the parse itself holds the plain files.
+    ///
+    /// Read from the parse the elements were flattened against rather than from
+    /// `diff`, which is what lets a row outlive by one frame the diff it came
+    /// from. `flattened.source` is nil only before the first rebuild, when there
+    /// are no elements to ask about either.
     private func file(at index: Int) -> DiffFile {
-        let file = diff.files[index]
-        guard colouredRevision == diff.revision else { return file }
+        let source = flattened.source ?? diff
+        let file = source.files[index]
+        guard colouredRevision == source.revision else { return file }
         return colouredFiles[file.id] ?? file
     }
 

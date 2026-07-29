@@ -112,6 +112,7 @@ missing ones, so you never have to work out which command it wanted.
 | Feature | What it does |
 | --- | --- |
 | Real editing | Tree-sitter colours, folding, multiple cursors, find and replace (⌘F), auto-indent. |
+| Change markers | What has changed since HEAD, down the edge of the gutter — green where lines were added, blue where they were changed, and a wedge where they were deleted. |
 | Language servers | Diagnostics, completions (⌃Space) and ⌘-click to definition for 20+ languages. |
 | Go to file (⌘P) | `item controller` finds `app/controllers/item_controller.rb`. Punctuation optional. |
 | Search in files | ripgrep, grouped by file, every hit marked in the file you open. |
@@ -132,8 +133,8 @@ missing ones, so you never have to work out which command it wanted.
 | Feature | What it does |
 | --- | --- |
 | A real terminal | The Ghostty engine, rooted at the repo. As many shells as you like. |
-| Ask Claude (⇧⌘L) | The real Claude Code CLI in a tab — every flag, slash command and plugin works. |
-| Many at once | Conversations run side by side, each named after what it is about. |
+| Ask Claude (⇧⌘L) | The real Claude Code CLI in a floating panel — every flag, slash command and plugin works. Drag it, size it from any edge or corner, or fold it down to a bar on the dock along the bottom of the editor. One click on the bar brings it straight back, with no wait: a folded conversation keeps its terminal. |
+| Many at once | As many conversations as you like, each named after what it is about, all on screen together. Fold the ones you are not reading down to the dock; when there are more bars than the editor is wide, the dock scrolls sideways, and dragging a bar moves it along the row. |
 | Resume anything | Past conversations listed from disk — including ones you started in your own shell. |
 | It tells you | A Notification Centre banner when a shell wants you back; click it to land on that tab. |
 | Home shells | Terminals that belong to no repository (⇧⌘T). |
@@ -172,7 +173,7 @@ everything macOS binds) are not on offer there.
 | ⌘0 / ⌥⌘0 | Toggle the repositories / navigator sidebar |
 | ⌃⇥ | Switch repository |
 | ⌘R | Refresh all repositories |
-| ⇧⌘L | Ask Claude about the selected repo |
+| ⇧⌘L | Ask Claude about the selected repo, in a panel over the window |
 | ⌃⌘T / ⌘T / ⇧⌘T | Repo terminal · new tab · home terminal |
 | ⌃` | Show the repo's terminal, and the same key to leave it |
 | ⌃⌘P | Create PR with Claude Code |
