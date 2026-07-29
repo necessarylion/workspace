@@ -8,7 +8,10 @@ import Foundation
 @Observable
 final class FileNode: Identifiable {
     /// Folders we never walk into — they are large and rarely interesting.
-    static let ignoredNames: Set<String> = [
+    /// `nonisolated` because `WorkingTreeWatcher` filters against this on its
+    /// own queue: the same folders that are not worth listing are not worth
+    /// reloading the world for either.
+    nonisolated static let ignoredNames: Set<String> = [
         ".git", ".build", ".swiftpm", "node_modules", "DerivedData", ".DS_Store"
     ]
 

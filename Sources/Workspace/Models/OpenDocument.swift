@@ -189,13 +189,43 @@ final class OpenDocument: Identifiable {
     }
 
     func reloadFromDisk() {
-        guard let data = try? Data(contentsOf: url),
-              let string = String(data: data, encoding: .utf8) else { return }
+        guard let string = Self.readText(at: url) else { return }
+        adopt(string)
+    }
+
+    /// The reload for a file that changed under the editor rather than at the
+    /// user's asking, and the two things it will not do.
+    ///
+    /// **Unsaved edits win.** Whatever wrote the file, throwing away typing
+    /// nobody was warned about is a worse bug than showing text a moment old,
+    /// so a dirty document is left exactly as it is.
+    ///
+    /// **Text we already hold is not adopted again.** Our own `save()` writes
+    /// the file, and a watcher cannot tell that write from anyone else's — so
+    /// the comparison is what makes this idempotent, and it also spares the
+    /// editor a round of `setText`: cheap, but it resets the layout manager, it
+    /// clears the undo stack, and it makes the language server restate the whole
+    /// document.
+    @discardableResult
+    func reloadFromDiskIfChanged() -> Bool {
+        guard !isDirty, case .text(let current) = content,
+              let string = Self.readText(at: url), string != current
+        else { return false }
+        adopt(string)
+        return true
+    }
+
+    private func adopt(_ string: String) {
         savedText = string
         content = .text(string)
         largeFileNote = Self.largeFileNote(for: string)
         isDirty = false
         externalRevision += 1
+    }
+
+    private static func readText(at url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     // MARK: - Stats shown in the info sidebar

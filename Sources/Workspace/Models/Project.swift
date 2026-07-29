@@ -18,6 +18,18 @@ final class Project: Identifiable {
     var remote: RemoteInfo?
     var gitStatus: GitStatus?
 
+    /// Bumped every time the status above is read again, whatever came of it.
+    ///
+    /// For the things that are derived from git rather than from a file, and so
+    /// cannot tell that they are stale by watching the file. The editor's gutter
+    /// markers are the case that asked for it: they are the working tree against
+    /// HEAD, and a commit or a branch switch moves HEAD without touching a
+    /// single byte of the file they are drawn beside — so nothing in the
+    /// document changes, and every marker silently goes on describing a baseline
+    /// that has moved. A counter rather than observing `gitStatus` itself, since
+    /// a read that finds nothing changed still has to say so.
+    private(set) var gitRevision = 0
+
     /// The newest commits on the checked-out branch, newest first. The dashboard
     /// lists them by day; the Info panel only wants the first one.
     var recentCommits: [RepositoryCommit] = []
@@ -147,6 +159,7 @@ final class Project: Identifiable {
         self.root = FileNode(url: url, isDirectory: true)
         root.isExpanded = true
         root.loadChildrenIfNeeded()
+        startWatchingWorkingTree()
     }
 
     /// Loads remote, git status, head commit and pull requests.
@@ -161,6 +174,7 @@ final class Project: Identifiable {
         async let commitTask = RepositoryCommit.load(in: url, limit: commitLimit)
         remote = await remoteTask
         gitStatus = await statusTask
+        gitRevision += 1
         apply(await commitTask)
         startWatchingGitIfNeeded()
 
@@ -171,6 +185,7 @@ final class Project: Identifiable {
 
     func refreshGitStatus() async {
         gitStatus = await GitStatus.load(for: url)
+        gitRevision += 1
         await refreshCommits()
         startWatchingGitIfNeeded()
     }
@@ -232,6 +247,8 @@ final class Project: Identifiable {
 
     /// Live while this is a repository; see `startWatchingGitIfNeeded`.
     @ObservationIgnored private var gitWatcher: GitDirectoryWatcher?
+    /// Live for as long as the project is; see `startWatchingWorkingTree`.
+    @ObservationIgnored private var workingTreeWatcher: WorkingTreeWatcher?
     /// The pending reload, kept so a burst of writes coalesces into one.
     @ObservationIgnored private var gitWatchTask: Task<Void, Never>?
 
@@ -270,6 +287,89 @@ final class Project: Identifiable {
         guard !isRunningGitCommand else { return }
         await refreshGitStatus()
         refreshFileTree()
+    }
+
+    // MARK: - Files written outside the app
+
+    /// The pending reload, and the files the burst has named so far.
+    @ObservationIgnored private var workingTreeTask: Task<Void, Never>?
+    @ObservationIgnored private var changedFiles: Set<URL> = []
+    /// Set when the watcher handed over nil, meaning the kernel dropped the
+    /// events and the list above is not the whole story — see
+    /// ``WorkingTreeWatcher``. It survives until the reload it belongs to lands,
+    /// so a burst that overflows in the middle still ends in a full sweep.
+    @ObservationIgnored private var changedFilesUnknown = false
+
+    /// Called on the main actor after files under the project changed on disk,
+    /// with the ones that did — or with nil when something changed and nobody
+    /// can say what, which is all the app-came-back-to-the-front sweep knows.
+    /// `WorkspaceStore` installs it: the open editors and the diff on screen are
+    /// the store's to reload, and a project knows about neither.
+    @ObservationIgnored var onWorkingTreeChanged: (@MainActor (Set<URL>?) -> Void)?
+
+    /// Starts listening for writes the app did not make — Claude Code in the
+    /// embedded terminal above all, but a formatter, a code generator or an
+    /// editor in another window just as much.
+    ///
+    /// Unlike `startWatchingGitIfNeeded` this asks nothing about git and
+    /// happens once, from `init`: a folder that is not a repository has no
+    /// Changes list to keep honest but still has a file tree and open editors,
+    /// and those go stale exactly the same way.
+    private func startWatchingWorkingTree() {
+        workingTreeWatcher = WorkingTreeWatcher(root: url) { [weak self] paths in
+            Task { @MainActor in self?.workingTreeChanged(paths) }
+        }
+    }
+
+    /// Nil paths mean the watcher lost track and everything has to be checked;
+    /// see ``changedFilesUnknown``.
+
+    /// One `npm install`, one `git checkout`, one Claude Code turn — each is a
+    /// long burst of writes, and re-running `git status` per file in it would
+    /// cost more than the work being watched. The reads wait for the burst to
+    /// end, and the files it named pile up in the meantime so the callers still
+    /// learn about every one of them.
+    private func workingTreeChanged(_ paths: [URL]?) {
+        if let paths { changedFiles.formUnion(paths) } else { changedFilesUnknown = true }
+        workingTreeTask?.cancel()
+        workingTreeTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            await self?.reloadAfterWorkingTreeChange()
+        }
+    }
+
+    private func reloadAfterWorkingTreeChange() async {
+        // One of our own commands is running and is still writing; it reloads
+        // the status and the tree itself when it lands, but not the editors, so
+        // the files stay on the pile and are picked up a beat later rather than
+        // dropped.
+        guard !isRunningGitCommand else {
+            workingTreeChanged([])
+            return
+        }
+        let changed = changedFilesUnknown ? nil : changedFiles
+        changedFiles = []
+        changedFilesUnknown = false
+        await refreshGitStatus()
+        // `refreshFileTree`, never `reloadFileTree`: this runs while the user is
+        // reading the tree, and rebuilding it would fold every folder they had
+        // opened shut under them.
+        refreshFileTree()
+        onWorkingTreeChanged?(changed)
+    }
+
+    /// The same reload, for the app coming back to the front. FSEvents is
+    /// delivered whether or not we are in front, but a stream can coalesce a
+    /// long absence away, and nothing else notices a repository that was
+    /// rebuilt while the window was behind a browser.
+    func reloadAfterReturningToFront() async {
+        guard !isRunningGitCommand else { return }
+        changedFiles = []
+        changedFilesUnknown = false
+        await refreshGitStatus()
+        refreshFileTree()
+        onWorkingTreeChanged?(nil)
     }
 
     /// Re-reads the history, as deep as it has been read so far. Cheap — it is

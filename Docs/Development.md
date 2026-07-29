@@ -151,6 +151,7 @@ Sources/Workspace/
   WorkspaceApp.swift          app + menu commands
   Support/Shell.swift         runs git/gh/bkt through the login shell
   Support/GitDirectoryWatcher.swift  git run outside the app: watches `.git` for a checkout
+  Support/WorkingTreeWatcher.swift  files written outside the app: FSEvents over the whole tree
   Support/BrandMark.swift     real logos (TypeScript, Docker, GitHub…) from SVG
   Support/BrandPath.swift     the path data behind them — generated, don't edit
   Support/AuthorAvatar.swift  author pictures: where to find one, cache, disc view
@@ -203,6 +204,8 @@ Sources/Workspace/
   Editor/
     CodeEditorView.swift        the editor pane: CodeEditSourceEditor + the app's joins
     LanguageServerCoordinator.swift  one open file ↔ its server: sync, diagnostics, ⌘-click, completions
+    GutterDiffMarkers.swift     the stripe beside the line numbers: added, changed, deleted
+    GitLineStatus.swift         `git diff` for one file, reduced to a marker per line
     EditorThemeBridge.swift     our 56-capture palette → the package's 16 fields
     TreeSitterHighlighter.swift incremental parsing, for the diff and markdown snippets
     LanguageDetection.swift     file name → grammar, incl. the `.env` family
@@ -228,7 +231,9 @@ Sources/Workspace/
     drawio-viewer.min.js      draw.io's viewer, and the page it draws a file in
     drawio-host.html
   Views/                      projects sidebar, navigator, viewer, diff, PR, info
-    ClaudeSessionListView.swift  conversations running and on disk, in the navigator
+    ClaudeSessionListView.swift  conversations running (on screen or hidden) and on disk
+    ChatPanelOverlay.swift    the floating chats, and the dock they fold down to: one scrolling row of bars, dragged to reorder
+    ChatPanelView.swift       one floating chat: title bar, the terminal in it, drag, resize, and the fold that crops it away without unmounting it
     ChatInputField.swift      the growing text box the comment boxes are built on
     ChatCompletionList.swift  the @ list, and reading the token under the caret
     MentionTextBox.swift      a comment box where @ names a person on the pull request

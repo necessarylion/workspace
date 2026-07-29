@@ -112,6 +112,7 @@ final class LanguageServerCoordinator: TextViewCoordinator, TextViewDelegate, @u
 
         observeStatus()
         observeSaves()
+        observeExternalChanges()
         openIfNeeded()
     }
 
@@ -254,6 +255,45 @@ final class LanguageServerCoordinator: TextViewCoordinator, TextViewDelegate, @u
                     await target.save(uri: self.uri, text: text)
                 }
                 await self.refreshSymbols()
+            }
+        }
+    }
+
+    /// Tells the server when the file was replaced from outside the editor, which
+    /// nothing else in here can.
+    ///
+    /// Everything below this line learns about an edit through
+    /// `willReplaceContentsIn`, and `TextView` raises that from exactly one place:
+    /// `replaceCharacters`. A file that changed on disk does not go that way. It
+    /// arrives through `TextView.setText`, which builds a whole new
+    /// `NSTextStorage` and swaps it in — no replacement, no notification, no
+    /// delegate call — so the one edit that changes every line at once is the one
+    /// edit incremental sync cannot see. That used to be hidden by the editor
+    /// being rebuilt around a fresh coordinator, which closed the document and
+    /// opened it again; ``ReloadTextInPlace`` keeps the editor, so this has to be
+    /// said out loud or every completion and every diagnostic after it is computed
+    /// against a file the user is no longer looking at.
+    ///
+    /// Restated whole rather than as ranges, for the obvious reason: there are no
+    /// ranges. ``catchUp()`` is already precisely this — say what was missed, then
+    /// re-read the outline, which a rewrite has just invalidated as well — so it is
+    /// what this asks for.
+    ///
+    /// Re-armed before the work, like ``observeSaves()``, and for the same reason.
+    @MainActor
+    private func observeExternalChanges() {
+        guard isRunning else { return }
+        withObservationTracking {
+            _ = document.externalRevision
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self, self.isRunning else { return }
+                self.observeExternalChanges()
+                // Anything queued states a range in a document that no longer
+                // exists. One restatement says all of it and says it correctly.
+                self.pending.removeAll()
+                self.needsFullText = true
+                self.catchUp()
             }
         }
     }
