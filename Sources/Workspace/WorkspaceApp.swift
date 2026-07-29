@@ -103,7 +103,7 @@ struct WorkspaceApp: App {
                 Divider()
 
                 ForEach(WorkspaceStore.NavigatorTab.allCases) { tab in
-                    Button(tab.title) { store.navigatorTab = tab }
+                    Button(tab.title) { store.selectNavigatorTab(tab) }
                 }
             }
 

@@ -1558,6 +1558,40 @@ final class WorkspaceStore {
         showsNavigator = true
     }
 
+    /// Switching the navigator by hand — the tab bar, or the View menu.
+    ///
+    /// The two session lists also put their most recent session back in the
+    /// centre. Both tabs are the way back to something that is already running,
+    /// so landing on the list with the dashboard still up asks for a second
+    /// click on the one card that was ever going to be clicked.
+    func selectNavigatorTab(_ tab: NavigatorTab) {
+        showNavigator(tab)
+        showMostRecentSession(of: tab)
+    }
+
+    /// The newest of one list's sessions, back on screen. Nothing is started: a
+    /// repository with no shells — or no conversations — only gets its list,
+    /// where the first row is the one that starts one.
+    private func showMostRecentSession(of tab: NavigatorTab) {
+        let sessions: [OpenTerminal]
+        switch tab {
+        case .terminals:
+            // The scope the list itself shows, so what comes back is one of the
+            // cards standing under the pointer rather than another folder's.
+            guard let scope = visibleTerminalScope else { return }
+            sessions = shellTerminals(in: scope)
+        case .claude:
+            guard let project = selectedProject else { return }
+            sessions = runningClaudes(in: project)
+        default:
+            return
+        }
+        guard let recent = sessions.max(by: { $0.session.lastUsedAt < $1.session.lastUsedAt }),
+              !isShowing(recent)
+        else { return }
+        showTerminal(recent)
+    }
+
     /// The terminals list, and — when this repository already has a shell — its
     /// most recent one back in the viewer. Opening the list without showing
     /// anything asks for a second click to reach what the count just promised.

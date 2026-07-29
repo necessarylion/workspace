@@ -229,12 +229,30 @@ final class TerminalSession: Identifiable {
     /// never sends one — hence the ceiling. The cover always comes down: a
     /// second of shell prompt is a far better failure than a spinner that stays
     /// for good.
+    ///
+    /// The command is **exec'd**, so `claude` replaces the shell instead of
+    /// running inside it: leaving the conversation — `/exit`, ^D, the CLI
+    /// falling over — ends the process the terminal is watching, and the tab
+    /// closes itself the way one typed `exit` into does. Run as a plain command,
+    /// what a finished conversation left behind was a shell prompt still sitting
+    /// in the Claude tab claiming to be a conversation that was running. A shell
+    /// that cannot find `claude` at all execs nothing and stays where it is,
+    /// with the error on screen.
+    ///
+    /// Not routed through `Support/Shell.swift`, and cannot be: that runs a tool
+    /// with no terminal on the other end, captures its output into a file and
+    /// kills it on a watchdog — three things a full-screen CLI a person is
+    /// talking to survives none of. What is on the other end here is already a
+    /// shell, and an *interactive login* one, so it has read `~/.zshrc` and has
+    /// the `PATH` that `InteractivePath` exists to recover for commands that
+    /// have no such shell. `Shell.quote` is still what the call sites reach for
+    /// where a value is not the app's own — see `resumeClaude`.
     func runClaude(_ command: String) {
         isStartingClaude = true
         claudeStartupWatch?.cancel()
         claudeStartupWatch = Task { [weak self] in
             guard let self else { return }
-            await type(command, autoRun: true)
+            await type("exec " + command, autoRun: true)
             let renames = titleChanges
             for _ in 0..<25 where titleChanges == renames && !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(100))
