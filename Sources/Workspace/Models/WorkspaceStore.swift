@@ -1613,6 +1613,35 @@ final class WorkspaceStore {
         item.isPostingComment = false
     }
 
+    /// Replaces what an already-posted comment says.
+    ///
+    /// The conversation is read back for the same reason a resolve reads it
+    /// back: the host's copy is the one that counts, and it is what renders the
+    /// edited comment — including the "edited" mark a host may add.
+    func updateComment(
+        _ body: String,
+        of comment: PullRequestComment,
+        on item: ViewerItem,
+        project: Project,
+        pr: PullRequest
+    ) async {
+        item.isPostingComment = true
+        item.commentError = nil
+        do {
+            try await PullRequestService.updateComment(
+                mentioning(body, on: item, pr: pr),
+                of: comment,
+                on: pr,
+                in: project.url
+            )
+            showStatus("Comment updated on #\(pr.number)")
+            await loadComments(item, project: project, pr: pr)
+        } catch {
+            item.commentError = error.localizedDescription
+        }
+        item.isPostingComment = false
+    }
+
     /// Settles a comment thread, or opens it again. The conversation is read
     /// back afterwards rather than edited in place: resolution is the host's
     /// word, and a thread someone else has already touched should come back

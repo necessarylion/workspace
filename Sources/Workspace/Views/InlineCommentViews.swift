@@ -35,9 +35,12 @@ struct DiffCommentThreads: View {
     let threads: [PullRequestCommentNode]
     let isPosting: Bool
     @Binding var replyingTo: PullRequestComment?
+    /// The comment whose text is being rewritten, if any.
+    @Binding var editing: PullRequestComment?
     var mentions: MentionSource = .none
     let onReply: (PullRequestComment, String) async -> Void
     var onResolve: ((PullRequestComment, Bool) async -> Void)?
+    var onEdit: ((PullRequestComment, String) async -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -46,12 +49,14 @@ struct DiffCommentThreads: View {
                     node: thread,
                     depth: 0,
                     replyingTo: $replyingTo,
+                    editing: $editing,
                     isPosting: isPosting,
                     mentions: mentions,
                     // The line it hangs under already says which file this is.
                     isInline: true,
                     onReply: onReply,
-                    onResolve: onResolve
+                    onResolve: onResolve,
+                    onEdit: onEdit
                 )
             }
         }
@@ -202,18 +207,43 @@ struct DiffCommentComposer: View {
     }
 }
 
-/// A text box with Cancel and a send button. Used for replies in a thread and
-/// for new comments on a line, which differ only in their wording.
+/// A text box with Cancel and a send button. Used for replies in a thread, for
+/// new comments on a line, and for rewriting a comment already posted — which
+/// differ only in their wording and in what the box starts out holding.
 struct CommentComposer: View {
     let prompt: String
     let sendTitle: String
-    var sendSymbol = "arrowshape.turn.up.left"
+    let sendSymbol: String
     let isPosting: Bool
-    var mentions: MentionSource = .none
+    let mentions: MentionSource
     let onCancel: () -> Void
     let onSend: (String) async -> Void
 
-    @State private var draft = ""
+    @State private var draft: String
+
+    /// `text` is what the box opens with — empty for anything being written for
+    /// the first time, and the comment as the host stores it for an edit. It is
+    /// spelled out rather than left to the memberwise initialiser because a
+    /// `@State` needs its starting value here, before the view is on screen.
+    init(
+        prompt: String,
+        sendTitle: String,
+        sendSymbol: String = "arrowshape.turn.up.left",
+        isPosting: Bool,
+        mentions: MentionSource = .none,
+        startingFrom text: String = "",
+        onCancel: @escaping () -> Void,
+        onSend: @escaping (String) async -> Void
+    ) {
+        self.prompt = prompt
+        self.sendTitle = sendTitle
+        self.sendSymbol = sendSymbol
+        self.isPosting = isPosting
+        self.mentions = mentions
+        self.onCancel = onCancel
+        self.onSend = onSend
+        _draft = State(initialValue: text)
+    }
 
     private var isEmpty: Bool {
         draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

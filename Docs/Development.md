@@ -176,7 +176,7 @@ Sources/Workspace/
     NewRepository.swift       making one instead of finding one: `git init`, `git clone`
     Project.swift             one repository: remote, status, PRs, ports, tree
     PullRequest.swift         unified PR model + gh/bkt loaders
-    PullRequestComment.swift  reading and posting PR comments
+    PullRequestComment.swift  reading, posting and rewriting PR comments
     PullRequestCommit.swift   a PR's commits + the diff of one commit
     PullRequestActions.swift  merge, reject, and drift from the target branch
     PullRequestReviewer.swift  who is reviewing, their verdicts, and asking more people

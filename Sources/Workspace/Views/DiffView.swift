@@ -29,6 +29,8 @@ struct DiffView: View {
     /// The comment whose reply box is open, shared by every thread on screen so
     /// that opening one closes the last.
     @State private var replyingTo: PullRequestComment?
+    /// The comment being rewritten, shared the same way for the same reason.
+    @State private var editing: PullRequestComment?
     /// The diff flattened to one entry per visible line — see `DiffElement`.
     /// Cached rather than recomputed in `body`, which also runs on every frame
     /// of a window resize.
@@ -349,11 +351,13 @@ struct DiffView: View {
                 threads: threads(file: file, row: row),
                 isPosting: comments?.isPosting ?? false,
                 replyingTo: $replyingTo,
+                editing: $editing,
                 mentions: comments?.mentions ?? .none,
                 onReply: { parent, body in await comments?.reply(parent, body) },
                 // Flattened: chaining through an optional bundle onto an
                 // optional closure would otherwise nest one inside the other.
-                onResolve: comments?.resolve ?? nil
+                onResolve: comments?.resolve ?? nil,
+                onEdit: comments?.edit ?? nil
             )
             .frame(width: width, alignment: .leading)
         case .composer:
@@ -383,6 +387,7 @@ struct DiffView: View {
             guard let anchor = row.anchor(in: file, side: side) else { return }
             composing = composing == anchor ? nil : anchor
             replyingTo = nil
+            editing = nil
         }
     }
 
@@ -410,6 +415,8 @@ struct DiffComments {
     /// Settles a thread, or opens it again. Nil for a diff that has no host
     /// behind it to be told.
     var resolve: ((PullRequestComment, Bool) async -> Void)?
+    /// Replaces what a comment says. Nil for the same reason.
+    var edit: ((PullRequestComment, String) async -> Void)?
 }
 
 extension DiffRow {
