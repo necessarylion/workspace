@@ -34,40 +34,46 @@ struct PullRequestSidebar: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color(nsColor: AppColors.viewerBackground))
-        // The CI runs cost a call to the host, so they are read the first time
-        // the panel is on screen rather than with the pull request. A failure is
-        // not retried on its own — that is what the reload button is for.
-        .task {
-            guard item.builds.isEmpty, !item.isLoadingBuilds, item.buildsError == nil else {
-                return
-            }
-            await store.loadBuilds(item, project: project, pr: pr)
-        }
+        // Reading the runs, and going on reading them, belongs to the view
+        // above this one: the badge in its summary bar shows them on the tabs
+        // where this panel is not drawn at all. See `watchBuilds`.
     }
 
     // MARK: - Reviewers
 
     private var reviewers: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        // Sorted once for the pass: the header's summary and the rows under it
+        // are the same list, and `byStanding` sorts each time it is asked.
+        let ordered = item.reviewers.byStanding
+        return VStack(alignment: .leading, spacing: 8) {
             sectionHeader(
                 "Reviewers",
                 symbol: "person.2",
-                detail: item.reviewers.isEmpty ? nil : item.reviewers.approvalSummary,
+                detail: ordered.isEmpty ? nil : item.reviewers.approvalSummary,
                 isLoading: item.isLoadingReviewers
             ) {
                 EmptyView()
             }
 
-            if item.reviewers.isEmpty {
-                emptyNote(item.reviewersError
-                    ?? (item.isLoadingReviewers
-                        ? "Reading who is reviewing…"
-                        : "Nobody is reviewing #\(pr.number) yet."))
-            } else {
-                ForEach(item.reviewers.byStanding) { reviewer in
-                    reviewerRow(reviewer)
+            // Who is reviewing changes when somebody reviews or the sheet asks
+            // more people — a handful of times an hour at the very most, and
+            // never on a timer. So the list is one of the few here worth
+            // animating, keyed to who is on it rather than to what they said.
+            Group {
+                if ordered.isEmpty {
+                    emptyNote(item.reviewersError
+                        ?? (item.isLoadingReviewers
+                            ? "Reading who is reviewing…"
+                            : "Nobody is reviewing #\(pr.number) yet."))
+                        .transition(ViewerMotion.contentArrival)
+                } else {
+                    ForEach(ordered) { reviewer in
+                        reviewerRow(reviewer)
+                            .transition(.opacity)
+                    }
                 }
             }
+            .animation(ViewerMotion.listChange, value: item.reviewers.map(\.id))
 
             // Nothing to ask of a pull request that has already ended. The
             // button sits under the list rather than in the header: it is the
@@ -118,25 +124,37 @@ struct PullRequestSidebar: View {
                 .disabled(item.isLoadingBuilds)
             }
 
-            if item.builds.isEmpty {
-                emptyNote(item.buildsError
-                    ?? (item.isLoadingBuilds
-                        ? "Reading builds…"
-                        : "Nothing has run against this pull request's head commit on \(pr.host.displayName)."))
-                if item.buildsError != nil, let url = pr.url {
-                    Button {
-                        NSWorkspace.shared.open(url)
-                    } label: {
-                        Label("Open in Browser", systemImage: "safari")
-                            .font(.caption)
+            // The note gives way to the first runs, and that is the whole of the
+            // motion here. The **rows** are deliberately left out of it: the
+            // list is read again every ten seconds and the loader sorts
+            // failures to the top, so they genuinely reorder on a timer — an
+            // animated list would have this panel shuffling by itself while it
+            // is being read. A running job already says it is moving, in the
+            // pulse on its own glyph.
+            Group {
+                if item.builds.isEmpty {
+                    emptyNote(item.buildsError
+                        ?? (item.isLoadingBuilds
+                            ? "Reading builds…"
+                            : "Nothing has run against this pull request's head commit on \(pr.host.displayName)."))
+                        .transition(ViewerMotion.contentArrival)
+                    if item.buildsError != nil, let url = pr.url {
+                        Button {
+                            NSWorkspace.shared.open(url)
+                        } label: {
+                            Label("Open in Browser", systemImage: "safari")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .pointerCursor()
+                        .transition(ViewerMotion.contentArrival)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .pointerCursor()
+                } else {
+                    ForEach(item.builds) { BuildRow(build: $0) }
                 }
-            } else {
-                ForEach(item.builds) { BuildRow(build: $0) }
             }
+            .animation(ViewerMotion.contentChange, value: item.builds.isEmpty)
         }
     }
 

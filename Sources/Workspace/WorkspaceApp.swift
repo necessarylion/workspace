@@ -71,7 +71,7 @@ struct WorkspaceApp: App {
 
             CommandGroup(after: .sidebar) {
                 Button(store.showsProjects ? "Hide Repositories" : "Show Repositories") {
-                    store.showsProjects.toggle()
+                    store.toggleProjects()
                 }
                 .shortcut(.toggleRepositories)
 

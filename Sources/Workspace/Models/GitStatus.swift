@@ -1,5 +1,48 @@
 import Foundation
 
+/// What happened to one path, reduced to the handful of verdicts everything
+/// outside the change list draws from: the file tree colours a row by this, and
+/// the letter the row wears comes from it.
+///
+/// **The order is the point.** A folder in the tree wears the strongest verdict
+/// of anything inside it, and `Comparable` — synthesised from the order these
+/// are declared in — is how "strongest" is decided. A folder holding one
+/// conflict and twenty edits is a folder with a conflict in it.
+enum GitChangeKind: Sendable, Hashable, Comparable {
+    /// Staged as new, or not in git at all yet. One idea at two stages, and the
+    /// tree has no room to say which — the change list beside it does.
+    case added
+    case renamed
+    case modified
+    case deleted
+    case conflicted
+
+    /// The one letter the tree puts at the end of a file's row, the way every
+    /// editor with this feature does. A conflict is the exception: it is the
+    /// one that wants noticing rather than reading.
+    var letter: String {
+        switch self {
+        case .added: "A"
+        case .renamed: "R"
+        case .modified: "M"
+        case .deleted: "D"
+        case .conflicted: "!"
+        }
+    }
+
+    /// What the row's tooltip says. Plain words, since the letter is the short
+    /// form and this is the long one.
+    var label: String {
+        switch self {
+        case .added: "Added"
+        case .renamed: "Renamed"
+        case .modified: "Modified"
+        case .deleted: "Deleted"
+        case .conflicted: "Conflicted"
+        }
+    }
+}
+
 /// A snapshot of `git status` for a repository.
 struct GitStatus: Sendable, Hashable {
     struct Change: Sendable, Hashable, Identifiable {
@@ -64,6 +107,23 @@ struct GitStatus: Sendable, Hashable {
             case "T": return "Type Changed"
             case "?": return "Untracked"
             default: return code.trimmingCharacters(in: .whitespaces)
+            }
+        }
+
+        /// The same verdict as ``label``, in the form the tree and the gutter
+        /// colour from. Read off the porcelain letter rather than off `label`,
+        /// so a wording change up there cannot quietly repaint the tree.
+        ///
+        /// A copy counts as an addition: what the tree is showing is a file
+        /// that was not there before. A type change counts as a modification,
+        /// which is what it is — the path stayed, its contents did not.
+        var kind: GitChangeKind {
+            if isConflicted { return .conflicted }
+            switch statusLetter {
+            case "A", "?", "C": return .added
+            case "R": return .renamed
+            case "D": return .deleted
+            default: return .modified
             }
         }
 

@@ -57,7 +57,16 @@ struct ContentView: View {
         // palettes all still come out on top of a floating chat: those are
         // things the window is saying, and a panel is something in it.
         .overlay { ChatPanelOverlay() }
-        .overlay(alignment: .bottom) { statusToast }
+        // The transaction lives here, on the overlay alone, rather than beside
+        // the two below: the toast is written from everywhere — a commit, a
+        // push, a checkout, a copied hash — and an animation any higher would
+        // carry whatever else that action changed along with it. Scoped to the
+        // overlay, it is the only thing the fade can reach, and it covers the
+        // message being cleared as well as being set.
+        .overlay(alignment: .bottom) {
+            statusToast
+                .animation(ViewerMotion.listChange, value: store.statusMessage)
+        }
         .overlay(alignment: .bottomTrailing) { UpdateBanner() }
         .overlay {
             if store.isSwitchingProjects {
@@ -227,7 +236,11 @@ struct ContentView: View {
                 }
                 .shadow(radius: 6, y: 2)
                 .padding(.bottom, 40)
-                .transition(.opacity)
+                // It docks along the bottom edge, so that is where it comes
+                // from and where it goes back to. Under Reduce Motion
+                // ``ViewerMotion/listChange`` is nil and none of this plays —
+                // the toast is simply there and then not.
+                .transition(.move(edge: .bottom).combined(with: .opacity))
                 .task(id: toast) {
                     // A failure is worth reading, so it lingers.
                     try? await Task.sleep(for: .seconds(isFailure ? 6 : 2.5))

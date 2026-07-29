@@ -154,6 +154,108 @@ final class Project: Identifiable {
         return false
     }
 
+    // MARK: - What git says about one row of the tree
+
+    /// Where the repository actually starts, which is not always the folder that
+    /// was added — see ``GitStatus/root(of:)``. Every path `git status` reports
+    /// is relative to it, so it is what turns one of those back into a file on
+    /// disk. Read once and kept: a checkout does not move.
+    @ObservationIgnored private var gitRoot: URL?
+
+    /// Absolute path → verdict, for every changed file **and every folder above
+    /// one**, so a change deep in a collapsed tree still shows on the folder the
+    /// user can see. Built from the whole status in one pass rather than
+    /// searched per row: the tree asks this once per visible row on every redraw,
+    /// and a repository mid-rebase has hundreds of changes.
+    @ObservationIgnored private var changeKindsCache: [String: GitChangeKind] = [:]
+    /// Which ``gitRevision`` the cache above was built from. `-1` is "never".
+    @ObservationIgnored private var changeKindsRevision = -1
+
+    /// What git says about one file or folder, or nil when it says nothing.
+    ///
+    /// Reads ``gitRevision`` first and on purpose: that is what makes a SwiftUI
+    /// row calling this observe the next status read, and it is also what tells
+    /// the cache it has gone stale. A commit moves every verdict in the tree
+    /// without touching a byte of any file, so watching the files is not enough.
+    func changeKind(for fileURL: URL) -> GitChangeKind? {
+        let revision = gitRevision
+        if changeKindsRevision != revision {
+            changeKindsCache = Self.changeKinds(in: gitStatus, folder: url, gitRoot: gitRoot)
+            changeKindsRevision = revision
+        }
+        return changeKindsCache[fileURL.standardizedFileURL.path]
+    }
+
+    /// One status → the map above.
+    ///
+    /// Each change is written against its own path and then walked up, keeping
+    /// the strongest verdict at every level. The walk stops as soon as it meets
+    /// an ancestor that already holds something at least as strong, because
+    /// everything above that one does too — which is what keeps this linear in
+    /// practice rather than changes × depth.
+    ///
+    /// A rename contributes both of its names: the old one so a folder that only
+    /// lost a file still says so, the new one so the file now on disk does.
+    ///
+    /// **Keys are built from the added folder, not from the repository root**,
+    /// even though the paths git reports are relative to the root. The tree's
+    /// rows are URLs made by walking down from `folder`, and a dictionary
+    /// lookup is an exact string match — so a checkout reached through a
+    /// symlink (`/tmp/…` against git's `/private/tmp/…`) would agree about the
+    /// file and match on nothing at all. Resolving each row instead would be a
+    /// filesystem call per visible row per redraw. This resolves twice, here,
+    /// and only to work out how deep the opened folder sits.
+    private static func changeKinds(
+        in status: GitStatus?,
+        folder: URL,
+        gitRoot: URL?
+    ) -> [String: GitChangeKind] {
+        guard let status, !status.changes.isEmpty else { return [:] }
+        let base = folder.standardizedFileURL
+        let basePath = base.path
+        let prefix = subpath(of: base, under: gitRoot)
+        var result: [String: GitChangeKind] = [:]
+
+        for change in status.changes {
+            let kind = change.kind
+            for path in change.gitPaths {
+                // A change elsewhere in the repository — a sibling package of
+                // the monorepo — has no row here to colour.
+                guard path.hasPrefix(prefix) else { continue }
+                let relative = String(path.dropFirst(prefix.count))
+                guard !relative.isEmpty else { continue }
+
+                var current = base.appendingPathComponent(relative).standardizedFileURL
+                // Strictly inside the folder: it is not a row in the tree
+                // itself, and this is also what stops the walk.
+                while current.path.count > basePath.count {
+                    if let existing = result[current.path], existing >= kind { break }
+                    result[current.path] = kind
+                    current = current.deletingLastPathComponent()
+                }
+            }
+        }
+        return result
+    }
+
+    /// How deep the added folder sits inside its repository, as the path prefix
+    /// git puts in front of everything under it — `"apps/web/"`, or `""` when
+    /// the folder *is* the repository, which is the ordinary case.
+    private static func subpath(of folder: URL, under gitRoot: URL?) -> String {
+        guard let gitRoot else { return "" }
+        let rootPath = gitRoot.standardizedFileURL.resolvingSymlinksInPath().path
+        let folderPath = folder.resolvingSymlinksInPath().path
+        guard folderPath.hasPrefix(rootPath), folderPath.count > rootPath.count else { return "" }
+        let suffix = folderPath.dropFirst(rootPath.count).drop { $0 == "/" }
+        return suffix.isEmpty ? "" : suffix + "/"
+    }
+
+    /// Asks git for the top level, unless it already answered.
+    private func resolveGitRootIfNeeded() async {
+        guard gitRoot == nil else { return }
+        gitRoot = await GitStatus.root(of: url)
+    }
+
     init(url: URL) {
         self.url = url
         self.root = FileNode(url: url, isDirectory: true)
@@ -172,8 +274,13 @@ final class Project: Identifiable {
         async let remoteTask = RemoteInfo.load(for: url)
         async let statusTask = GitStatus.load(for: url)
         async let commitTask = RepositoryCommit.load(in: url, limit: commitLimit)
+        // Alongside the rest rather than before them: it is one process, it is
+        // only ever run once, and nothing here needs its answer until the
+        // revision below moves and the tree asks what changed.
+        async let rootTask: Void = resolveGitRootIfNeeded()
         remote = await remoteTask
         gitStatus = await statusTask
+        await rootTask
         gitRevision += 1
         apply(await commitTask)
         startWatchingGitIfNeeded()
@@ -184,7 +291,9 @@ final class Project: Identifiable {
     }
 
     func refreshGitStatus() async {
+        async let rootTask: Void = resolveGitRootIfNeeded()
         gitStatus = await GitStatus.load(for: url)
+        await rootTask
         gitRevision += 1
         await refreshCommits()
         startWatchingGitIfNeeded()

@@ -1,10 +1,9 @@
 import AppKit
 import CodeEditSourceEditor
 import CodeEditTextView
-import SwiftUI
 
 /// VS Code's coloured stripe down the line numbers: green where lines were added,
-/// blue where they were changed, and a wedge where lines were deleted.
+/// yellow where they were changed, and a red wedge where lines were deleted.
 ///
 /// **The gutter is the package's, and it offers nothing to decorate it with.**
 /// `TextViewController.gutterView` is internal, `GutterViewDelegate` has one
@@ -17,9 +16,10 @@ import SwiftUI
 /// What makes it hold together rather than drift:
 ///
 /// - **The gutter is findable without the private property.** `GutterView` is a
-///   `public` class and `loadView` attaches it with `addFloatingSubview`, so it is
-///   a direct subview of the `public` scroll view and can be picked out by type.
-///   That is a type check, not a name or an index, and it fails to nothing.
+///   `public` class hanging somewhere under the `public` scroll view, so it can be
+///   picked out by type — see ``gutterView(in:)`` for where AppKit actually keeps
+///   it, which is not where `loadView` appears to put it. That is a type check,
+///   not a name or an index, and it fails to nothing.
 /// - **Its coordinates are the document's.** The gutter is as tall as the whole
 ///   file and the package keeps `origin.y` at `textView.frame.origin.y`, so a
 ///   y inside the gutter *is* a y in the text. Which is why `GutterView` fills its
@@ -113,7 +113,7 @@ final class GutterDiffMarkers: TextViewCoordinator, @unchecked Sendable {
     @MainActor
     private func install(in controller: TextViewController) {
         guard let scrollView = controller.scrollView,
-              let gutter = scrollView.subviews.lazy.compactMap({ $0 as? GutterView }).first
+              let gutter = Self.gutterView(in: scrollView)
         else { return }
         self.gutter = gutter
 
@@ -147,6 +147,36 @@ final class GutterDiffMarkers: TextViewCoordinator, @unchecked Sendable {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.layoutMarkerView() }
         }
+    }
+
+    /// The gutter, wherever AppKit has put it.
+    ///
+    /// **Not `scrollView.subviews`, which is where it looks like it should be.**
+    /// `loadView` attaches it with `addFloatingSubview`, and that does not add
+    /// the view to the scroll view: AppKit lifts every floating subview into a
+    /// private `_NSScrollViewFloatingSubviewsContainerView` of its own and adds
+    /// *that*. So a scan of the direct subviews finds an `NSClipView` and a
+    /// container, no `GutterView`, and this whole coordinator quietly installed
+    /// nothing — which is exactly how the markers came to be written, shipped,
+    /// and never once drawn.
+    ///
+    /// Searching breadth-first from the scroll view instead, which is immune to
+    /// where the container is in the order and to it being renamed or dropped in
+    /// a later macOS. The clip view is skipped because the document is the text,
+    /// and the gutter is never inside it — that is the one subtree worth being
+    /// large.
+    @MainActor
+    private static func gutterView(in scrollView: NSScrollView) -> GutterView? {
+        var queue = scrollView.subviews
+        var index = 0
+        while index < queue.count {
+            let view = queue[index]
+            index += 1
+            if let gutter = view as? GutterView { return gutter }
+            if view is NSClipView { continue }
+            queue.append(contentsOf: view.subviews)
+        }
+        return nil
     }
 
     /// Set outright rather than left to an autoresizing mask. The gutter's frame
@@ -245,46 +275,15 @@ private final class GutterDiffMarkerView: NSView {
         }
     }
 
+    /// ``GitChangeColors``, the same three the file tree paints a row in. A
+    /// stripe beside line 40 and the colour on that file's name in the tree are
+    /// one claim about one repository, so they are one colour — read the tree,
+    /// open the file, and the marks carry on saying the same thing.
     private func color(for change: GitLineChange) -> NSColor {
         switch change {
-        case .added: GutterDiffColors.added
-        case .modified: GutterDiffColors.modified
-        case .deleted: GutterDiffColors.deleted
+        case .added: GitChangeColors.addedNS
+        case .modified: GitChangeColors.modifiedNS
+        case .deleted: GitChangeColors.deletedNS
         }
-    }
-}
-
-/// The three stripe colours.
-///
-/// Added and deleted are the diff viewer's own hues — ``DiffColors`` — rather than
-/// a second green and a second red, so the two places in the app that say "this
-/// line changed" say it in the same colour. They are lifted out of the dark end of
-/// their range on the way, because those values are backgrounds for a whole row of
-/// text and a three-point stripe on a dark gutter needs to be the thing that is
-/// seen rather than the thing behind it.
-///
-/// Modified has no such ancestor: the diff viewer never draws a changed line as
-/// one thing, it draws the removal beside the addition, so there is no third
-/// colour to borrow. Blue is named outright here, as it is in every editor with
-/// this feature.
-private enum GutterDiffColors {
-    static let added = stripe(from: DiffColors.addedWord)
-    static let deleted = stripe(from: DiffColors.removedWord)
-    static let modified = NSColor(rgb: 0x2E_7A_C6)
-
-    /// Same hue, taken up to the saturation and brightness a thin mark needs.
-    private static func stripe(from color: Color) -> NSColor {
-        guard let source = NSColor(color).usingColorSpace(.sRGB) else { return NSColor(color) }
-        var hue: CGFloat = 0
-        var saturation: CGFloat = 0
-        var brightness: CGFloat = 0
-        var alpha: CGFloat = 0
-        source.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
-        return NSColor(
-            hue: hue,
-            saturation: max(saturation, 0.6),
-            brightness: max(brightness, 0.62),
-            alpha: 1
-        )
     }
 }

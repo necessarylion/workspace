@@ -89,8 +89,21 @@ final class ViewerItem: Identifiable {
         terminals.first { $0.id == selectedTerminalID } ?? terminals.last
     }
 
-    // Pull request conversation.
-    var comments: [PullRequestComment] = []
+    // Pull request conversation. Assigned through `setComments(_:)`, which is
+    // what keeps the two shapes below in step with the flat list.
+    private(set) var comments: [PullRequestComment] = []
+    /// The conversation as threads, nested and sorted.
+    ///
+    /// Built once, where the comments land, rather than in the views that draw
+    /// them: every one of those is a `body`, and a `body` runs again for
+    /// reasons that have nothing to do with the conversation — a key pressed in
+    /// the box at the foot of the page, the ten-second build tick, a drag on
+    /// the side panel's seam. Rebuilding the tree on each of those passes is
+    /// the same answer bought again, at a price that grows with the review.
+    private(set) var commentThreads: [PullRequestCommentNode] = []
+    /// The same threads, keyed by the line of the diff they hang off — see
+    /// ``PullRequestComment/inlineThreads(in:)``.
+    private(set) var inlineCommentThreads: [DiffLineAnchor: [PullRequestCommentNode]] = [:]
     var isLoadingComments = false
     var isPostingComment = false
     var commentError: String?
@@ -128,8 +141,12 @@ final class ViewerItem: Identifiable {
     var isLoadingBuilds = false
     var buildsError: String?
     /// Patches already fetched, keyed by hash: a commit does not change, so
-    /// stepping back and forth through the list costs one load each.
-    var commitDiffs: [String: Diff] = [:]
+    /// stepping back and forth through the list costs one load each. Written
+    /// through ``cacheCommitDiff(_:for:)``, which is what keeps the pile of
+    /// them from growing for as long as the pull request stays open.
+    private(set) var commitDiffs: [String: Diff] = [:]
+    /// The hashes in `commitDiffs`, oldest first — see `cacheCommitDiff`.
+    private var commitDiffOrder: [String] = []
     var isLoadingCommitDiff = false
     var commitDiffError: String?
 
@@ -138,6 +155,11 @@ final class ViewerItem: Identifiable {
     var syncState: PullRequestSyncState?
     var isCheckingSync = false
     var isRunningPullRequestAction = false
+    /// Whether everything about the pull request is being read again. It is not
+    /// `isRunningPullRequestAction`: that one means something is being *changed*
+    /// on the host and greys out the whole action bar, and a refresh changes
+    /// nothing. Two flags also keep two spinners from turning at once.
+    var isRefreshingPullRequest = false
 
     var isLoading = false
     var errorMessage: String?
@@ -216,6 +238,36 @@ final class ViewerItem: Identifiable {
     /// running behind it, so ✕ puts the dashboard back rather than throwing the
     /// session away.
     nonisolated var survivesClosing: Bool { isTerminal }
+
+    /// Keeps a commit's patch for the next time it is opened, and lets the
+    /// oldest ones go.
+    ///
+    /// A patch here is not a string: it is parsed *and* syntax-coloured, an
+    /// `AttributedString` for every side of every row. Reading down a hundred
+    /// commits of a long pull request would otherwise hold every one of them
+    /// for as long as the tab stays open. A dozen is enough for stepping back
+    /// and forth, which is what the cache is for.
+    func cacheCommitDiff(_ diff: Diff, for sha: String) {
+        if commitDiffs[sha] == nil { commitDiffOrder.append(sha) }
+        commitDiffs[sha] = diff
+        while commitDiffOrder.count > 12 {
+            let oldest = commitDiffOrder.removeFirst()
+            // Never the one being read: a reader who steps back to it would
+            // find it gone and pay for it again.
+            if oldest == selectedCommit?.sha {
+                commitDiffOrder.append(oldest)
+                continue
+            }
+            commitDiffs[oldest] = nil
+        }
+    }
+
+    /// The conversation, and everything drawn from it, in one write.
+    func setComments(_ comments: [PullRequestComment]) {
+        self.comments = comments
+        commentThreads = PullRequestComment.tree(from: comments)
+        inlineCommentThreads = PullRequestComment.inlineThreads(in: commentThreads)
+    }
 
     init(kind: Kind, title: String, subtitle: String? = nil) {
         self.kind = kind

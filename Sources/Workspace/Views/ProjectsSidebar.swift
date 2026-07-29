@@ -74,7 +74,10 @@ struct ProjectsSidebar: View {
                 // in half.
                 .padding(.top, ClaudeWorkingBadge.height / 2 + 2)
                 .padding(.bottom, 10)
-                .animation(.easeInOut(duration: 0.15), value: store.projects.map(\.id))
+                // The shared token rather than a duration of its own, because
+                // the folded rail lists the same repositories and has to arrive
+                // at them the same way.
+                .animation(ViewerMotion.listChange, value: store.projects.map(\.id))
             }
         }
     }
@@ -317,10 +320,17 @@ struct HomeTerminalButton: View {
                             .frame(minWidth: 12, minHeight: 12)
                             .background(Capsule().fill(.tint))
                             .offset(x: 8, y: -6)
+                            .contentTransition(.numericText())
+                            .transition(.opacity)
                     }
                 }
                 // Room for the badge, so it never runs past the pane's edge.
-                .padding(.trailing, count > 0 ? 8 : 0)
+                // Kept whether or not one is drawn: this button sits at the end
+                // of a header row, and taking the room back when the last home
+                // shell closes slid the whole button sideways — a badge going
+                // away should not move the thing it was on.
+                .padding(.trailing, 8)
+                .animation(ViewerMotion.badgeChange, value: count)
         }
         .help(count == 0
             ? "Open a terminal in your home folder (⇧⌘T)"
@@ -363,6 +373,11 @@ struct CollapsedProjectsRail: View {
                 // reason: the top square's would otherwise be clipped.
                 .padding(.top, ClaudeWorkingBadge.height / 2 + 2)
                 .padding(.bottom, 8)
+                // And the same arrival: adding a repository eased the cards in
+                // on the open pane and dropped one into the rail between two
+                // frames, which read as two different lists rather than one
+                // list at two widths.
+                .animation(ViewerMotion.listChange, value: store.projects.map(\.id))
             }
 
             // The pane's footer, down to the two controls that belong to no
@@ -472,6 +487,10 @@ struct ProjectCard: View {
                     .foregroundStyle(.tertiary)
             }
 
+            // Every one of these is flipped by a refresh nobody asked for — the
+            // five-minute sweep, or a file saved somewhere behind the app — so
+            // the digit rolls rather than being replaced. It is the only sign a
+            // card that is otherwise identical has been read again.
             HStack(spacing: 5) {
                 Pill(
                     text: "\(project.pullRequests.count) PR",
@@ -485,6 +504,10 @@ struct ProjectCard: View {
                     Pill(text: "\(project.ports.count) port", color: .green)
                 }
             }
+            .contentTransition(.numericText())
+            .animation(ViewerMotion.badgeChange, value: project.pullRequests.count)
+            .animation(ViewerMotion.badgeChange, value: project.changeCount)
+            .animation(ViewerMotion.badgeChange, value: project.ports.count)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -538,6 +561,11 @@ extension View {
             // also what clears a 10-point inset, so the two wants are one number.
             ClaudeWorkingBadge(count: count)
                 .offset(x: 6, y: -ClaudeWorkingBadge.height / 2)
+                // Here rather than inside the badge: what has to be animated is
+                // the badge coming and going, and from inside its own body it
+                // is not there to say so. Kept off the tile it rides, so a card
+                // whose count changed does not relayout with it.
+                .animation(ViewerMotion.badgeChange, value: count > 0)
         }
     }
 }
@@ -589,6 +617,11 @@ struct ClaudeWorkingBadge: View {
             .opacity(isDim ? 0.35 : 1)
             .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: isDim)
             .onAppear { isDim = true }
+            // The breath was the only thing about this badge that moved: it
+            // popped onto the corner already breathing. It grows out of the
+            // corner instead — small, and away from anything being read, which
+            // is the one place a scale is worth having.
+            .transition(.scale.combined(with: .opacity))
             .help(count == 1
                 ? "A Claude conversation is working"
                 : "\(count) Claude conversations are working")

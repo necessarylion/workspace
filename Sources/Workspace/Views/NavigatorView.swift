@@ -83,20 +83,48 @@ struct NavigatorView: View {
         }
     }
 
+    /// The five lists, one at a time.
+    ///
+    /// They arrive the way a pull request's tabs do, and for the same reason:
+    /// the picker above them does not move, so what changed is the middle of a
+    /// pane rather than the pane itself.
+    ///
+    /// The transition sits on each list rather than on the `Group` holding
+    /// them. The group is always here; what arrives and leaves is the branch,
+    /// and a transition only runs on the view actually being inserted or
+    /// removed.
     @ViewBuilder
     private func content(_ project: Project) -> some View {
-        switch store.navigatorTab {
-        case .files:
-            FileListView(project: project)
-        case .changes:
-            ChangeListView(project: project)
-        case .terminals:
-            TerminalListView(project: project)
-        case .claude:
-            ClaudeSessionListView(project: project)
-        case .info:
-            InfoPanelView(project: project)
+        Group {
+            switch store.navigatorTab {
+            case .files:
+                tab { FileListView(project: project) }
+            case .changes:
+                tab { ChangeListView(project: project) }
+            case .terminals:
+                tab { TerminalListView(project: project) }
+            case .claude:
+                tab { ClaudeSessionListView(project: project) }
+            case .info:
+                tab { InfoPanelView(project: project) }
+            }
         }
+        .animation(ViewerMotion.contentChange, value: store.navigatorTab)
+    }
+
+    /// One tab's list, carrying the pane's own colour.
+    ///
+    /// The colour is here rather than only on the stack behind the whole pane,
+    /// because for the length of the swap both lists are on screen and a
+    /// background *behind the pair* separates neither of them — the list being
+    /// replaced shows through the one replacing it, and two sets of rows read as
+    /// one smeared set. Painted inside the transition, the arriving list simply
+    /// covers what it is replacing. None of the five paints a background of its
+    /// own, so this is the only opaque layer between them.
+    private func tab<Content: View>(@ViewBuilder _ list: () -> Content) -> some View {
+        list()
+            .background(Color(nsColor: .controlBackgroundColor))
+            .transition(ViewerMotion.contentArrival)
     }
 }
 
@@ -368,6 +396,12 @@ struct FileListView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .padding(.top, 12)
+                        // "Searching…" becoming "No results" is one line saying
+                        // something else, so the words change rather than the
+                        // line being replaced. This is the only thing here that
+                        // is allowed to fade — see the note under the stack.
+                        .contentTransition(.opacity)
+                        .animation(ViewerMotion.contentChange, value: isSearching)
                 } else {
                     ForEach(searchResults) { file in
                         SearchResultFileRow(
@@ -384,6 +418,17 @@ struct FileListView: View {
                     }
                 }
             }
+            // Deliberately without an animation on the tree-or-search branch.
+            // The three arms are one slot in the stack, so a transition between
+            // them draws both at once — a list of file names coming up through
+            // a list of matching lines, which is two readings of the pane laid
+            // over each other rather than one page replacing another. Neither
+            // arm can be given a backing to hide the other behind: the tree is
+            // a bare `ForEach` inside a lazy stack, and wrapping it in anything
+            // that could carry a colour is what stops it being lazy. The rows
+            // themselves must stay still for their own reasons — they land on a
+            // 120ms debounce and are rebuilt on every letter, and the tree's
+            // array is exactly the one D8 warns about.
             .padding(.bottom, 3)
             .padding(.horizontal, 6)
         }
@@ -527,6 +572,11 @@ struct SearchResultFileRow: View {
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 4)
                 .background(Capsule().fill(.quaternary))
+                // A file that keeps its place while the query grows a letter
+                // gets a new count; rolling it is what says the number moved
+                // rather than the row being a different row.
+                .contentTransition(.numericText())
+                .animation(ViewerMotion.badgeChange, value: file.matches.count)
         }
         .padding(.horizontal, 4)
         .frame(height: 19)
@@ -619,6 +669,16 @@ struct CompactFileRow: View {
 
     private var isRenaming: Bool { store.renamingFile == node.url }
 
+    /// What git says about this row: the file's own verdict, or for a folder the
+    /// strongest one held by anything inside it.
+    ///
+    /// A deleted file is worth saying out loud: it is gone from disk, so it has
+    /// no row of its own here and never will. Red in the tree is therefore
+    /// always a folder saying something under it went missing — the file itself
+    /// is listed in the changes pane below, which is the only place it still
+    /// exists.
+    private var change: GitChangeKind? { project.changeKind(for: node.url) }
+
     /// The rows this row's menu, keys and drags act on: the whole selection when
     /// it is part of it, itself alone when it is not.
     private var targets: [URL] { store.fileActionTargets(node.url) }
@@ -639,6 +699,11 @@ struct CompactFileRow: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .rotationEffect(.degrees(node.isExpanded ? 90 : 0))
+                    // The twisty turns and nothing else does. Opening a folder
+                    // rebuilds the whole visible-row array behind a lazy stack,
+                    // and animating that is the work the lazy stack is for
+                    // avoiding — the rows appear, the chevron says why.
+                    .animation(ViewerMotion.disclosure, value: node.isExpanded)
                     .frame(width: 12)
             } else {
                 Color.clear.frame(width: 12, height: 1)
@@ -671,10 +736,14 @@ struct CompactFileRow: View {
                     .font(.system(size: 13))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+                    .foregroundStyle(nameStyle)
             }
 
             Spacer(minLength: 0)
+
+            if let change {
+                changeBadge(change)
+            }
         }
         .padding(.horizontal, 4)
         .frame(height: 22)
@@ -763,6 +832,39 @@ struct CompactFileRow: View {
     private func startDrag() -> URL {
         store.beginFileDrag(targets)
         return node.url
+    }
+
+    /// The name carries the verdict, which is the whole point of the colour:
+    /// it is the widest thing in the row and the thing the eye lands on.
+    ///
+    /// The selected row is the exception. It is filled with the accent colour,
+    /// and a muted green or tan on top of that is neither readable nor still
+    /// recognisably green — so the name goes white, the way the icon beside it
+    /// already does, and the badge at the end goes on saying what changed.
+    private var nameStyle: AnyShapeStyle {
+        if isSelected { return AnyShapeStyle(.white) }
+        if let change { return AnyShapeStyle(change.color) }
+        return AnyShapeStyle(.primary)
+    }
+
+    /// The mark at the end of the row: the letter for a file, a dot for a
+    /// folder. A folder is standing in for whatever is inside it, and a letter
+    /// there would read as a claim about the folder itself.
+    private func changeBadge(_ change: GitChangeKind) -> some View {
+        let style = isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(change.color)
+        return Group {
+            if node.isDirectory {
+                Circle()
+                    .fill(style)
+                    .frame(width: 5, height: 5)
+            } else {
+                Text(change.letter)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(style)
+            }
+        }
+        .frame(width: 13)
+        .help(node.isDirectory ? "Contains changes · \(change.label)" : change.label)
     }
 
     /// Selected wins over open, and both over the hover: a row can be all three
@@ -1144,6 +1246,11 @@ struct ChangeListView: View {
                     .lineLimit(4)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    // It arrives a moment after Commit or Push was pressed and
+                    // pushes the whole box down as it does. Coming down into
+                    // its own space ties it to the press; appearing between two
+                    // frames reads as the box having always been that tall.
+                    .transition(.opacity.combined(with: .offset(y: -4)))
             }
 
             // The Commit button is simply dead while a merge is half-done, and
@@ -1216,6 +1323,9 @@ struct ChangeListView: View {
             }
             .controlSize(.small)
         }
+        // Only the error line above; nothing else in this box is allowed to
+        // move, least of all the message being typed into it.
+        .animation(ViewerMotion.isReduced ? nil : .easeOut(duration: 0.18), value: project.gitError)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.bar)
@@ -1278,16 +1388,11 @@ struct ChangeListView: View {
         return "Push \(ahead)"
     }
 
+    /// The same colours the file tree above paints a row in, from the same
+    /// verdict — one list and one tree describing one repository should not
+    /// disagree about what green means. See ``GitChangeColors``.
     private func color(for change: GitStatus.Change) -> Color {
-        if change.isConflicted { return .red }
-        switch change.label {
-        case "Added": return .green
-        case "Deleted": return .red
-        case "Renamed": return .blue
-        // Green like a staged add, because that is what it is about to be.
-        case "Untracked": return .green
-        default: return .orange
-        }
+        change.kind.color
     }
 }
 
@@ -1440,6 +1545,11 @@ struct TerminalListView: View {
                         .padding(.top, 10)
                 }
             }
+            // ⌘T and closing a shell happen all day, so the card should be seen
+            // to arrive or go rather than the list simply being different.
+            // Keyed on the identities alone: a card whose title its prompt just
+            // renamed is the same card, and the list should not stir for it.
+            .animation(ViewerMotion.listChange, value: terminals.map(\.id))
             .padding(10)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

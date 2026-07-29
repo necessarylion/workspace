@@ -74,6 +74,50 @@ private struct CodeChipBackdrop: ViewModifier {
     }
 }
 
+/// A cache that forgets in halves rather than all at once.
+///
+/// The obvious cap — empty the whole thing once it grows past a limit — throws
+/// away what is on screen along with what is not, and the pass that overflowed
+/// it is usually the pass that then has to make all of it again: a pull request
+/// with three hundred comments does exactly that. Keeping the generation before
+/// the current one means anything still being read is at worst one lookup away,
+/// and finding it there moves it forward, so what is on screen settles into the
+/// live half and what has been scrolled past falls out of the old one.
+private struct GenerationCache<Key: Hashable, Value> {
+    /// How much is held before the live half is set aside. Twice this is the
+    /// most that is ever kept.
+    let limit: Int
+
+    private var live: [Key: Value] = [:]
+    private var previous: [Key: Value] = [:]
+
+    init(limit: Int) { self.limit = limit }
+
+    mutating func value(for key: Key) -> Value? {
+        if let value = live[key] { return value }
+        guard let value = previous[key] else { return nil }
+        // A promotion fills the live half exactly as an insert does, and a pass
+        // that finds everything it wants in the old half is all promotions: this
+        // has to count against the cap too, or the two halves grow past it.
+        rotateIfFull()
+        live[key] = value
+        return value
+    }
+
+    mutating func insert(_ value: Value, for key: Key) {
+        rotateIfFull()
+        live[key] = value
+    }
+
+    /// Sets the live half aside once it is full, which is the only thing that
+    /// ever drops anything: what was in the old half at that moment is gone.
+    private mutating func rotateIfFull() {
+        guard live.count >= limit else { return }
+        previous = live
+        live = [:]
+    }
+}
+
 /// Full-page Markdown view for `.md` files: `MarkdownText` in a scroll view.
 struct MarkdownPreview: View {
     let text: String
@@ -347,13 +391,42 @@ struct MarkdownText: View {
     }
 
     /// One line of styled text, with the chip backdrop layered behind it.
+    @MainActor
     fileprivate static func inline(_ source: String, baseSize: CGFloat = MarkdownText.bodySize) -> some View {
-        let text = inlineText(source, baseSize: baseSize)
+        let text = cachedInlineText(source, baseSize: baseSize)
         // Both layers are the same `Text`, and `.font`/`.foregroundStyle` set by
         // the caller reach the backdrop through the environment, so the two
         // always agree on how the text is laid out.
         return text.modifier(CodeChipBackdrop(text: text))
     }
+
+    /// The styled line, remembered.
+    ///
+    /// Reading the Markdown in a line is the expensive half of drawing a
+    /// comment, and the blocks being cached does not save it: the parse of a
+    /// *line* happens here, on the way to a `Text`. A page of comments runs
+    /// through this on every pass of a body that has nothing to do with their
+    /// text — a build tick, a drag on the panel's seam — so the answer is kept,
+    /// the way ``cachedBlocks(in:relativeTo:)`` keeps the blocks above it. The
+    /// size is part of the key because a code span is set relative to whatever
+    /// block it sits in.
+    @MainActor
+    private static func cachedInlineText(_ source: String, baseSize: CGFloat) -> Text {
+        let key = InlineKey(text: source, size: baseSize)
+        if let cached = inlineCache.value(for: key) { return cached }
+        let text = inlineText(source, baseSize: baseSize)
+        inlineCache.insert(text, for: key)
+        return text
+    }
+
+    private struct InlineKey: Hashable {
+        let text: String
+        let size: CGFloat
+    }
+
+    /// Every line of every block, so it holds more than the block cache does.
+    @MainActor
+    private static var inlineCache = GenerationCache<InlineKey, Text>(limit: 600)
 
     /// `baseSize` is the point size of the block the text sits in, so a code
     /// span can be set one point below whatever surrounds it — including inside
@@ -446,22 +519,27 @@ struct MarkdownText: View {
     /// scroll, a hover, a window resize — and a page of PR comments is a stack
     /// of these. Parsing the same Markdown on each of those passes is work
     /// nobody sees, so the answer is kept, the way `MarkdownCodeHighlighter`
-    /// keeps its colours. The cap only stops a long reading session from
-    /// growing this without end.
+    /// keeps its colours.
     @MainActor
     private static func cachedBlocks(in text: String, relativeTo base: URL?) -> [Block] {
         // The folder is part of the key, not just the text: the same
         // `![](assets/logo.png)` is a different picture in another repository.
-        let key = "\(base?.path ?? "")\n\(text)"
-        if let cached = cache[key] { return cached }
+        // Two fields rather than one joined string, so a hit costs a hash of
+        // what is already there instead of a fresh copy of the whole document.
+        let key = BlockKey(text: text, base: base?.path ?? "")
+        if let cached = cache.value(for: key) { return cached }
         let parsed = blocks(in: text, relativeTo: base)
-        if cache.count > 200 { cache.removeAll() }
-        cache[key] = parsed
+        cache.insert(parsed, for: key)
         return parsed
     }
 
+    private struct BlockKey: Hashable {
+        let text: String
+        let base: String
+    }
+
     @MainActor
-    private static var cache: [String: [Block]] = [:]
+    private static var cache = GenerationCache<BlockKey, [Block]>(limit: 200)
 
     static func blocks(in text: String, relativeTo base: URL? = nil) -> [Block] {
         // The bookkeeping a bot hides in `<!-- … -->` goes first, so nothing

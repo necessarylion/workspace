@@ -714,8 +714,20 @@ final class WorkspaceStore {
     /// Shows or folds the navigator by hand — the button in the viewer's header
     /// and the View menu. Nothing else moves the pane: where it is left is where
     /// it stays, whatever the viewer goes on to show.
+    ///
+    /// The fold is animated here rather than at the call sites, because there
+    /// are three of them and they used to disagree: the header button eased,
+    /// ⌥⌘0 snapped, and a dashboard tile snapped. A pane is one thing whichever
+    /// way it is asked for, so the transaction belongs with the property.
     func toggleNavigator() {
-        showsNavigator.toggle()
+        withAnimation(ViewerMotion.paneChange) { showsNavigator.toggle() }
+    }
+
+    /// The same for the repositories pane, which the header button and ⌘0 both
+    /// reach for. It exists only to carry the animation — without it the two
+    /// call sites write the flag themselves and one of them forgets.
+    func toggleProjects() {
+        withAnimation(ViewerMotion.paneChange) { showsProjects.toggle() }
     }
 
     /// The document the viewer is actually showing. The open item survives a
@@ -1109,6 +1121,78 @@ final class WorkspaceStore {
         }
     }
 
+    /// Reads everything this pull request is made of again, from the host.
+    ///
+    /// The same things ``openPullRequest(_:project:)`` fetches the first time
+    /// round, minus the shortcuts it takes: the request itself — its title,
+    /// state, draft flag, approvals and description all live on that one object
+    /// — the diff, the conversation, who is reviewing, the CI runs and how far
+    /// the branch has drifted. The commits come along only if the tab that
+    /// shows them has already been opened; a review that never went there
+    /// should not start paying for the call now.
+    ///
+    /// They are independent reads, so they go out together the way the
+    /// dashboard's do: the wait is the slowest host call rather than the sum of
+    /// them, and each writes what it owns as it lands.
+    func refreshPullRequest(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        // Not while a merge, a rejection or a sync is on its way: what comes
+        // back would be the state from before it landed. One refresh at a time,
+        // too — the button is easy to lean on.
+        guard !item.isRefreshingPullRequest, !item.isRunningPullRequestAction else { return }
+        item.isRefreshingPullRequest = true
+        defer { item.isRefreshingPullRequest = false }
+
+        async let request: Void = reloadPullRequest(item, project: project, pr: pr)
+        async let diff: Void = loadPullRequestDiff(item, project: project, pr: pr)
+        async let comments: Void = loadComments(item, project: project, pr: pr)
+        async let builds: Void = loadBuilds(item, project: project, pr: pr)
+        async let commits: Void = reloadCommitsIfShown(item, project: project, pr: pr)
+        // Fetching first, because the branch may well have moved on the host
+        // since it was last counted here.
+        async let sync: Void = refreshSyncState(item, project: project, pr: pr, fetching: true)
+        _ = await (request, diff, comments, builds, commits, sync)
+
+        showStatus("#\(pr.number) refreshed")
+    }
+
+    /// The pull request object itself, re-read from the host. It is what the
+    /// summary bar and the header are drawn from, so a refresh that left it
+    /// alone would reload the diff under a title, a state and an approvals
+    /// count from whenever the request was opened.
+    private func reloadPullRequest(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        guard let remote = project.remote, remote.kind != .unknown else { return }
+        var latest = pr
+        do {
+            latest = try await PullRequestService.load(
+                number: pr.number,
+                for: remote,
+                in: project.url
+            )
+            item.pullRequest = latest
+            // The header names the pull request by its title, and a title is
+            // one of the things that can have changed on the host.
+            item.title = latest.title
+        } catch {
+            // Whatever else lands is still worth showing, so this says what
+            // went wrong and leaves the rest of the refresh to finish.
+            showError(error.localizedDescription)
+        }
+        // Both hosts hand the reviewers over with the request, so this usually
+        // costs nothing beyond the call just made.
+        await loadReviewers(item, project: project, pr: latest)
+        if let named = await PullRequestService.namedMentions(in: latest, directory: project.url) {
+            item.pullRequest?.body = named
+        }
+    }
+
+    /// The commits, but only for a Commits tab that has already been opened —
+    /// see ``loadCommits(_:project:pr:)`` for why they are not fetched with
+    /// everything else in the first place.
+    private func reloadCommitsIfShown(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        guard !item.commits.isEmpty else { return }
+        await loadCommits(item, project: project, pr: pr)
+    }
+
     /// Opens a pull request known only by its number — a `#123` written in a
     /// commit message. The list the navigator holds is of open requests only,
     /// and a commit usually names one that has already merged, so anything not
@@ -1162,9 +1246,9 @@ final class WorkspaceStore {
         item.isLoadingComments = true
         item.commentError = nil
         do {
-            item.comments = try await PullRequestService.comments(for: pr, in: project.url)
+            item.setComments(try await PullRequestService.comments(for: pr, in: project.url))
         } catch {
-            item.comments = []
+            item.setComments([])
             item.commentError = error.localizedDescription
         }
         item.isLoadingComments = false
@@ -1285,6 +1369,11 @@ final class WorkspaceStore {
         item.isLoadingCommits = false
     }
 
+    /// The CI runs, read out loud: the spinner turns while it is in flight, and
+    /// a refusal replaces the list with what the host said. This is the first
+    /// look at the panel and the reload button — both are somebody waiting for
+    /// an answer, so both are allowed to say they are working and to fail
+    /// visibly.
     func loadBuilds(_ item: ViewerItem, project: Project, pr: PullRequest) async {
         item.isLoadingBuilds = true
         item.buildsError = nil
@@ -1295,6 +1384,23 @@ final class WorkspaceStore {
             item.buildsError = error.localizedDescription
         }
         item.isLoadingBuilds = false
+    }
+
+    /// The same runs, read quietly, for the panel's ticker.
+    ///
+    /// Nobody asked for this one, so it says nothing: no spinner to flash every
+    /// ten seconds, and a `gh` or `bkt` that stumbles once leaves the last good
+    /// list where it is rather than emptying the panel under someone reading it.
+    /// The list is only assigned when it has actually changed, so a tick that
+    /// finds the same jobs redraws nothing.
+    func refreshBuilds(_ item: ViewerItem, project: Project, pr: PullRequest) async {
+        guard let builds = try? await PullRequestService.builds(for: pr, in: project.url) else {
+            return
+        }
+        if item.builds != builds { item.builds = builds }
+        // The host is answering again, so whatever the last failure left on
+        // screen is out of date.
+        if item.buildsError != nil { item.buildsError = nil }
     }
 
     /// Opens one commit inside the Commits tab and fetches its patch.
@@ -1313,7 +1419,10 @@ final class WorkspaceStore {
         // The tab may have gone back to the list, or on to another commit,
         // while this was in flight — the patch is still worth keeping.
         if let text {
-            item.commitDiffs[commit.sha] = DiffHighlighter.highlight(await DiffParser.parseInBackground(text))
+            item.cacheCommitDiff(
+                DiffHighlighter.highlight(await DiffParser.parseInBackground(text)),
+                for: commit.sha
+            )
         } else if item.selectedCommit?.sha == commit.sha {
             item.commitDiffError = "Could not load the changes in \(commit.shortSHA)."
         }
@@ -1504,6 +1613,36 @@ final class WorkspaceStore {
         item.isPostingComment = false
     }
 
+    /// Settles a comment thread, or opens it again. The conversation is read
+    /// back afterwards rather than edited in place: resolution is the host's
+    /// word, and a thread someone else has already touched should come back
+    /// saying so.
+    func setCommentResolved(
+        _ resolved: Bool,
+        for comment: PullRequestComment,
+        on item: ViewerItem,
+        project: Project,
+        pr: PullRequest
+    ) async {
+        item.isPostingComment = true
+        item.commentError = nil
+        do {
+            try await PullRequestService.setResolved(
+                resolved,
+                for: comment,
+                on: pr,
+                in: project.url
+            )
+            showStatus(resolved
+                ? "Thread resolved on #\(pr.number)"
+                : "Thread reopened on #\(pr.number)")
+            await loadComments(item, project: project, pr: pr)
+        } catch {
+            item.commentError = error.localizedDescription
+        }
+        item.isPostingComment = false
+    }
+
     /// A comment with its mentions in the form the host wants.
     ///
     /// The composer writes the **name**, because that is what the person typing
@@ -1686,8 +1825,10 @@ final class WorkspaceStore {
     /// Everything that sends the user there goes through this: setting the tab
     /// alone does nothing visible while the pane is hidden.
     func showNavigator(_ tab: NavigatorTab) {
+        // The tab is set outside the transaction: which list is shown is the
+        // navigator's own business, and only the pane arriving is a fold.
         navigatorTab = tab
-        showsNavigator = true
+        withAnimation(ViewerMotion.paneChange) { showsNavigator = true }
     }
 
     /// Switching the navigator by hand — the tab bar, or the View menu.
@@ -2281,6 +2422,10 @@ final class WorkspaceStore {
     /// Ends one panel's conversation — the ✕, and nothing else. Being replaced
     /// on screen is not this: see ``chats``.
     func closeChatPanel(_ panel: ChatPanel) {
+        // Same reason as folding, one step further: the surface is about to be
+        // torn down, and a first responder that has been closed is a window with
+        // nowhere for the keys to go.
+        TerminalFocus.relinquish(panel.session)
         panel.remember()
         panel.session.terminate()
         withAnimation(Self.chatPanelMotion) {
@@ -2294,7 +2439,7 @@ final class WorkspaceStore {
     /// **Nothing happens at all when it is already in front**, and that guard
     /// has to be out here rather than inside ``raise(_:)``.
     ///
-    /// `ChatPanelClickMonitor` calls this on *every* left mouse-down in the
+    /// `WindowClickMonitor` calls this on *every* left mouse-down in the
     /// window, which is what lets a click anywhere in a panel bring it forward.
     /// With the check inside `raise`, the mutation was correctly skipped but
     /// `withAnimation` had already opened a transaction — so every click on the
@@ -2315,6 +2460,15 @@ final class WorkspaceStore {
 
     /// The same, unfolded: what the Claude list, a banner and a resumed
     /// conversation all want, since each of them is a request to *read* it.
+    ///
+    /// And to type in it, which is why the keyboard comes with it. Every way
+    /// into this — the bar on the dock, the Claude list, a banner — is somebody
+    /// asking for a conversation by name, and landing them in it with the cursor
+    /// still somewhere else would make the next thing they do a click they
+    /// should not have had to make.
+    ///
+    /// The panel's terminal never left the window (see ``chats``), so there is
+    /// nothing to wait for: the surface is mounted and can take the keys now.
     func unfoldChatPanel(_ panel: ChatPanel) {
         withAnimation(Self.chatPanelMotion) {
             panel.isCollapsed = false
@@ -2326,6 +2480,7 @@ final class WorkspaceStore {
             panel.remember()
             raise(panel)
         }
+        TerminalFocus.give(to: panel.session)
     }
 
     private func raise(_ panel: ChatPanel) {
@@ -2365,6 +2520,13 @@ final class WorkspaceStore {
     /// buy by dropping the movement, and a panel that vanishes rather than
     /// folding gives the reader nothing to follow to the dock.
     func collapseChatPanel(_ panel: ChatPanel) {
+        // Before it goes: the chevron is inside the panel, so the mouse-down
+        // that reached it has just put the keyboard in this very terminal — and
+        // the mouse-up folds the terminal away. Left alone, the conversation
+        // would keep receiving everything typed at a window that no longer shows
+        // it. Only ever this panel's own focus, so folding one while reading
+        // another takes nothing from the one being read.
+        TerminalFocus.relinquish(panel.session)
         withAnimation(Self.chatPanelMotion) {
             panel.isCollapsed = true
             panel.remember()
@@ -3120,8 +3282,15 @@ struct ChatPanelFrame: Equatable, Codable {
 
 
     /// The line the strip's bars sit on, in the overlay's coordinates.
+    ///
+    /// Flush with the bottom of the pane, and not held off it by ``margin`` the
+    /// way a floating panel is. A panel is an object sitting *in* the window and
+    /// wants air around it; the dock is a rail along the bottom edge, and a rail
+    /// with a gap under it reads as neither one thing nor the other. What the
+    /// gap cost was the only thing down there worth covering — the last line of
+    /// the pane — and covering it is what a dock does.
     static func dockLine(in region: CGRect) -> CGFloat {
-        max(region.maxY - margin - titleBarHeight, 0)
+        max(region.maxY - titleBarHeight, 0)
     }
 
     /// Where a panel goes as it folds: down to the right-hand end of the dock,

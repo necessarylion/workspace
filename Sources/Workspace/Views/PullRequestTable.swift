@@ -34,11 +34,24 @@ struct PullRequestTable: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             title
-            if project.pullRequests.isEmpty {
-                emptyState
-            } else {
-                table
+            // Two transactions, and neither of them the requests themselves. A
+            // sweep every five minutes rewrites all fifty of these, so keying
+            // the fade to the values would put one on every row of a board that
+            // came back exactly as it went out; keyed to the identities, it
+            // runs only when a request has actually opened, merged or moved.
+            // The other is the read, which is what carries the note away and
+            // brings the table up in its place.
+            Group {
+                if project.pullRequests.isEmpty {
+                    emptyState
+                        .transition(ViewerMotion.contentArrival)
+                } else {
+                    table
+                        .transition(ViewerMotion.contentArrival)
+                }
             }
+            .animation(ViewerMotion.listChange, value: project.pullRequests.map(\.id))
+            .animation(ViewerMotion.contentChange, value: project.isLoadingPullRequests)
         }
     }
 
@@ -75,6 +88,7 @@ struct PullRequestTable: View {
     private var emptyState: some View {
         if project.isLoadingPullRequests {
             note("Reading pull requests…")
+                .transition(ViewerMotion.contentArrival)
         } else if let error = project.pullRequestError {
             VStack(alignment: .leading, spacing: 6) {
                 note(error)
@@ -82,8 +96,10 @@ struct PullRequestTable: View {
                     .controlSize(.small)
                     .pointerCursor()
             }
+            .transition(ViewerMotion.contentArrival)
         } else {
             note("Nothing is open — everything is merged.")
+                .transition(ViewerMotion.contentArrival)
         }
     }
 
@@ -103,12 +119,19 @@ struct PullRequestTable: View {
         VStack(spacing: 3) {
             header
             Divider().padding(.bottom, 2)
-            ForEach(Array(project.pullRequests.enumerated()), id: \.element.id) { index, pr in
-                PullRequestTableRow(
-                    pr: pr,
-                    isAlternate: index.isMultiple(of: 2) == false,
-                    open: { store.openPullRequest(pr, project: project) }
-                )
+            // Lazy, for the same reason the commit history below it is: the
+            // hosts are asked for fifty, and every row here carries a face, a
+            // row of reviewers and a build summary. A repository with a full
+            // board was building all of that on the way to a dashboard where
+            // three of them are on screen.
+            LazyVStack(spacing: 3) {
+                ForEach(Array(project.pullRequests.enumerated()), id: \.element.id) { index, pr in
+                    PullRequestTableRow(
+                        pr: pr,
+                        isAlternate: index.isMultiple(of: 2) == false,
+                        open: { store.openPullRequest(pr, project: project) }
+                    )
+                }
             }
         }
         .padding(.horizontal, Column.rowInset)

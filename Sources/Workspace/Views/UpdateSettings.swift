@@ -220,38 +220,56 @@ struct UpdateBanner: View {
     /// update is never actually lost.
     @State private var dismissedVersion: String?
 
+    /// The release this banner is for, or nothing at all. Pulled out of the body
+    /// because the transition below needs a transaction, and an `if` written
+    /// straight into `body` has nothing above it for one to sit on — which is
+    /// why the notice used to appear and go without playing either.
+    private var announced: AppRelease? {
+        guard case .ready(let release) = updater.stage,
+              dismissedVersion != release.version.text
+        else { return nil }
+        return release
+    }
+
     var body: some View {
-        if case .ready(let release) = updater.stage, dismissedVersion != release.version.text {
-            HStack(spacing: 10) {
-                Image(systemName: "arrow.down.circle.fill")
-                    .foregroundStyle(.blue)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Workspace \(release.version.text) is ready")
-                        .font(.callout.weight(.medium))
-                    Text("Restarting takes a moment.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Button("Relaunch") { updater.installAndRelaunch() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .pointerCursor()
-                Button {
-                    dismissedVersion = release.version.text
-                } label: {
-                    Image(systemName: "xmark")
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
-                .help("Later — the gear in the sidebar keeps it")
-                .pointerCursor()
+        Group {
+            if let release = announced {
+                banner(release)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(.regularMaterial, in: .rect(cornerRadius: 10, style: .continuous))
-            .shadow(radius: 6, y: 2)
-            .padding(16)
-            .transition(.move(edge: .bottom).combined(with: .opacity))
         }
+        .animation(ViewerMotion.listChange, value: announced?.version.text)
+    }
+
+    private func banner(_ release: AppRelease) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.down.circle.fill")
+                .foregroundStyle(.blue)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Workspace \(release.version.text) is ready")
+                    .font(.callout.weight(.medium))
+                Text("Restarting takes a moment.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button("Relaunch") { updater.installAndRelaunch() }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .pointerCursor()
+            Button {
+                dismissedVersion = release.version.text
+            } label: {
+                Image(systemName: "xmark")
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .help("Later — the gear in the sidebar keeps it")
+            .pointerCursor()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: .rect(cornerRadius: 10, style: .continuous))
+        .shadow(radius: 6, y: 2)
+        .padding(16)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 }

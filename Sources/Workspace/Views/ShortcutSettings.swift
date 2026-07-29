@@ -25,7 +25,9 @@ struct ShortcutSettings: View {
             Divider()
 
             ScrollView {
-                VStack(spacing: 0) {
+                // Every key the app binds, which is a list that only grows, and
+                // each row asks what it is bound to and what it clashes with.
+                LazyVStack(spacing: 0) {
                     ForEach(ShortcutGroup.allCases) { group in
                         GroupHeader(title: group.title)
                         ForEach(group.actions) { action in
