@@ -55,16 +55,25 @@ struct PullRequestSidebar: View {
                 EmptyView()
             }
 
-            if ordered.isEmpty {
-                emptyNote(item.reviewersError
-                    ?? (item.isLoadingReviewers
-                        ? "Reading who is reviewing…"
-                        : "Nobody is reviewing #\(pr.number) yet."))
-            } else {
-                ForEach(ordered) { reviewer in
-                    reviewerRow(reviewer)
+            // Who is reviewing changes when somebody reviews or the sheet asks
+            // more people — a handful of times an hour at the very most, and
+            // never on a timer. So the list is one of the few here worth
+            // animating, keyed to who is on it rather than to what they said.
+            Group {
+                if ordered.isEmpty {
+                    emptyNote(item.reviewersError
+                        ?? (item.isLoadingReviewers
+                            ? "Reading who is reviewing…"
+                            : "Nobody is reviewing #\(pr.number) yet."))
+                        .transition(ViewerMotion.contentArrival)
+                } else {
+                    ForEach(ordered) { reviewer in
+                        reviewerRow(reviewer)
+                            .transition(.opacity)
+                    }
                 }
             }
+            .animation(ViewerMotion.listChange, value: item.reviewers.map(\.id))
 
             // Nothing to ask of a pull request that has already ended. The
             // button sits under the list rather than in the header: it is the
@@ -115,25 +124,37 @@ struct PullRequestSidebar: View {
                 .disabled(item.isLoadingBuilds)
             }
 
-            if item.builds.isEmpty {
-                emptyNote(item.buildsError
-                    ?? (item.isLoadingBuilds
-                        ? "Reading builds…"
-                        : "Nothing has run against this pull request's head commit on \(pr.host.displayName)."))
-                if item.buildsError != nil, let url = pr.url {
-                    Button {
-                        NSWorkspace.shared.open(url)
-                    } label: {
-                        Label("Open in Browser", systemImage: "safari")
-                            .font(.caption)
+            // The note gives way to the first runs, and that is the whole of the
+            // motion here. The **rows** are deliberately left out of it: the
+            // list is read again every ten seconds and the loader sorts
+            // failures to the top, so they genuinely reorder on a timer — an
+            // animated list would have this panel shuffling by itself while it
+            // is being read. A running job already says it is moving, in the
+            // pulse on its own glyph.
+            Group {
+                if item.builds.isEmpty {
+                    emptyNote(item.buildsError
+                        ?? (item.isLoadingBuilds
+                            ? "Reading builds…"
+                            : "Nothing has run against this pull request's head commit on \(pr.host.displayName)."))
+                        .transition(ViewerMotion.contentArrival)
+                    if item.buildsError != nil, let url = pr.url {
+                        Button {
+                            NSWorkspace.shared.open(url)
+                        } label: {
+                            Label("Open in Browser", systemImage: "safari")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .pointerCursor()
+                        .transition(ViewerMotion.contentArrival)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .pointerCursor()
+                } else {
+                    ForEach(item.builds) { BuildRow(build: $0) }
                 }
-            } else {
-                ForEach(item.builds) { BuildRow(build: $0) }
             }
+            .animation(ViewerMotion.contentChange, value: item.builds.isEmpty)
         }
     }
 

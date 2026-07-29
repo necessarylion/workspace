@@ -185,6 +185,10 @@ struct InfoPanelView: View {
                     .font(.caption)
                     .foregroundStyle(.red)
                     .lineLimit(2)
+                    // It answers Rescan, or the Stop in a port's menu, a moment
+                    // after the press. Coming down into its own space is what
+                    // ties it to the press that asked for it.
+                    .transition(.opacity.combined(with: .offset(y: -4)))
             }
 
             Button {
@@ -197,6 +201,11 @@ struct InfoPanelView: View {
             .pointerCursor()
             .padding(.top, 2)
         }
+        // The wait giving way to what was found. Keyed on the scan alone: the
+        // ports themselves are re-read on a timer, and a list that redrew itself
+        // every few minutes in a pane nobody is looking at is only movement.
+        .animation(ViewerMotion.contentChange, value: project.isScanningPorts)
+        .animation(ViewerMotion.isReduced ? nil : .easeOut(duration: 0.18), value: project.portError)
     }
 
     /// Right-click on a port: open it, copy it, or stop what is holding it.

@@ -714,8 +714,20 @@ final class WorkspaceStore {
     /// Shows or folds the navigator by hand — the button in the viewer's header
     /// and the View menu. Nothing else moves the pane: where it is left is where
     /// it stays, whatever the viewer goes on to show.
+    ///
+    /// The fold is animated here rather than at the call sites, because there
+    /// are three of them and they used to disagree: the header button eased,
+    /// ⌥⌘0 snapped, and a dashboard tile snapped. A pane is one thing whichever
+    /// way it is asked for, so the transaction belongs with the property.
     func toggleNavigator() {
-        showsNavigator.toggle()
+        withAnimation(ViewerMotion.paneChange) { showsNavigator.toggle() }
+    }
+
+    /// The same for the repositories pane, which the header button and ⌘0 both
+    /// reach for. It exists only to carry the animation — without it the two
+    /// call sites write the flag themselves and one of them forgets.
+    func toggleProjects() {
+        withAnimation(ViewerMotion.paneChange) { showsProjects.toggle() }
     }
 
     /// The document the viewer is actually showing. The open item survives a
@@ -1813,8 +1825,10 @@ final class WorkspaceStore {
     /// Everything that sends the user there goes through this: setting the tab
     /// alone does nothing visible while the pane is hidden.
     func showNavigator(_ tab: NavigatorTab) {
+        // The tab is set outside the transaction: which list is shown is the
+        // navigator's own business, and only the pane arriving is a fold.
         navigatorTab = tab
-        showsNavigator = true
+        withAnimation(ViewerMotion.paneChange) { showsNavigator = true }
     }
 
     /// Switching the navigator by hand — the tab bar, or the View menu.
@@ -3268,8 +3282,15 @@ struct ChatPanelFrame: Equatable, Codable {
 
 
     /// The line the strip's bars sit on, in the overlay's coordinates.
+    ///
+    /// Flush with the bottom of the pane, and not held off it by ``margin`` the
+    /// way a floating panel is. A panel is an object sitting *in* the window and
+    /// wants air around it; the dock is a rail along the bottom edge, and a rail
+    /// with a gap under it reads as neither one thing nor the other. What the
+    /// gap cost was the only thing down there worth covering — the last line of
+    /// the pane — and covering it is what a dock does.
     static func dockLine(in region: CGRect) -> CGFloat {
-        max(region.maxY - margin - titleBarHeight, 0)
+        max(region.maxY - titleBarHeight, 0)
     }
 
     /// Where a panel goes as it folds: down to the right-hand end of the dock,

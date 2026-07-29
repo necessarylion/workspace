@@ -39,12 +39,13 @@ struct DiffView: View {
     @State private var colouredFiles: [DiffFile.ID: DiffFile] = [:]
     /// The parse `colouredFiles` was built from; anything older is thrown away.
     @State private var colouredRevision: UUID?
-    /// Set the moment a different file is picked out of the index, and cleared
-    /// on the pass after — which is what gives the file arriving something to
-    /// fade up from. It is one opacity on the whole scrolling body: the rows
-    /// are never animated, because a large diff has thousands of them and the
-    /// thing that changed is the pane, not the lines.
-    @State private var isSwappingFile = false
+    /// Set the moment the whole body is about to say something else — a
+    /// different file picked out of the index, or the same one shown split
+    /// instead of unified — and cleared on the pass after, which is what gives
+    /// what arrives something to fade up from. It is one opacity on the whole
+    /// scrolling body: the rows are never animated, because a large diff has
+    /// thousands of them and the thing that changed is the pane, not the lines.
+    @State private var isSwappingBody = false
 
     /// A flattened diff, together with the parse it was built from.
     ///
@@ -93,10 +94,21 @@ struct DiffView: View {
         HStack(spacing: 0) {
             if showsFileList {
                 DiffFileList(diff: diff, selection: $selectedFile)
+                    .transition(ViewerMotion.contentArrival)
                 Divider()
+                    .transition(ViewerMotion.contentArrival)
             }
             diffBody
+                // Left out of the transaction on purpose. The index is 232
+                // points wide and the body is whatever is left, so putting that
+                // width on a curve means laying out every row on screen on
+                // every frame of it — the index fades, and the body snaps to
+                // its new width at once underneath.
+                .animation(nil, value: showsFileList)
         }
+        // Scoped to whether the index is there, so it is the only thing this
+        // row ever animates.
+        .animation(ViewerMotion.contentChange, value: showsFileList)
         .onChange(of: diff.revision, initial: true) { rebuild() }
         .onChange(of: collapsedFiles) { rebuild() }
         .onChange(of: composing) { rebuild() }
@@ -104,7 +116,14 @@ struct DiffView: View {
             rebuild()
             // The fade is the whole of the motion here, so Reduce Motion means
             // no fade rather than a shorter one — the file simply changes.
-            if !ViewerMotion.isReduced { isSwappingFile = true }
+            if !ViewerMotion.isReduced { isSwappingBody = true }
+        }
+        // Split and unified are the same lines drawn a different way round, and
+        // the switch between them was a hard cut of the entire body. It takes
+        // the same two steps a picked file does rather than an animation of its
+        // own: the rows are the one thing here that must never be in one.
+        .onChange(of: layout) {
+            if !ViewerMotion.isReduced { isSwappingBody = true }
         }
         // The lines that carry a thread, not the threads themselves: flattening
         // only asks which lines to leave room under, and comparing the comment
@@ -166,16 +185,17 @@ struct DiffView: View {
                 .background(Color(nsColor: AppColors.viewerBackground))
             }
             // Picking a file replaces every row under an offset that is about
-            // to be thrown to the top anyway, which read as a flicker. Two
-            // steps, because there is no transition to hang this on: the body
-            // is drawn at nothing on the pass that carries the new file, and
-            // the pass after brings it up. The index beside it and the bar
-            // above are outside this, so the only thing that moves is the part
-            // that changed.
-            .opacity(isSwappingFile ? 0 : 1)
-            .task(id: isSwappingFile) {
-                guard isSwappingFile else { return }
-                withAnimation(ViewerMotion.contentChange) { isSwappingFile = false }
+            // to be thrown to the top anyway, which read as a flicker; changing
+            // the layout redraws every one of them in a different shape. Two
+            // steps, because there is no transition to hang either on: the body
+            // is drawn at nothing on the pass that carries the change, and the
+            // pass after brings it up. The index beside it and the bar above
+            // are outside this, so the only thing that moves is the part that
+            // changed.
+            .opacity(isSwappingBody ? 0 : 1)
+            .task(id: isSwappingBody) {
+                guard isSwappingBody else { return }
+                withAnimation(ViewerMotion.contentChange) { isSwappingBody = false }
             }
         }
     }
@@ -630,6 +650,12 @@ struct DiffLayoutBar: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(.bar)
+        // The pane's own colour under the material, which is what the material
+        // was blending with anyway — the diff sits on it everywhere it is
+        // drawn, so this changes nothing at rest. What it buys is a bar that is
+        // opaque *while it arrives*: without it this strip is the one part of
+        // the diff a tab being left can still be read through.
+        .background(Color(nsColor: AppColors.viewerBackground))
     }
 
     /// The repository this diff belongs to, but only while a single file is on

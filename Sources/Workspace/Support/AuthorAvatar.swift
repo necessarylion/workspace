@@ -194,14 +194,24 @@ struct AuthorAvatar: View {
                     .resizable()
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fill)
+                    .transition(.opacity)
             } else {
                 Text(initials)
                     .font(.system(size: size * 0.5, weight: .semibold))
                     .foregroundStyle(tint)
                     .frame(width: size, height: size)
                     .background(tint.opacity(0.22))
+                    .transition(.opacity)
             }
         }
+        // The initials give way to the face rather than being swapped for it.
+        // A pull request opened for the first time asks for every picture on it
+        // at once and they land one at a time, so without this the whole page
+        // speckles. Opacity and nothing else: fifty discs growing into place is
+        // a page that cannot be read while it settles, and the two sides are the
+        // same disc at the same size anyway. It only ever runs on first sight —
+        // the initialiser primes a face the cache already has.
+        .animation(ViewerMotion.isReduced ? nil : .easeOut(duration: 0.2), value: image != nil)
         .frame(width: size, height: size)
         .clipShape(Circle())
         .help(name)

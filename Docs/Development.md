@@ -152,6 +152,7 @@ Sources/Workspace/
   Support/Shell.swift         runs git/gh/bkt through the login shell
   Support/GitDirectoryWatcher.swift  git run outside the app: watches `.git` for a checkout
   Support/WorkingTreeWatcher.swift  files written outside the app: FSEvents over the whole tree
+  Support/GitChangeColors.swift  what added, changed and gone look like — tree, gutter and change list
   Support/BrandMark.swift     real logos (TypeScript, Docker, GitHub…) from SVG
   Support/BrandPath.swift     the path data behind them — generated, don't edit
   Support/AuthorAvatar.swift  author pictures: where to find one, cache, disc view
@@ -181,7 +182,7 @@ Sources/Workspace/
     PullRequestReviewer.swift  who is reviewing, their verdicts, and asking more people
     PullRequestBuild.swift    the CI runs on the head commit, normalised across hosts
     GitHubAccounts.swift      per-repo gh account choice + GH_TOKEN injection
-    GitStatus.swift           porcelain status + per-file diff
+    GitStatus.swift           porcelain status + per-file diff, and the verdict a row is coloured by
     DefaultBranch.swift       which branch the host calls default: gh/bkt, then origin/HEAD
     RepositoryCommit.swift    the branch's own git log, grouped by day
     DiffModel.swift           unified diff → side-by-side rows

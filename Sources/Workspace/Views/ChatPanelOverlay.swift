@@ -273,7 +273,17 @@ private struct ChatDockBar: View {
 
     @Environment(WorkspaceStore.self) private var store
 
-    private static let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+    /// Rounded on top and square underneath. The bar sits on the bottom edge of
+    /// the pane with nothing below it, and a curve there would only open two
+    /// slivers of whatever it is covering — a corner reads as rounded because of
+    /// what shows through it, and here nothing does.
+    private static let shape = UnevenRoundedRectangle(
+        topLeadingRadius: 10,
+        bottomLeadingRadius: 0,
+        bottomTrailingRadius: 0,
+        topTrailingRadius: 10,
+        style: .continuous
+    )
 
     var body: some View {
         ChatPanelBarContent(panel: panel)

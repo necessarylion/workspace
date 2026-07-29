@@ -78,6 +78,7 @@ struct ClaudeSessionListView: View {
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
+                        .transition(ViewerMotion.contentArrival)
                     } else if past.isEmpty {
                         Text(
                             sessions.isEmpty
@@ -88,6 +89,7 @@ struct ClaudeSessionListView: View {
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
+                        .transition(ViewerMotion.contentArrival)
                     }
 
                     ForEach(past) { past in
@@ -97,8 +99,21 @@ struct ClaudeSessionListView: View {
                             delete: { delete(past) }
                         )
                     }
+                    .transition(ViewerMotion.contentArrival)
                 }
             }
+            // The Past switch turns its chevron and reveals its section in the
+            // one movement. It used to be only the chevron, which had the twisty
+            // turning smoothly over a section that had already appeared whole.
+            .animation(ViewerMotion.disclosure, value: store.showsPastClaudeConversations)
+            // A conversation started or ended is a row arriving or leaving, and
+            // that is what these lists change by — keyed on the identities, so
+            // a title read off a transcript that has just grown does not move
+            // the list under the pointer.
+            .animation(ViewerMotion.listChange, value: live.map(\.id))
+            .animation(ViewerMotion.listChange, value: past.map(\.id))
+            // The wait for the disk giving way to what it found.
+            .animation(ViewerMotion.contentChange, value: isLoading)
             .padding(8)
         }
     }
@@ -136,7 +151,6 @@ struct ClaudeSessionListView: View {
                 ? "Hide the conversations on disk"
                 : "Show the conversations on disk"
         )
-        .animation(.easeOut(duration: 0.15), value: store.showsPastClaudeConversations)
     }
 
     /// The conversations on disk that no running tab already has open.

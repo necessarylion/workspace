@@ -34,11 +34,24 @@ struct PullRequestTable: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             title
-            if project.pullRequests.isEmpty {
-                emptyState
-            } else {
-                table
+            // Two transactions, and neither of them the requests themselves. A
+            // sweep every five minutes rewrites all fifty of these, so keying
+            // the fade to the values would put one on every row of a board that
+            // came back exactly as it went out; keyed to the identities, it
+            // runs only when a request has actually opened, merged or moved.
+            // The other is the read, which is what carries the note away and
+            // brings the table up in its place.
+            Group {
+                if project.pullRequests.isEmpty {
+                    emptyState
+                        .transition(ViewerMotion.contentArrival)
+                } else {
+                    table
+                        .transition(ViewerMotion.contentArrival)
+                }
             }
+            .animation(ViewerMotion.listChange, value: project.pullRequests.map(\.id))
+            .animation(ViewerMotion.contentChange, value: project.isLoadingPullRequests)
         }
     }
 
@@ -75,6 +88,7 @@ struct PullRequestTable: View {
     private var emptyState: some View {
         if project.isLoadingPullRequests {
             note("Reading pull requests…")
+                .transition(ViewerMotion.contentArrival)
         } else if let error = project.pullRequestError {
             VStack(alignment: .leading, spacing: 6) {
                 note(error)
@@ -82,8 +96,10 @@ struct PullRequestTable: View {
                     .controlSize(.small)
                     .pointerCursor()
             }
+            .transition(ViewerMotion.contentArrival)
         } else {
             note("Nothing is open — everything is merged.")
+                .transition(ViewerMotion.contentArrival)
         }
     }
 

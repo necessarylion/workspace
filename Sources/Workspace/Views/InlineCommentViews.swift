@@ -65,6 +65,10 @@ struct DiffCommentThreads: View {
                 .fill(.tint.opacity(0.5))
                 .frame(width: 2)
         }
+        // The block itself fades; the lines below it move at once. Anything
+        // more would have to be an animation on the flattened stack this hangs
+        // in, and that stack is every line of the diff.
+        .transition(.opacity)
     }
 }
 
@@ -101,9 +105,15 @@ struct ResolvedThreadRow: View {
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 6) {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                // One glyph turned rather than two glyphs swapped. A symbol
+                // whose *name* changes has nothing to move between, so the
+                // twisty on a settled thread was the one disclosure in the
+                // window that could not animate at all.
+                Image(systemName: "chevron.right")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .animation(ViewerMotion.disclosure, value: isExpanded)
                 AuthorAvatar(name: node.comment.author, url: node.comment.avatarURL, size: 18)
                 Text(node.comment.author)
                     .font(.caption.weight(.semibold))
@@ -186,6 +196,9 @@ struct DiffCommentComposer: View {
                 .fill(.tint.opacity(0.5))
                 .frame(width: 2)
         }
+        // As for the threads above: the box fades, the code under it moves at
+        // once. See ``DiffCommentThreads``.
+        .transition(.opacity)
     }
 }
 

@@ -43,7 +43,9 @@ struct PullRequestDetailView: View {
             if isOpen {
                 actionBar
                     .background(.bar)
+                    .transition(.opacity)
                 Divider()
+                    .transition(.opacity)
             }
 
             // The tab fills the window, with the panel beside it on Details
@@ -87,6 +89,12 @@ struct PullRequestDetailView: View {
                 }
             }
         }
+        // Merging or rejecting takes a whole bar out from under everything
+        // below it, and the page used to jump the height of it. Keyed to
+        // `isOpen` and nothing else: the only update that ever runs inside this
+        // transaction is the one that ended the pull request, so a build tick,
+        // a keystroke or a comment landing still redraws with nothing animated.
+        .animation(ViewerMotion.contentChange, value: isOpen)
         // A half-written description belongs to the pull request it was opened
         // on, and this one view is reused as the viewer moves between them.
         .onChange(of: item.id) {
@@ -218,17 +226,24 @@ struct PullRequestDetailView: View {
             Image(systemName: "arrow.right").foregroundStyle(.secondary)
             branchChip(pr.targetBranch)
             if let additions = pr.additions, let deletions = pr.deletions {
-                Text("+\(additions)").foregroundStyle(.green)
-                Text("−\(deletions)").foregroundStyle(.red)
+                Text("+\(additions)")
+                    .foregroundStyle(.green)
+                    .transition(ViewerMotion.contentArrival)
+                Text("−\(deletions)")
+                    .foregroundStyle(.red)
+                    .transition(ViewerMotion.contentArrival)
             }
             if let state = pr.state.badge {
                 badge(state, color: pr.state == .merged ? .purple : .red)
+                    .transition(ViewerMotion.contentArrival)
             }
             if pr.isDraft {
                 badge("Draft", color: .secondary)
+                    .transition(ViewerMotion.contentArrival)
             }
             if let review = pr.reviewLabel {
                 badge(review, color: review == "Approved" ? .green : .orange)
+                    .transition(ViewerMotion.contentArrival)
             }
             approvalsBadge
             // Its own view, and it is the view that reads the runs: the ticker
@@ -251,10 +266,30 @@ struct PullRequestDetailView: View {
             actionsMenu
         }
         .font(.caption.monospaced())
+        // The badges arrive one after another as the host answers, and each of
+        // them widens the row. What fades is the badge, never the row: the
+        // transition is on each of them, and the transaction here is keyed to
+        // which badges there are — so the ten-second build tick and every
+        // keystroke in the page below still land with nothing animated.
+        .animation(ViewerMotion.badgeChange, value: badgeSignature)
         // Same inset as the header above it, so the tab picker at this end of
         // the row sits directly under the navigator's.
         .padding(.horizontal, AppMetrics.barHorizontalPadding)
         .padding(.vertical, 7)
+    }
+
+    /// Which badges the bar is showing, as one value to key the fade on.
+    ///
+    /// Deliberately not the pull request itself: a refresh rewrites every field
+    /// of it, and animating on the whole thing would put a fade on a title that
+    /// came back the same. `item.builds` is not in here either — reading it
+    /// would make this view one that the ticker redraws, which is the whole
+    /// reason ``PullRequestBuildsBadge`` is a view of its own.
+    private var badgeSignature: String {
+        """
+        \(pr.state.badge ?? "")|\(pr.isDraft)|\(pr.reviewLabel ?? "")\
+        |\(pr.additions ?? -1)|\(pr.deletions ?? -1)|\(item.reviewers.isEmpty)
+        """
     }
 
     /// The branch the pull request comes from, followed by the two things one
@@ -294,14 +329,18 @@ struct PullRequestDetailView: View {
                     .buttonStyle(.plain)
                     .help(approvalsHelp)
                     .pointerCursor()
+                    .transition(ViewerMotion.contentArrival)
             } else {
-                approvalsChip.help(approvalsHelp)
+                approvalsChip
+                    .help(approvalsHelp)
+                    .transition(ViewerMotion.contentArrival)
             }
         } else if isOpen, !item.isLoadingReviewers, item.reviewersError == nil {
             Button { pendingAction = .addReviewers } label: { approvalsChip }
                 .buttonStyle(.plain)
                 .help(approvalsHelp)
                 .pointerCursor()
+                .transition(ViewerMotion.contentArrival)
         }
     }
 
@@ -309,7 +348,10 @@ struct PullRequestDetailView: View {
         HStack(spacing: 3) {
             Image(systemName: item.reviewers.isEmpty ? "person.badge.plus" : "checkmark.seal")
             if !item.reviewers.isEmpty {
+                // An approval landing is the one number in this bar worth
+                // watching change, so the digits roll rather than swap.
                 Text("\(item.reviewers.approvedCount)/\(item.reviewers.count)")
+                    .contentTransition(.numericText())
             }
         }
         .font(.caption.weight(.medium))
@@ -317,6 +359,11 @@ struct PullRequestDetailView: View {
         .padding(.vertical, 2)
         .background(approvalsColor.opacity(0.18), in: Capsule())
         .foregroundStyle(approvalsColor)
+        // Scoped to the chip, and keyed to the two things it draws: the count
+        // it says and the colour it says it in. Nothing else in the bar is
+        // inside this, so nothing else is ever animated by it.
+        .animation(ViewerMotion.badgeChange, value: item.reviewers.approvalSummary)
+        .animation(ViewerMotion.badgeChange, value: approvalsColor)
     }
 
     /// Green once everybody asked has approved, orange while anyone wants
@@ -496,21 +543,30 @@ struct PullRequestDetailView: View {
     /// Everything about the pull request, read again from the host. It is the
     /// one thing here that is wanted often enough to be worth a click rather
     /// than a trip through the menu, so it sits in the bar as well.
-    @ViewBuilder
     private var refreshButton: some View {
-        // Same treatment the action bar gives a merge or a sync: while it is in
-        // flight the bar says so, and there is nothing to press.
-        if item.isRefreshingPullRequest {
-            ProgressView().controlSize(.small)
-        } else {
-            barButton(
-                "arrow.clockwise",
-                help: "Reload #\(pr.number) from \(pr.host.displayName)"
-            ) {
-                refresh()
+        // Stacked rather than swapped in the row. Both are alive for the length
+        // of the fade, and side by side in the bar they would push the menu
+        // beside them along and back again; in one slot the bar is as wide
+        // either way, and at rest there is only ever one of them in it.
+        ZStack {
+            // Same treatment the action bar gives a merge or a sync: while it is
+            // in flight the bar says so, and there is nothing to press.
+            if item.isRefreshingPullRequest {
+                ProgressView()
+                    .controlSize(.small)
+                    .transition(ViewerMotion.contentArrival)
+            } else {
+                barButton(
+                    "arrow.clockwise",
+                    help: "Reload #\(pr.number) from \(pr.host.displayName)"
+                ) {
+                    refresh()
+                }
+                .disabled(item.isRunningPullRequestAction)
+                .transition(ViewerMotion.contentArrival)
             }
-            .disabled(item.isRunningPullRequestAction)
         }
+        .animation(ViewerMotion.badgeChange, value: item.isRefreshingPullRequest)
     }
 
     private func refresh() {
@@ -609,18 +665,28 @@ struct PullRequestDetailView: View {
                 // Who is reviewing used to be a row here; it lives in the panel
                 // down the right now, where it is on screen for the diff too.
 
-                if let draft = descriptionDraft {
-                    PullRequestDescriptionEditor(
-                        initialText: draft,
-                        host: pr.host,
-                        isSaving: item.isRunningPullRequestAction,
-                        onCancel: { descriptionDraft = nil },
-                        onSave: { text in await saveDescription(text) }
-                    )
-                } else if !pr.body.isEmpty {
-                    MarkdownText(text: pr.body)
-                        .font(.callout)
+                // The drawn description and the box it is edited in are the same
+                // words twice over, so the one becomes the other rather than
+                // being replaced. Keyed to which of them is open and to nothing
+                // else — the box grows with what is typed into it, and a height
+                // on a curve is a text view laid out again on every letter.
+                Group {
+                    if let draft = descriptionDraft {
+                        PullRequestDescriptionEditor(
+                            initialText: draft,
+                            host: pr.host,
+                            isSaving: item.isRunningPullRequestAction,
+                            onCancel: { descriptionDraft = nil },
+                            onSave: { text in await saveDescription(text) }
+                        )
+                        .transition(ViewerMotion.contentArrival)
+                    } else if !pr.body.isEmpty {
+                        MarkdownText(text: pr.body)
+                            .font(.callout)
+                            .transition(ViewerMotion.contentArrival)
+                    }
                 }
+                .animation(ViewerMotion.contentChange, value: descriptionDraft == nil)
 
                 Divider()
             }
@@ -663,62 +729,90 @@ struct PullRequestDetailView: View {
         if saved { descriptionDraft = nil }
     }
 
-    @ViewBuilder
     private var diffTab: some View {
-        if item.isLoading {
-            ProgressView("Loading diff…")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let diff = item.diff, !diff.isEmpty {
-            DiffView(
-                diff: diff,
-                layout: Binding(get: { item.diffLayout }, set: { item.diffLayout = $0 }),
-                selectedFile: Binding(get: { item.diffFile }, set: { item.diffFile = $0 }),
-                comments: DiffComments(
-                    threads: item.inlineCommentThreads,
-                    isPosting: item.isPostingComment,
-                    mentions: MentionSource(
-                        people: item.reviewerCandidates,
-                        host: pr.host,
-                        load: {
-                            await store.loadReviewerCandidates(item, project: project, pr: pr)
+        // The spinner and the diff share the pane, so the one gives way to the
+        // other rather than being cut to it. Keyed to `isLoading` alone: a diff
+        // already on screen redraws with nothing animated, which is what keeps
+        // the rows out of it.
+        Group {
+            if item.isLoading {
+                placeholder {
+                    ProgressView("Loading diff…")
+                }
+                .transition(ViewerMotion.contentArrival)
+            } else if let diff = item.diff, !diff.isEmpty {
+                DiffView(
+                    diff: diff,
+                    layout: Binding(get: { item.diffLayout }, set: { item.diffLayout = $0 }),
+                    selectedFile: Binding(get: { item.diffFile }, set: { item.diffFile = $0 }),
+                    comments: DiffComments(
+                        threads: item.inlineCommentThreads,
+                        isPosting: item.isPostingComment,
+                        mentions: MentionSource(
+                            people: item.reviewerCandidates,
+                            host: pr.host,
+                            load: {
+                                await store.loadReviewerCandidates(item, project: project, pr: pr)
+                            }
+                        ),
+                        add: { anchor, body in
+                            await store.postInlineComment(
+                                body,
+                                at: anchor,
+                                on: item,
+                                project: project,
+                                pr: pr
+                            )
+                        },
+                        reply: { parent, body in
+                            await store.postComment(
+                                body,
+                                on: item,
+                                project: project,
+                                pr: pr,
+                                replyingTo: parent
+                            )
+                        },
+                        resolve: { comment, resolved in
+                            await store.setCommentResolved(
+                                resolved,
+                                for: comment,
+                                on: item,
+                                project: project,
+                                pr: pr
+                            )
                         }
-                    ),
-                    add: { anchor, body in
-                        await store.postInlineComment(
-                            body,
-                            at: anchor,
-                            on: item,
-                            project: project,
-                            pr: pr
-                        )
-                    },
-                    reply: { parent, body in
-                        await store.postComment(
-                            body,
-                            on: item,
-                            project: project,
-                            pr: pr,
-                            replyingTo: parent
-                        )
-                    },
-                    resolve: { comment, resolved in
-                        await store.setCommentResolved(
-                            resolved,
-                            for: comment,
-                            on: item,
-                            project: project,
-                            pr: pr
-                        )
-                    }
+                    )
                 )
-            )
-        } else {
-            ContentUnavailableView(
-                "No diff",
-                systemImage: "plusminus",
-                description: Text(item.errorMessage ?? "This pull request has no textual changes.")
-            )
+                .transition(ViewerMotion.contentArrival)
+            } else {
+                placeholder {
+                    ContentUnavailableView(
+                        "No diff",
+                        systemImage: "plusminus",
+                        description: Text(
+                            item.errorMessage ?? "This pull request has no textual changes."
+                        )
+                    )
+                }
+                .transition(ViewerMotion.contentArrival)
+            }
         }
+        .animation(ViewerMotion.contentChange, value: item.isLoading)
+    }
+
+    /// A tab with nothing in it yet — reading, or nothing to read.
+    ///
+    /// It carries the pane's own colour, which is what the diff and the commit
+    /// list both paint for themselves. A tab arriving has to cover the one it
+    /// replaces rather than come up through it, and these stand where those two
+    /// would be.
+    private func placeholder<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        content()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: AppColors.viewerBackground))
     }
 
     // MARK: - Commits
@@ -745,62 +839,71 @@ struct PullRequestDetailView: View {
         }
     }
 
-    @ViewBuilder
     private var commitList: some View {
-        if item.isLoadingCommits && item.commits.isEmpty {
-            ProgressView("Loading commits…")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if item.commits.isEmpty {
-            ContentUnavailableView {
-                Label("No commits", systemImage: "clock.arrow.circlepath")
-            } description: {
-                Text(item.commitsError ?? "This pull request has no commits.")
-            } actions: {
-                Button("Try Again") {
-                    Task { await store.loadCommits(item, project: project, pr: pr) }
+        Group {
+            if item.isLoadingCommits && item.commits.isEmpty {
+                placeholder {
+                    ProgressView("Loading commits…")
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .pointerCursor()
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            // A day at a time, headed the way the dashboard heads its own
-            // history: the same list of the same thing, so it reads the same.
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(CommitDay.group(item.commits)) { day in
-                        VStack(alignment: .leading, spacing: 6) {
-                            CommitDayHeading(
-                                title: day.title,
-                                count: day.commits.count
-                            )
-                            ForEach(day.commits) { commit in
-                                CommitRow(
-                                    commit: commit,
-                                    onOpen: {
-                                        Task {
-                                            await store.showCommit(
-                                                commit,
-                                                on: item,
-                                                project: project,
-                                                pr: pr
-                                            )
-                                        }
-                                    },
-                                    openPullRequest: {
-                                        store.openPullRequest(number: $0, project: project)
-                                    }
+                .transition(ViewerMotion.contentArrival)
+            } else if item.commits.isEmpty {
+                placeholder {
+                    ContentUnavailableView {
+                        Label("No commits", systemImage: "clock.arrow.circlepath")
+                    } description: {
+                        Text(item.commitsError ?? "This pull request has no commits.")
+                    } actions: {
+                        Button("Try Again") {
+                            Task { await store.loadCommits(item, project: project, pr: pr) }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .pointerCursor()
+                    }
+                }
+                .transition(ViewerMotion.contentArrival)
+            } else {
+                // A day at a time, headed the way the dashboard heads its own
+                // history: the same list of the same thing, so it reads the same.
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(CommitDay.group(item.commits)) { day in
+                            VStack(alignment: .leading, spacing: 6) {
+                                CommitDayHeading(
+                                    title: day.title,
+                                    count: day.commits.count
                                 )
+                                ForEach(day.commits) { commit in
+                                    CommitRow(
+                                        commit: commit,
+                                        onOpen: {
+                                            Task {
+                                                await store.showCommit(
+                                                    commit,
+                                                    on: item,
+                                                    project: project,
+                                                    pr: pr
+                                                )
+                                            }
+                                        },
+                                        openPullRequest: {
+                                            store.openPullRequest(number: $0, project: project)
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: AppColors.viewerBackground))
+                .transition(ViewerMotion.contentArrival)
             }
-            .background(Color(nsColor: AppColors.viewerBackground))
         }
+        // The list arriving over the spinner, and nothing else: the rows
+        // themselves are never in a transaction of their own.
+        .animation(ViewerMotion.contentChange, value: item.isLoadingCommits)
     }
 
     /// One commit: its message and who wrote it, above the patch itself.
@@ -808,35 +911,47 @@ struct PullRequestDetailView: View {
         VStack(spacing: 0) {
             commitDetailBar(commit)
                 .background(.bar)
+                // Opaque while it arrives — see `DiffLayoutBar`, which carries
+                // the same colour under the same material for the same reason.
+                .background(Color(nsColor: AppColors.viewerBackground))
             Divider()
 
-            if let diff = item.commitDiffs[commit.sha], !diff.isEmpty {
-                DiffView(
-                    diff: diff,
-                    layout: Binding(get: { item.diffLayout }, set: { item.diffLayout = $0 }),
-                    selectedFile: Binding(
-                        get: { item.commitDiffFile },
-                        set: { item.commitDiffFile = $0 }
-                    ),
-                    // One commit of a pull request reads like any other commit:
-                    // the file index waits until it is asked for.
-                    showsFiles: Binding(
-                        get: { item.showsDiffFileList },
-                        set: { item.showsDiffFileList = $0 }
+            Group {
+                if let diff = item.commitDiffs[commit.sha], !diff.isEmpty {
+                    DiffView(
+                        diff: diff,
+                        layout: Binding(get: { item.diffLayout }, set: { item.diffLayout = $0 }),
+                        selectedFile: Binding(
+                            get: { item.commitDiffFile },
+                            set: { item.commitDiffFile = $0 }
+                        ),
+                        // One commit of a pull request reads like any other
+                        // commit: the file index waits until it is asked for.
+                        showsFiles: Binding(
+                            get: { item.showsDiffFileList },
+                            set: { item.showsDiffFileList = $0 }
+                        )
                     )
-                )
-            } else if item.isLoadingCommitDiff {
-                ProgressView("Loading changes…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ContentUnavailableView(
-                    "No changes",
-                    systemImage: "plusminus",
-                    description: Text(
-                        item.commitDiffError ?? "This commit has no textual changes."
-                    )
-                )
+                    .transition(ViewerMotion.contentArrival)
+                } else if item.isLoadingCommitDiff {
+                    placeholder {
+                        ProgressView("Loading changes…")
+                    }
+                    .transition(ViewerMotion.contentArrival)
+                } else {
+                    placeholder {
+                        ContentUnavailableView(
+                            "No changes",
+                            systemImage: "plusminus",
+                            description: Text(
+                                item.commitDiffError ?? "This commit has no textual changes."
+                            )
+                        )
+                    }
+                    .transition(ViewerMotion.contentArrival)
+                }
             }
+            .animation(ViewerMotion.contentChange, value: item.isLoadingCommitDiff)
         }
     }
 
@@ -970,13 +1085,22 @@ struct PullRequestBuildsBadge: View {
             Button(action: onTap) {
                 HStack(spacing: 3) {
                     Image(systemName: state.symbol)
+                    // A job appearing or dropping off is a number changing, and
+                    // it changes while nobody is looking at it — so the digits
+                    // roll rather than being replaced between two frames.
                     Text("\(item.builds.count)")
+                        .contentTransition(.numericText())
                 }
                 .font(.caption.weight(.medium))
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(state.color.opacity(0.18), in: Capsule())
                 .foregroundStyle(state.color)
+                // The one place on the page it is safe to animate the ticker:
+                // this view is the whole of what the ten-second read redraws,
+                // and the transaction reaches nothing outside it.
+                .animation(ViewerMotion.badgeChange, value: item.builds.count)
+                .animation(ViewerMotion.badgeChange, value: state)
             }
             .buttonStyle(.plain)
             .help(help)
@@ -1174,22 +1298,33 @@ struct ConversationView<Header: View>: View {
                 LazyVStack(alignment: .leading, spacing: 10) {
                     header()
 
-                    if item.isLoadingComments {
-                        HStack(spacing: 7) {
-                            ProgressView().controlSize(.small)
-                            Text("Loading conversation…").foregroundStyle(.secondary)
+                    // What the page says while there is nothing to say. The
+                    // transaction is on this group alone and keyed to the read
+                    // itself: the stack around it holds every comment on the
+                    // pull request, and a fade put there would run over all of
+                    // them every time a letter is typed in the box below.
+                    Group {
+                        if item.isLoadingComments {
+                            HStack(spacing: 7) {
+                                ProgressView().controlSize(.small)
+                                Text("Loading conversation…").foregroundStyle(.secondary)
+                            }
+                            .padding(.top, 8)
+                            .transition(ViewerMotion.contentArrival)
+                        } else if let error = item.commentError, item.comments.isEmpty {
+                            Label(error, systemImage: "exclamationmark.triangle")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 8)
+                                .transition(ViewerMotion.contentArrival)
+                        } else if item.comments.isEmpty {
+                            Text("No comments yet.")
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 8)
+                                .transition(ViewerMotion.contentArrival)
                         }
-                        .padding(.top, 8)
-                    } else if let error = item.commentError, item.comments.isEmpty {
-                        Label(error, systemImage: "exclamationmark.triangle")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 8)
-                    } else if item.comments.isEmpty {
-                        Text("No comments yet.")
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 8)
                     }
+                    .animation(ViewerMotion.contentChange, value: item.isLoadingComments)
 
                     // Threaded once, where the comments landed — see
                     // `ViewerItem.commentThreads`.
@@ -1233,6 +1368,12 @@ struct ConversationView<Header: View>: View {
                 onPost: post
             )
         }
+        // The pane's own colour, which the diff and the commit list each paint
+        // for themselves and the conversation did not. It is the same shade the
+        // viewer already draws behind all three, so nothing looks different at
+        // rest — what it buys is a tab arriving over this one covering it,
+        // instead of a page of comments coming up through a page of code.
+        .background(Color(nsColor: AppColors.viewerBackground))
     }
 
     /// Posts what was written, and says whether it landed — which is what
@@ -1276,10 +1417,14 @@ struct ConversationComposer: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             if let error {
+                // It lands a moment after Post was pressed, and the eye is on
+                // the button rather than on the line above it — so it comes up
+                // from the box instead of simply being there.
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
                     .lineLimit(2)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
             // A line and a bit at rest, growing with what is written. Most
@@ -1317,6 +1462,9 @@ struct ConversationComposer: View {
         }
         .padding(12)
         .background(.bar)
+        // Keyed to what the host said and nothing else, so the box below it is
+        // never in a transaction while it is being typed in.
+        .animation(ViewerMotion.badgeChange, value: error)
     }
 
     private func post() async {
@@ -1360,12 +1508,18 @@ struct CommentThread: View {
                     node: node,
                     isExpanded: isExpanded,
                     showsPath: !isInline,
-                    onTap: { isExpanded.toggle() }
+                    // On the toggle, not on the stack around it: this is one
+                    // thread opening, and the page it sits on is every comment
+                    // on the pull request.
+                    onTap: {
+                        withAnimation(ViewerMotion.contentChange) { isExpanded.toggle() }
+                    }
                 )
             }
 
             if !isSettled || isExpanded {
                 thread
+                    .transition(.opacity)
             }
         }
     }
@@ -1377,9 +1531,7 @@ struct CommentThread: View {
             replyCount: depth == 0 ? node.totalReplies : 0,
             isReplying: replyingTo == node.comment,
             isBusy: isPosting,
-            onReplyTapped: {
-                replyingTo = replyingTo == node.comment ? nil : node.comment
-            },
+            onReplyTapped: openReply,
             onResolveTapped: resolveAction
         )
 
@@ -1393,6 +1545,7 @@ struct CommentThread: View {
                 onSend: { body in await onReply(node.comment, body) }
             )
             .padding(.leading, Self.indent)
+            .transition(.opacity)
         }
 
         if !node.replies.isEmpty {
@@ -1418,6 +1571,22 @@ struct CommentThread: View {
                     .frame(width: 1)
                     .padding(.vertical, 2)
             }
+        }
+    }
+
+    /// Opens the reply box under this comment, or closes the one that is open.
+    ///
+    /// It fades in in the conversation and appears at once in the diff, which
+    /// is not an oversight. Inline, `replyingTo` belongs to the view that holds
+    /// the flattened diff — an animated transaction on it is one that reaches
+    /// every row of the file being read, and a ten-thousand-line diff is what
+    /// that stack is flat for.
+    private func openReply() {
+        let next = replyingTo == node.comment ? nil : node.comment
+        if isInline {
+            replyingTo = next
+        } else {
+            withAnimation(ViewerMotion.contentChange) { replyingTo = next }
         }
     }
 
@@ -1632,49 +1801,58 @@ struct PullRequestReviewerSheet: View {
         .background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    @ViewBuilder
     private func candidateList(_ offer: Offer) -> some View {
-        if item.isLoadingReviewerCandidates {
-            HStack(spacing: 7) {
-                ProgressView().controlSize(.small)
-                Text("Reading who can review…")
+        Group {
+            if item.isLoadingReviewerCandidates {
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.small)
+                    Text("Reading who can review…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(height: 150, alignment: .top)
+                .transition(ViewerMotion.contentArrival)
+            } else if offer.matches.isEmpty && offer.typedHandle == nil {
+                Text(offer.candidates.isEmpty
+                    ? "\(pr.host.displayName) did not say who can review this. Type a handle above and it is sent as it is."
+                    : "Nobody here matches “\(query)”.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-            }
-            .frame(height: 150, alignment: .top)
-        } else if offer.matches.isEmpty && offer.typedHandle == nil {
-            Text(offer.candidates.isEmpty
-                ? "\(pr.host.displayName) did not say who can review this. Type a handle above and it is sent as it is."
-                : "Nobody here matches “\(query)”.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(height: 150, alignment: .top)
-        } else {
-            ScrollView {
-                VStack(spacing: 4) {
-                    if let typedHandle = offer.typedHandle {
-                        row(
-                            handle: typedHandle,
-                            name: "Ask “\(typedHandle)”",
-                            detail: "Sent to \(pr.host.displayName) as typed",
-                            avatarURL: nil,
-                            alreadyAsked: offer.alreadyAsked
-                        )
-                    }
-                    ForEach(offer.matches) { candidate in
-                        row(
-                            handle: candidate.handle,
-                            name: candidate.name,
-                            detail: candidate.detail,
-                            avatarURL: candidate.avatarURL,
-                            alreadyAsked: offer.alreadyAsked
-                        )
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(height: 150, alignment: .top)
+                    .transition(ViewerMotion.contentArrival)
+            } else {
+                ScrollView {
+                    VStack(spacing: 4) {
+                        if let typedHandle = offer.typedHandle {
+                            row(
+                                handle: typedHandle,
+                                name: "Ask “\(typedHandle)”",
+                                detail: "Sent to \(pr.host.displayName) as typed",
+                                avatarURL: nil,
+                                alreadyAsked: offer.alreadyAsked
+                            )
+                        }
+                        ForEach(offer.matches) { candidate in
+                            row(
+                                handle: candidate.handle,
+                                name: candidate.name,
+                                detail: candidate.detail,
+                                avatarURL: candidate.avatarURL,
+                                alreadyAsked: offer.alreadyAsked
+                            )
+                        }
                     }
                 }
+                .frame(height: 150)
+                .transition(ViewerMotion.contentArrival)
             }
-            .frame(height: 150)
         }
+        // The list coming up over the spinner, and only that. Keyed to the read
+        // rather than to what is in the box: the rows below are rebuilt on
+        // every letter typed into the search field, and none of that is
+        // anything to animate.
+        .animation(ViewerMotion.contentChange, value: item.isLoadingReviewerCandidates)
     }
 
     /// One person the picker offers. Someone already on the pull request stays

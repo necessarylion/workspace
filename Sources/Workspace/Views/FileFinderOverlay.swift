@@ -78,10 +78,16 @@ struct FileFinderOverlay: View {
                 ProgressView()
                     .controlSize(.small)
                     .scaleEffect(0.7)
+                    .transition(.opacity)
             }
         }
         .padding(.horizontal, 14)
         .frame(height: 44)
+        // The reading of the repository, not the typing: this fires once when
+        // the palette opens and once when the listing lands. Keyed on anything
+        // the query touches it would breathe on every letter, which is the one
+        // thing this panel must never do.
+        .animation(ViewerMotion.contentChange, value: store.isListingFiles)
     }
 
     private var placeholder: String {
@@ -139,6 +145,14 @@ struct FileFinderOverlay: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14)
             .frame(height: 44)
+            // "Reading the repository…" becoming "Type to find a file" is one
+            // line changing what it says, so the words cross rather than being
+            // cut. The row keeps its height either way, so nothing moves for
+            // it. Not keyed on the query — the third thing this line can say is
+            // "No file matches that", and that one has to be instant or the
+            // panel answers a keystroke late.
+            .contentTransition(.opacity)
+            .animation(ViewerMotion.contentChange, value: store.isListingFiles)
     }
 
     private var footer: some View {

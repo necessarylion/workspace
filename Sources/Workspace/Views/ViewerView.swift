@@ -38,6 +38,16 @@ struct ViewerView: View {
         return item.id
     }
 
+    /// Whether the row under the pane has anything to say: an editor is open,
+    /// and it is the editor rather than a rendered page or the board. Named
+    /// because the fade below has to watch it, and a `case let` written into the
+    /// `if` is not something a transaction can be given.
+    private var showsStatusBar: Bool {
+        guard !store.showsDashboard, let document = store.current?.document else { return false }
+        if case .text = document.content { return true }
+        return false
+    }
+
     /// The open item, or the dashboard when there is none. It carries the
     /// pane's colour itself — the window's own background sits below it.
     private var mainContent: some View {
@@ -81,11 +91,22 @@ struct ViewerView: View {
             // the breadcrumb both already show. It is outside the animation on
             // purpose: the row appearing shortens the pane above it, and a
             // height that moves is a text view relaid every frame.
-            if !store.showsDashboard, let document = store.current?.document,
-               case .text = document.content {
-                Divider()
-                StatusBar(document: document)
+            //
+            // What it does get is a fade, and only a fade. A row that is going
+            // keeps its full height until the fade is over, so the editor above
+            // is relaid once on the way in and once on the way out rather than
+            // on every frame between. The transaction is on this group alone —
+            // above it sits the editor, whose geometry must never be in one.
+            Group {
+                if showsStatusBar, let document = store.current?.document {
+                    VStack(spacing: 0) {
+                        Divider()
+                        StatusBar(document: document)
+                    }
+                    .transition(.opacity)
+                }
             }
+            .animation(ViewerMotion.contentChange, value: showsStatusBar)
         }
         .background(Color(nsColor: AppColors.viewerBackground))
     }
@@ -102,7 +123,7 @@ struct ViewerView: View {
             // and the rail is wide enough to hold them — see
             // ``CollapsedProjectsRail``.
             Button {
-                withAnimation { store.showsProjects.toggle() }
+                store.toggleProjects()
             } label: {
                 Image(systemName: "sidebar.leading")
             }
@@ -181,7 +202,7 @@ struct ViewerView: View {
             // control of the same width and padding, so that bar's segmented
             // picker keeps its right edge whatever glyph this button uses.
             Button {
-                withAnimation { store.toggleNavigator() }
+                store.toggleNavigator()
             } label: {
                 Image(systemName: "sidebar.trailing")
             }
@@ -571,29 +592,42 @@ struct WelcomeView: View {
                 // than called "the default": which branch that is differs per
                 // repository — `main` here, `develop` there — and the host is
                 // what said so, so the button says it too.
-                if let target = project.defaultBranchToSwitchTo {
-                    BranchActionButton(
-                        title: "Switch to \(target)",
-                        symbol: "arrow.uturn.backward",
-                        help: "Check out “\(target)”, this repository's default branch",
-                        isRunning: project.isRunningGitCommand
-                    ) {
-                        switchToDefaultBranch(project, branch: target)
+                //
+                // Both come and go as the repository's status is read — a
+                // checkout in the terminal is enough — and either one arriving
+                // shifts everything after it along the line. They fade rather
+                // than blink in, which is what makes the shift read as one
+                // movement instead of two.
+                Group {
+                    if let target = project.defaultBranchToSwitchTo {
+                        BranchActionButton(
+                            title: "Switch to \(target)",
+                            symbol: "arrow.uturn.backward",
+                            help: "Check out “\(target)”, this repository's default branch",
+                            isRunning: project.isRunningGitCommand
+                        ) {
+                            switchToDefaultBranch(project, branch: target)
+                        }
+                    }
+                    // And next to that, the same branch brought up to date.
+                    // Drawn only for a repository that has a remote to pull
+                    // from: without an `origin` the command has nowhere to go.
+                    if project.gitStatus != nil, project.remote != nil {
+                        BranchActionButton(
+                            title: "Pull",
+                            symbol: "arrow.down",
+                            help: "Pull the current branch from its remote",
+                            isRunning: project.isRunningGitCommand
+                        ) {
+                            pull(project)
+                        }
                     }
                 }
-                // And next to that, the same branch brought up to date. Drawn
-                // only for a repository that has a remote to pull from: without
-                // an `origin` the command has nowhere to go.
-                if project.gitStatus != nil, project.remote != nil {
-                    BranchActionButton(
-                        title: "Pull",
-                        symbol: "arrow.down",
-                        help: "Pull the current branch from its remote",
-                        isRunning: project.isRunningGitCommand
-                    ) {
-                        pull(project)
-                    }
-                }
+                .animation(ViewerMotion.contentChange, value: project.defaultBranchToSwitchTo)
+                .animation(
+                    ViewerMotion.contentChange,
+                    value: project.gitStatus != nil && project.remote != nil
+                )
                 Spacer(minLength: 12)
                 AskClaudeButton { store.openClaude(in: project) }
             }
@@ -651,16 +685,32 @@ struct WelcomeView: View {
             if project.host != .unknown {
                 sectionDivider
                 PullRequestTable(project: project)
+                    // The board lands before its reads come back, so the table
+                    // fills in a moment after the tiles above it. Watched on the
+                    // count rather than the list itself: a pull request whose
+                    // title or review state was re-read is the same row, and it
+                    // should redraw where it stands.
+                    .animation(ViewerMotion.contentChange, value: project.pullRequests.count)
                     .id(Self.pullRequestAnchor)
             }
 
             // The history draws nothing at all for a folder with no commits yet,
             // so its rule is asked for on the same condition — a divider with
             // nothing under it would read as the board being cut short.
-            if project.isLoadingCommits || !project.recentCommits.isEmpty {
-                sectionDivider
+            //
+            // Rule and list share the one transaction because they arrive
+            // together: the spinner giving way to the first page, and another
+            // page landing under "Load older", are the two changes it is for.
+            // On the sections rather than on the column above, so the tiles and
+            // the table are not dragged into a redraw the history caused.
+            Group {
+                if project.isLoadingCommits || !project.recentCommits.isEmpty {
+                    sectionDivider
+                }
+                commitHistory(project)
             }
-            commitHistory(project)
+            .animation(ViewerMotion.contentChange, value: project.recentCommits.count)
+            .animation(ViewerMotion.contentChange, value: project.isLoadingCommits)
         }
         .padding(28)
         // The board takes the whole pane rather than stopping at a reading
@@ -781,7 +831,7 @@ struct WelcomeView: View {
         HStack(spacing: 12) {
             if unread > 0 || showsEveryCommit {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.16)) { showsEveryCommit.toggle() }
+                    withAnimation(ViewerMotion.contentChange) { showsEveryCommit.toggle() }
                 } label: {
                     Label(
                         showsEveryCommit ? "Show fewer" : "Show \(unread) more",
@@ -792,10 +842,13 @@ struct WelcomeView: View {
             }
 
             // Loading a page and then hiding it behind "Show more" would be a
-            // button that seems to do nothing, so this unfolds the list too.
+            // button that seems to do nothing, so this unfolds the list too —
+            // in the same transaction as the button beside it, since the two
+            // sit under one list and both make it longer. What the page itself
+            // does when it lands is the history section's own fade.
             if project.hasMoreCommits {
                 Button {
-                    showsEveryCommit = true
+                    withAnimation(ViewerMotion.contentChange) { showsEveryCommit = true }
                     Task { await project.loadMoreCommits() }
                 } label: {
                     Label(
@@ -1031,6 +1084,13 @@ struct StatTile: View {
                 Text(value)
                     .font(.system(size: 21, weight: .semibold, design: .rounded))
                     .foregroundStyle(tint)
+                    // Every one of these is a count, and each of them lands a
+                    // moment after the board does — the tile is drawn at zero
+                    // and the real number arrives with the read. Rolling the
+                    // digits is what says a number changed rather than that a
+                    // different number was always there.
+                    .contentTransition(.numericText())
+                    .animation(ViewerMotion.badgeChange, value: value)
             }
             .padding(.horizontal, 11)
             .padding(.vertical, 10)

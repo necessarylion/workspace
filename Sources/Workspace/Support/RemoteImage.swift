@@ -122,6 +122,15 @@ struct MarkdownImage: View {
 
     var body: some View {
         content
+            // The picture comes up through the placeholder it replaces rather
+            // than taking its place between two frames. A comment with several
+            // screenshots in it is otherwise read while it is still being hit
+            // by them. The line of text moves as the picture takes its real
+            // height, and that is not worth animating away: the reader is at
+            // the top of a comment that is still arriving, and a height easing
+            // open under them is worse than one that simply is.
+            .animation(ViewerMotion.isReduced ? nil : .easeOut(duration: 0.2), value: image != nil)
+            .animation(ViewerMotion.isReduced ? nil : .easeOut(duration: 0.2), value: isLoading)
             .task { await load() }
     }
 
@@ -147,12 +156,14 @@ struct MarkdownImage: View {
                 .onTapGesture { open() }
                 .pointerCursor()
                 .help(url.isFileURL ? "Open this file" : "Open in browser")
+                .transition(.opacity)
         } else if isLoading {
             placeholder {
                 ProgressView().controlSize(.small)
                 Text(caption)
                     .foregroundStyle(.secondary)
             }
+            .transition(.opacity)
         } else {
             placeholder {
                 Image(systemName: "photo")
@@ -173,6 +184,7 @@ struct MarkdownImage: View {
                     .buttonStyle(.link)
                     .pointerCursor()
             }
+            .transition(.opacity)
         }
     }
 

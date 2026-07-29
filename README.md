@@ -114,11 +114,12 @@ missing ones, so you never have to work out which command it wanted.
 | Feature | What it does |
 | --- | --- |
 | Real editing | Tree-sitter colours, folding, multiple cursors, find and replace (⌘F), auto-indent. |
-| Change markers | What has changed since HEAD, down the edge of the gutter — green where lines were added, blue where they were changed, and a wedge where they were deleted. |
+| Change markers | What has changed since HEAD, down the edge of the gutter — green where lines were added, yellow where they were changed, and a red wedge where they were deleted. |
 | Language servers | Diagnostics, completions (⌃Space) and ⌘-click to definition for 20+ languages. |
 | Go to file (⌘P) | `item controller` finds `app/controllers/item_controller.rb`. Punctuation optional. |
 | Search in files | ripgrep, grouped by file, every hit marked in the file you open. |
 | A file tree you can use | Drag in and out, copy and paste with Finder, rename in place, duplicate, multi-select, new file or folder. |
+| Changes in the tree | A new file is green, a changed one yellow, a conflict red — same colours as the gutter beside it. Folders wear a dot for whatever is inside them. |
 
 ### Previews
 
