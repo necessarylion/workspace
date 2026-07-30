@@ -174,6 +174,7 @@ struct WorkspaceApp: App {
                     get: { store.wrapsLines },
                     set: { store.wrapsLines = $0 }
                 ))
+                .shortcut(.toggleWrap)
                 Toggle("Preview Markdown", isOn: Binding(
                     get: { store.markdownPreview },
                     set: { store.markdownPreview = $0 }

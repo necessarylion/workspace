@@ -108,6 +108,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case close
     case savePDF
 
+    case toggleWrap
+
     case goToFile
     case goBack
     case goForward
@@ -133,6 +135,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .save: "Save"
         case .close: "Close"
         case .savePDF: "Save as PDF"
+        case .toggleWrap: "Wrap Lines"
         case .goToFile: "Go to File"
         case .goBack: "Back"
         case .goForward: "Forward"
@@ -156,6 +159,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .save: "Write the open file — or the pull request description — back"
         case .close: "Close whatever the viewer is showing"
         case .savePDF: "Save the Markdown preview as a PDF"
+        case .toggleWrap: "Fold a long line into the pane, or let it run off the edge and scroll"
         case .goToFile: "Find a file in the selected repository by name"
         case .goBack: "The item you were looking at before"
         case .goForward: "The item you came back from"
@@ -175,6 +179,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
             .repositories
         case .save, .close, .savePDF:
             .file
+        case .toggleWrap:
+            .editor
         case .goToFile, .goBack, .goForward:
             .go
         case .askClaude, .toggleTerminal, .openTerminal, .newTerminalTab, .newHomeTerminal:
@@ -194,6 +200,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .save: KeyChord("s", [.command])
         case .close: KeyChord("w", [.command, .shift])
         case .savePDF: KeyChord("e", [.command, .shift])
+        // VS Code's key for it, which is the one a reader coming from there tries
+        // first. ⌥ alone rather than with ⌘ for the same reason.
+        case .toggleWrap: KeyChord("z", [.option])
         case .goToFile: KeyChord("p", [.command])
         case .goBack: KeyChord("[", [.command])
         case .goForward: KeyChord("]", [.command])
@@ -210,7 +219,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
 
 /// How the list in Settings is broken up — the menus the keys mostly live in.
 enum ShortcutGroup: String, CaseIterable, Identifiable {
-    case repositories, file, go, terminal, writing
+    case repositories, file, editor, go, terminal, writing
 
     var id: String { rawValue }
 
@@ -218,6 +227,7 @@ enum ShortcutGroup: String, CaseIterable, Identifiable {
         switch self {
         case .repositories: "Repositories"
         case .file: "File"
+        case .editor: "Editor"
         case .go: "Go"
         case .terminal: "Terminal and Claude"
         case .writing: "Writing"

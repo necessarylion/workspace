@@ -71,6 +71,7 @@ private struct EditorPane: View {
     /// Held rather than made in `body`: a coordinator is handed over by
     /// reference and has to outlive the render that passed it.
     @State private var clipping = ClipFloatingSubviews()
+    @State private var widening = WidenDocumentForLongLines()
     @State private var finding = ScrollToFindMatch()
     @State private var revealing: RevealPendingPosition
     @State private var reloading: ReloadTextInPlace
@@ -172,7 +173,7 @@ private struct EditorPane: View {
     /// Spelled out rather than built from a literal: the two have no type in
     /// common but the protocol, and an array literal of them infers the wrong one.
     private var coordinators: [any TextViewCoordinator] {
-        var list: [any TextViewCoordinator] = [clipping, finding, revealing, reloading]
+        var list: [any TextViewCoordinator] = [clipping, widening, finding, revealing, reloading]
         if let gitMarkers { list.append(gitMarkers) }
         if let languageServer { list.append(languageServer) }
         return list
@@ -483,6 +484,157 @@ private final class ClipFloatingSubviews: TextViewCoordinator {
     /// scroll view wholesale afterwards.
     func controllerDidAppear(controller: TextViewController) {
         MainActor.assumeIsolated { controller.scrollView?.clipsToBounds = true }
+    }
+}
+
+/// Makes a line that runs off the right edge reachable, which the editor cannot
+/// do for itself.
+///
+/// With wrapping off the document should be as wide as its widest line, and
+/// `TextView.updateFrameIfNeeded` sizes it to
+/// `max(layoutManager.estimatedWidth(), viewport width)` — where
+/// `estimatedWidth()` is `maxLineWidth + edgeInsets.horizontal`. In the pinned
+/// version of CodeEditTextView `maxLineWidth` never leaves zero, because the
+/// method that measures it throws the measurement away:
+///
+///     private func layoutLine(…, maxFoundLineWidth: inout CGFloat) … {
+///         …
+///         var maxFoundLineWidth = maxFoundLineWidth   // shadows the parameter
+///         …
+///         if maxFoundLineWidth < lineSize.width { maxFoundLineWidth = lineSize.width }
+///     }
+///
+/// That `var` shadows the `inout` parameter with a local copy, so every line's
+/// width is written into the copy and dropped when the method returns. So
+/// `estimatedWidth()` is the gutter's inset alone, the document is never wider
+/// than the pane, and the scroll view has nothing to scroll: a 300-column line is
+/// cut off at the right edge with no way to reach the rest of it — while a
+/// vertical scroll works perfectly, because the height is measured somewhere
+/// else.
+///
+/// So the measurement is made here instead, from the same numbers: the widest
+/// line fragment the layout manager has actually laid out, plus the same insets,
+/// written to the text view's frame. Only the widest *laid-out* line, because
+/// that is all the package itself would ever have known — the width grows as the
+/// reader scrolls into longer lines, and never shrinks, which is the behaviour
+/// `maxLineWidth` was written to have.
+///
+/// **It has to be re-applied rather than set once.** Every scroll and every
+/// layout pass runs `updateFrameIfNeeded` again and puts the too-narrow number
+/// back, so the two notifications below are exactly the two moments it does
+/// that: the clip view's bounds moving, and the frame being reset under us.
+///
+/// **And it goes quiet on its own if this is ever fixed upstream**, because the
+/// frame is only ever widened when the package has left it narrower than the text
+/// needs. Wrapping on is left alone entirely — there the pane's width is the
+/// answer, and a wide document would be the bug.
+private final class WidenDocumentForLongLines: TextViewCoordinator, @unchecked Sendable {
+    private weak var controller: TextViewController?
+    /// The widest fragment seen so far, in the same terms as the layout manager's
+    /// own `maxLineWidth`: text only, before the gutter's inset is added back.
+    private var widest: CGFloat = 0
+    private var scrollObserver: (any NSObjectProtocol)?
+    private var frameObserver: (any NSObjectProtocol)?
+    /// Set while the frame is being written, so the notification that write
+    /// causes is not answered with another write.
+    private var isApplying = false
+
+    func prepareCoordinator(controller: TextViewController) {
+        MainActor.assumeIsolated { install(in: controller) }
+    }
+
+    /// Again once the views are really on screen, for the reason
+    /// ``ClipFloatingSubviews`` gives: `loadView` replaces the scroll view after
+    /// `prepareCoordinator` has run, and the observers below name the old one.
+    func controllerDidAppear(controller: TextViewController) {
+        MainActor.assumeIsolated { install(in: controller) }
+    }
+
+    /// Text that changed is text whose lines have new widths. The frame follows
+    /// on its own most of the time — a line added or removed changes the height —
+    /// but typing into one long line changes nothing else at all.
+    func textViewDidChangeText(controller: TextViewController) {
+        MainActor.assumeIsolated { apply() }
+    }
+
+    func destroy() {
+        MainActor.assumeIsolated {
+            removeObservers()
+            controller = nil
+        }
+    }
+
+    @MainActor
+    private func install(in controller: TextViewController) {
+        self.controller = controller
+        removeObservers()
+        guard let scrollView = controller.scrollView, let textView = controller.textView else { return }
+
+        // Both with no queue, which means both run *synchronously* inside the
+        // change that posted them — and that is not a detail. Handed `.main`
+        // instead, the block is an operation on the main queue and lands a turn
+        // later: the too-narrow frame would be live when the scroll view next
+        // tiled, and a clip view whose document has just shrunk under it clamps
+        // its origin back to zero. The reader would be thrown back to column one
+        // every time they scrolled down. Widening again from inside the setter
+        // means the narrow width never survives to be acted on.
+        //
+        // Scrolling down lays out lines that were never measured, and one of them
+        // may be longer than everything above it.
+        scrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView,
+            queue: nil
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.apply() }
+        }
+        // The package resetting the width — which it does on every scroll, and is
+        // the reason one call is not enough.
+        frameObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: textView,
+            queue: nil
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.apply() }
+        }
+        apply()
+    }
+
+    @MainActor
+    private func removeObservers() {
+        for observer in [scrollObserver, frameObserver].compactMap({ $0 }) {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        scrollObserver = nil
+        frameObserver = nil
+    }
+
+    @MainActor
+    private func apply() {
+        guard !isApplying,
+              let controller,
+              !controller.wrapLines,
+              let textView = controller.textView,
+              let scrollView = controller.scrollView
+        else { return }
+
+        guard let layoutManager = textView.layoutManager else { return }
+        let visible = textView.visibleRect
+        for line in layoutManager.lineStorage.linesStartingAt(visible.minY, until: visible.maxY) {
+            for fragment in line.data.lineFragments {
+                widest = max(widest, fragment.data.width)
+            }
+        }
+
+        // The same sum `estimatedWidth()` makes, and the same floor
+        // `updateFrameIfNeeded` applies: never narrower than the pane, or a short
+        // file would stop drawing its background halfway across.
+        let needed = max(widest + layoutManager.edgeInsets.horizontal, scrollView.contentSize.width)
+        guard textView.frame.width < needed else { return }
+
+        isApplying = true
+        textView.frame.size.width = needed
+        isApplying = false
     }
 }
 
