@@ -177,7 +177,17 @@ struct PullRequestDetailView: View {
             }
 
             do {
-                try await Task.sleep(for: Self.buildInterval(round: rounds, unsettled: unsettled.count))
+                try await Task.sleep(for: Self.buildInterval(
+                    round: rounds,
+                    unsettled: unsettled.count,
+                    // A read that failed is not a verdict either. A tick that
+                    // stumbles leaves the last good list alone, but a first
+                    // load that failed leaves no list at all — and no list
+                    // reads as "nothing is running", which is the slow tick.
+                    // So an error keeps this on the close watch until the host
+                    // answers, for the same reason `unknown` is not settled.
+                    afterFailedRead: item.buildsError != nil
+                ))
             } catch {
                 return
             }
@@ -204,10 +214,18 @@ struct PullRequestDetailView: View {
     /// stopped changing in the first three minutes. So a settled pull request
     /// drops to the slow tick, which is there to notice a run that appears
     /// rather than one that changes. The count restarts the moment one does.
-    private static func buildInterval(round: Int, unsettled: Int) -> Duration {
+    ///
+    /// `afterFailedRead` is there because settling and not knowing look the
+    /// same from here — both are an empty list of runs still going — and only
+    /// one of them means there is nothing left to ask about.
+    private static func buildInterval(
+        round: Int,
+        unsettled: Int,
+        afterFailedRead: Bool
+    ) -> Duration {
         // Nothing running: only a push can change this, and that is the kind of
         // thing the sidebar's five-minute sweep is paced for.
-        guard unsettled > 0 else { return .seconds(round < 6 ? 30 : 300) }
+        guard unsettled > 0 || afterFailedRead else { return .seconds(round < 6 ? 30 : 300) }
         switch round {
         case ..<6: return .seconds(10)
         case ..<12: return .seconds(30)

@@ -436,8 +436,19 @@ final class WorkspaceStore {
     func refreshAll(quietly: Bool = false) {
         lastAutoRefresh = Date()
         let due = projects
-        refreshSweep?.cancel()
+        // Cancelled *and waited for*. Cancellation here only stops the sweep
+        // adding more repositories: `Project.refresh` checks nothing, so the
+        // ones already in flight run their `git` and `gh` to the end whatever
+        // this says. Starting the replacement on top of them would put twice
+        // the width on the pool and read those repositories twice, which is
+        // the doubling this whole task was added to stop.
+        let previous = refreshSweep
+        previous?.cancel()
         refreshSweep = Task {
+            await previous?.value
+            // A third sweep may have arrived while this one waited, and it is
+            // the newer answer.
+            guard !Task.isCancelled else { return }
             await withTaskGroup(of: Void.self) { group in
                 var next = due.makeIterator()
                 var running = 0
@@ -461,7 +472,7 @@ final class WorkspaceStore {
 
     /// The sweep in flight, so a second one replaces it rather than doubling
     /// up — a hand refresh landing on top of the five-minute tick used to run
-    /// every repository twice.
+    /// every repository twice. Replacing means waiting for it; see `refreshAll`.
     @ObservationIgnored private var refreshSweep: Task<Void, Never>?
 
     // MARK: - Refreshing on a clock

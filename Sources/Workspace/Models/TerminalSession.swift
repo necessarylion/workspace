@@ -167,7 +167,10 @@ final class TerminalSession: Identifiable {
 
         guard titlePublish == nil else { return }
         titlePublish = Task { [weak self] in
-            try? await Task.sleep(for: Self.titleInterval)
+            // `try?` here would swallow the cancellation and publish anyway,
+            // which is `terminate()` cancelling this and getting one last name
+            // written over the tab it is closing.
+            do { try await Task.sleep(for: Self.titleInterval) } catch { return }
             guard let self else { return }
             // Cleared before the write, so a rename arriving in the same turn
             // starts the next wait rather than being dropped.
