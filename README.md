@@ -91,7 +91,8 @@ missing ones, so you never have to work out which command it wanted.
 | Read it all | Details, Diff and Commits tabs. Markdown, images and mentions rendered properly. |
 | Threads | Replies nested under what they answer, every author in a colour of their own. A resolved one folds to a single row — author, file and first line, under a green **Resolved** chip — in the conversation and in the diff alike; click it to read the rest. |
 | Write back | Comment, reply, resolve a thread or open it again, edit the description, approve, request changes, merge, reject. |
-| Second thoughts | **Edit** on a comment of your own — in the conversation or on a line of the diff — reopens it in place, wherever the host lets you change it. |
+| Second thoughts | **Edit** on a comment of your own — in the conversation or on a line of the diff — reopens it in place, wherever the host lets you change it. **Delete** takes it down for good, once you have said so twice. |
+| Fold a comment | The chevron beside any top-level comment puts it away: header, first line and reply count stay, everything under it — its replies and all — goes. |
 | Reviewers | See who approved, add more from a searchable list of the people who can be asked. |
 | `@` anyone | Type `@` in any comment box and pick a name from the repo. |
 | Builds beside you | CI runs for the head commit in a side panel, failures first, kept current on their own while the panel is in front of you. |

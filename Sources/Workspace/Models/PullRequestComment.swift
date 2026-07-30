@@ -96,9 +96,30 @@ struct PullRequestComment: Identifiable, Sendable, Hashable {
 
     var canEdit: Bool { editTarget != nil }
 
+    /// Whether this comment can be taken down altogether.
+    ///
+    /// The same handle an edit uses answers this everywhere but one: GitHub
+    /// deletes a review only while it is still pending, and everything loaded
+    /// here has been submitted. So a review summary is the reader's to rewrite
+    /// and not to remove, and no button is drawn for it.
+    var canDelete: Bool {
+        switch editTarget {
+        case .gitHubReview, nil: false
+        default: true
+        }
+    }
+
     /// The text an edit box opens with: what the host stores, which is not
     /// always what is on screen — see ``rawBody``.
     var editableBody: String { rawBody ?? body }
+
+    /// The first line with anything in it — what a folded comment is read by.
+    var preview: String {
+        body
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? ""
+    }
 
     /// Where in the diff this comment belongs, when it belongs anywhere.
     var anchor: DiffLineAnchor? {
@@ -141,12 +162,7 @@ struct PullRequestCommentNode: Identifiable, Sendable, Hashable {
     var isResolved: Bool { comment.isResolved }
 
     /// The first line with anything in it, for a thread shown as one row.
-    var preview: String {
-        comment.body
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { !$0.isEmpty } ?? ""
-    }
+    var preview: String { comment.preview }
 }
 
 extension PullRequestComment {
@@ -1188,6 +1204,102 @@ extension PullRequestService {
             let result = await Shell.run(
                 ["bkt", "api", attempt.path, "--method", "PUT",
                  "--input", String(decoding: data, as: UTF8.self)],
+                in: directory,
+                timeout: 60
+            )
+            if result.isSuccess { return }
+            lastMessage = result.failureMessage
+        }
+        throw PullRequestError.commandFailed(lastMessage)
+    }
+
+    /// Takes a comment down.
+    ///
+    /// It travels on the same handle an edit does — the loader is still the only
+    /// thing that knew which kind of comment it read — with one exception, which
+    /// is why ``PullRequestComment/canDelete`` is not simply `canEdit`: GitHub
+    /// deletes a review only while it is pending.
+    ///
+    /// Replies are the host's business. GitHub keeps them and re-parents nothing,
+    /// so a thread whose root is gone comes back as its replies, each a root of
+    /// its own — which is what `tree(from:)` already does with an orphan.
+    /// Bitbucket refuses to delete a comment that has been replied to at all.
+    /// Either answer is the host's to give; the conversation is read back
+    /// afterwards and shows whichever it was.
+    static func deleteComment(
+        _ comment: PullRequestComment,
+        on pr: PullRequest,
+        in directory: URL
+    ) async throws {
+        guard let target = comment.editTarget, comment.canDelete else {
+            throw PullRequestError.deleteUnsupported
+        }
+
+        switch target {
+        case .gitHubIssueComment(let nodeID):
+            // No REST id was ever read for a conversation comment — `gh pr view`
+            // reports the node id — and GraphQL takes exactly that.
+            let query = "mutation($id:ID!){deleteIssueComment(input:{id:$id}){clientMutationId}}"
+            let result = await GitHubCLI.run(
+                ["api", "graphql", "-f", "query=\(query)", "-f", "id=\(nodeID)"],
+                in: directory,
+                timeout: 60
+            )
+            guard result.isSuccess else {
+                throw PullRequestError.commandFailed(result.failureMessage)
+            }
+
+        case .gitHubReview:
+            throw PullRequestError.deleteUnsupported
+
+        case .gitHubReviewComment(let id):
+            let result = await GitHubCLI.run(
+                ["api", "--method", "DELETE",
+                 "repos/{owner}/{repo}/pulls/comments/\(id)"],
+                in: directory,
+                timeout: 60
+            )
+            guard result.isSuccess else {
+                throw PullRequestError.commandFailed(result.failureMessage)
+            }
+
+        case .bitbucket(let id, let version):
+            try await deleteBitbucketComment(id: id, version: version, on: pr, in: directory)
+        }
+    }
+
+    /// Cloud deletes by path alone; Data Center insists on the version it is
+    /// removing, and a DELETE carries no body to put it in — so it goes as a
+    /// query parameter. Tried in that order, like every other write here.
+    private static func deleteBitbucketComment(
+        id: String,
+        version: Int?,
+        on pr: PullRequest,
+        in directory: URL
+    ) async throws {
+        guard !pr.repositoryOwner.isEmpty, !pr.repositorySlug.isEmpty else {
+            throw PullRequestError.commandFailed(
+                "This repository's workspace and slug are unknown, so the comment cannot be deleted."
+            )
+        }
+
+        let attempts: [(path: String, parameters: [String])] = [
+            (
+                "/2.0/repositories/\(pr.repositoryOwner)/\(pr.repositorySlug)"
+                    + "/pullrequests/\(pr.number)/comments/\(id)",
+                []
+            ),
+            (
+                "/rest/api/1.0/projects/\(pr.repositoryOwner)/repos/\(pr.repositorySlug)"
+                    + "/pull-requests/\(pr.number)/comments/\(id)",
+                version.map { ["--param", "version=\($0)"] } ?? []
+            ),
+        ]
+
+        var lastMessage = "Could not delete the comment."
+        for attempt in attempts {
+            let result = await Shell.run(
+                ["bkt", "api", attempt.path, "--method", "DELETE"] + attempt.parameters,
                 in: directory,
                 timeout: 60
             )
