@@ -127,7 +127,11 @@ missing ones, so you never have to work out which command it wanted.
 
 | Feature | What it does |
 | --- | --- |
-| Markdown | Rendered, not raw — tables, task lists, code chips, and the pictures a README keeps beside itself — and saved as PDF with ⇧⌘E. |
+| Markdown | Rendered, not raw, by the same parser both hosts use — nested lists, tables with their alignment, quotes, footnotes, `:tada:`, code chips, and the pictures a README keeps beside itself. Saved as PDF with ⇧⌘E. |
+| Tick a box | Checkboxes in a `.md` file, a PR description or a comment are real: click one and it is written back. |
+| Jump around | An outline button on any document with headings worth jumping between. |
+| Copy a block | A fenced block copies whole on hover, without selecting around it. |
+| Open a picture | Click a screenshot to see it at full size instead of squinting at the capped one. |
 | Mermaid | ` ```mermaid ` fences drawn as diagrams. |
 | draw.io | `.drawio` files drawn as the diagram, with pages, zoom and layers. |
 | PDF | Read page by page, with a floating page and zoom bar. |
@@ -202,6 +206,9 @@ Workspace is mostly other people's excellent work, joined together:
   SwiftPM by [Lakr233](https://github.com/Lakr233/libghostty-spm).
 - **[tree-sitter](https://github.com/tree-sitter/tree-sitter)** by Max Brunsfeld
   and every grammar author — the syntax colours everywhere in the app.
+- **[swift-markdown](https://github.com/swiftlang/swift-markdown)** by Apple and
+  the Swift community — the Markdown parser, over cmark-gfm, which is what both
+  hosts render a comment with.
 - **[mermaid](https://github.com/mermaid-js/mermaid)** by Knut Sveidqvist and
   contributors — the diagrams in Markdown.
 - **[draw.io](https://github.com/jgraph/drawio)** by JGraph — the `.drawio` viewer.
@@ -248,7 +255,8 @@ Scripts/make-icon.sh    # rebuild Resources/AppIcon.icns from Assets/icon.png
 
 Background reading lives in [`Docs/`](Docs/) — [Development.md](Docs/Development.md)
 for how the project is built and released, [LSP.md](Docs/LSP.md) for the language
-server layer, [Terminal.md](Docs/Terminal.md) for the terminal.
+server layer, [Terminal.md](Docs/Terminal.md) for the terminal, and
+[Markdown.md](Docs/Markdown.md) for how the Markdown renderer is put together.
 
 Found a bug or want something?
 [Open an issue](https://github.com/necessarylion/workspace/issues) — screenshots

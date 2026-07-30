@@ -20,6 +20,24 @@ extension SyntaxTheme {
     /// and ``MarkdownCodeHighlighter`` keep colouring at full detail through
     /// ``TreeSitterHighlighter``. The editor is now the coarsest view of a file
     /// in the app, not the finest.
+    ///
+    /// **Markdown is the extreme of that**, and worth writing down so it is not
+    /// investigated twice: its grammar captures nothing *but* names on the
+    /// unrecognised list — `text.title`, `text.literal`, `text.uri`,
+    /// `text.reference`, `punctuation.special`, `punctuation.delimiter`,
+    /// `string.escape` — so every range is dropped and a `.md` file in the editor
+    /// paints in one flat colour. It is not broken, it is this list; the preview
+    /// (⌘-toggled, and the way a `.md` file is meant to be read here) colours the
+    /// same file properly because it goes through ``TreeSitterHighlighter``.
+    ///
+    /// Fixing it would mean rewriting the vendored markdown queries onto the
+    /// names the package knows, which loses the bold heading and the italic
+    /// emphasis — no slot carries them — or giving the editor a
+    /// `highlightProviders` of our own. There is also a second break under it,
+    /// so neither is a one-line change: the vendored injection query names the
+    /// inline grammar `markdown_inline`, `TreeSitterLanguage`'s raw value is
+    /// `markdownInline`, and the layer is dropped for want of the match, so
+    /// `**bold**` and `*italic*` are not even parsed today.
     var editorTheme: EditorTheme {
         EditorTheme(
             text: attribute(for: nil),

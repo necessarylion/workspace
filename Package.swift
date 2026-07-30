@@ -41,6 +41,17 @@ let package = Package(
         // internal layout can be rearranged in a patch release and the compiler
         // is the only thing that would notice — and only if the names change.
         .package(url: "https://github.com/CodeEditApp/CodeEditTextView.git", exact: "0.12.1"),
+        // The Markdown parser, and only a parser: an immutable markup tree over
+        // swift-cmark — the same cmark-gfm both hosts render a comment with, so
+        // the preview reads a document the way the host that served it does.
+        // Nothing of the renderer comes from here; see Docs/Markdown.md for why
+        // a library that draws as well was the wrong trade.
+        .package(url: "https://github.com/swiftlang/swift-markdown.git", exact: "0.8.0"),
+        // The C parser under it. Named here rather than left transitive for the
+        // same reason CodeEditTextView is: the grammar of the document is what
+        // decides how every `.md` file, PR description and comment comes out, so
+        // the version that decides it should be one this manifest states.
+        .package(url: "https://github.com/swiftlang/swift-cmark.git", exact: "0.8.0"),
         // The terminal engine. Upstream ghostty ships no reusable framework, so
         // this package supplies libghostty as a prebuilt universal
         // (arm64 + x86_64) xcframework that SwiftPM downloads and
@@ -56,7 +67,8 @@ let package = Package(
                 .product(name: "GhosttyKit", package: "libghostty-spm"),
                 .product(name: "CodeEditLanguages", package: "CodeEditLanguages"),
                 .product(name: "CodeEditSourceEditor", package: "CodeEditSourceEditor"),
-                .product(name: "CodeEditTextView", package: "CodeEditTextView")
+                .product(name: "CodeEditTextView", package: "CodeEditTextView"),
+                .product(name: "Markdown", package: "swift-markdown")
             ],
             path: "Sources/Workspace",
             // The diagram renderers' HTML hosts with their bundled scripts, and

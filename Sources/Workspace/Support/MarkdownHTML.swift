@@ -42,12 +42,8 @@ enum MarkdownHTML {
             return "<h\(level)>\(inline(text))</h\(level)>"
         case .paragraph(let text):
             return "<p>\(inline(text))</p>"
-        case .bullet(let indent, let text):
-            return item(marker: indent > 0 ? "◦" : "•", text: inline(text), indent: indent)
-        case .numbered(let indent, let number, let text):
-            return item(marker: "\(escape(number)).", text: inline(text), indent: indent)
-        case .task(let done, let text):
-            return item(marker: done ? "☑" : "☐", text: inline(text), indent: 0)
+        case .list(let list):
+            return html(for: list, depth: 0)
         case .quote(let alert, let blocks):
             let head = alert.map { "<p class=\"alert\">\(escape($0.title))</p>" } ?? ""
             return "<blockquote>\(head)\(blocks.map(html(for:)).joined(separator: "\n"))</blockquote>"
@@ -81,10 +77,14 @@ enum MarkdownHTML {
             // stylesheet's `max-width: 100%` still keeps it inside the sheet.
             let style = width.map { " style=\"width: \(Int($0))px\"" } ?? ""
             return "<p class=\"picture\"><img src=\"\(inlined)\"\(style) alt=\"\(escape(alt))\" /></p>"
-        case .table(let headers, let rows):
-            let head = headers.map { "<th>\(inline($0))</th>" }.joined()
+        case .table(let headers, let rows, let alignments):
+            let head = headers.enumerated()
+                .map { "<th\(style(alignments, $0.offset))>\(inline($0.element))</th>" }
+                .joined()
             let body = rows.map { row in
-                "<tr>" + row.map { "<td>\(inline($0))</td>" }.joined() + "</tr>"
+                "<tr>" + row.enumerated()
+                    .map { "<td\(style(alignments, $0.offset))>\(inline($0.element))</td>" }
+                    .joined() + "</tr>"
             }.joined(separator: "\n")
             return """
             <table>
@@ -94,10 +94,43 @@ enum MarkdownHTML {
             """
         case .rule:
             return "<hr />"
-        case .spacer:
-            // Blank lines are what separates the blocks, and the spacing is in
-            // the stylesheet.
-            return ""
+        }
+    }
+
+    /// One list, drawn the way the preview draws it: the marker in a column of
+    /// its own, and everything nested under an item indented by that column.
+    ///
+    /// Written out by hand rather than as `<ul>`/`<ol>`, because the two have to
+    /// agree — the page and the PDF walk the same blocks on purpose, and a
+    /// browser's own list styling would not line up with `MarkdownListView`.
+    private static func html(for list: MarkdownList, depth: Int) -> String {
+        list.items.enumerated().map { index, item in
+            let marker: String
+            if let isDone = item.isDone {
+                marker = isDone ? "☑" : "☐"
+            } else if list.isOrdered {
+                marker = "\(list.start + index)."
+            } else {
+                marker = depth == 0 ? "•" : (depth == 1 ? "◦" : "▪")
+            }
+            let body = item.blocks.map { block in
+                if case .list(let nested) = block { return html(for: nested, depth: depth + 1) }
+                return html(for: block)
+            }.joined(separator: "\n")
+            return """
+            <div class="item"><span class="marker">\(marker)</span><div class="itembody">\(body)</div></div>
+            """
+        }.joined(separator: "\n")
+    }
+
+    /// The `|:---:|` a column was written with, as the one thing CSS needs to
+    /// say it.
+    private static func style(_ alignments: [MarkdownColumn], _ column: Int) -> String {
+        guard column < alignments.count else { return "" }
+        switch alignments[column] {
+        case .leading: return ""
+        case .center: return " style=\"text-align: center\""
+        case .trailing: return " style=\"text-align: right\""
         }
     }
 
@@ -116,15 +149,6 @@ enum MarkdownHTML {
               let png = bitmap.representation(using: .png, properties: [:])
         else { return nil }
         return "data:image/png;base64,\(png.base64EncodedString())"
-    }
-
-    /// A list row: the marker in a column of its own, so a wrapped line lines up
-    /// under the text rather than under the bullet.
-    private static func item(marker: String, text: String, indent: Int) -> String {
-        let inset = indent * 18
-        return """
-        <div class="item" style="margin-left: \(inset)px"><span class="marker">\(marker)</span><span>\(text)</span></div>
-        """
     }
 
     // MARK: - Inline
@@ -216,8 +240,13 @@ enum MarkdownHTML {
     .details { margin: 0 0 8pt 0; padding-left: 10pt; border-left: 1px solid #e2e2e6; }
     .details .summary { font-weight: 600; margin-bottom: 5pt; }
     .details > :last-child { margin-bottom: 0; }
-    .item { display: flex; gap: 7px; align-items: baseline; }
+    .item { display: flex; gap: 7px; align-items: baseline; margin: 0 0 3pt 0; }
     .item .marker { color: #77777f; flex: none; }
+    /* The item's own column: a wrapped line lines up under the text rather
+       than under the bullet, and a sub-list is indented by exactly the width
+       of its parent's marker. */
+    .item .itembody { flex: 1 1 auto; min-width: 0; }
+    .item .itembody > :last-child { margin-bottom: 0; }
     hr { border: none; border-top: 1px solid #e2e2e6; margin: 12pt 0; }
     table {
       border-collapse: collapse;

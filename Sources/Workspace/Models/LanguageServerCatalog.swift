@@ -447,6 +447,24 @@ final class LanguageServerCatalog {
             installCommand: "npm install -g vscode-langservers-extracted"
         ),
         .init(
+            // The one markdown server worth starting in an editor: it answers
+            // about the *document*, not the prose. Heading and link completion,
+            // go-to-definition across `[](other.md)` and `[[wiki]]` links,
+            // references on a heading, and a diagnostic for a link that points
+            // nowhere — which is the thing a docs folder actually gets wrong.
+            //
+            // A single self-contained binary with no runtime behind it, so it
+            // starts in the time gopls does; the grammar checkers that also call
+            // themselves markdown servers (`ltex-ls`, `harper-ls`) do a
+            // different job and the JVM one is far slower than anything else
+            // here.
+            language: TreeSitterLanguage.markdown.rawValue,
+            executable: "marksman",
+            command: "marksman server",
+            languageID: "markdown",
+            installCommand: "brew install marksman"
+        ),
+        .init(
             language: TreeSitterLanguage.bash.rawValue,
             executable: "bash-language-server",
             command: "bash-language-server start",

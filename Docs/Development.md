@@ -97,6 +97,7 @@ Nothing is bundled — a server is used if it is on your `PATH`.
 | C / C++ / Objective-C | `clangd` |
 | Ruby, PHP, Dart, Lua, Kotlin | `ruby-lsp`, `intelephense`, `dart`, `lua-language-server`, `kotlin-lsp` (JetBrains') |
 | JSON, YAML, HTML, CSS, Bash | the matching `vscode-*-language-server` / `yaml-language-server` / `bash-language-server` |
+| Markdown | `marksman` — link and heading completion, go-to-definition between documents, and a diagnostic for a link that points nowhere |
 
 That table is only the default list: **Settings → Language Servers** installs the
 missing ones, corrects a command, and adds a server for any language that is not
@@ -109,8 +110,8 @@ your global npm packages or your gems, and that folder goes on the front of the
 repository wants one; **Settings → Language Servers** has the switch and a
 **Remove Downloaded** button. Only the npm-published servers are fetched this
 way — the ones that arrive with a toolchain (`sourcekit-lsp`, `clangd`, `dart`)
-or as a platform binary (`rust-analyzer`, `kotlin-lsp`, `ruby-lsp`) keep their
-Install button.
+or as a platform binary (`rust-analyzer`, `kotlin-lsp`, `ruby-lsp`, `marksman`)
+keep their Install button.
 
 Servers are **started while the dashboard is on screen**, not when a file is
 opened. Selecting a repository lists its files, works out which languages are
@@ -163,9 +164,11 @@ Sources/Workspace/
   Support/ViewerMotion.swift  how long a screen takes to arrive, in one place
   Support/PullRequestReference.swift  finding a `#123` written in a commit message
   Support/FileOperations.swift  what the Files tab does to disk: create, copy, move, rename, trash
+  Support/MarkdownParser.swift  cmark's block tree walked into the preview's blocks; ticking a box
+  Support/MarkdownInline.swift  one scan over the text: escaping, bare URLs, :emoji:, #123, @name
   Support/MarkdownPDF.swift   the preview as a PDF: measure, render, cut into sheets
   Support/MarkdownHTML.swift  the same document as a printable page, diagrams and all
-  Support/MarkdownHTMLText.swift  the HTML in a comment: `<details>`, `<br>`, `&amp;`, hidden comments
+  Support/MarkdownHTMLText.swift  the HTML in a comment: `<details>`, `<table>`, `<br>`, `&amp;`, hidden comments
   Support/StreamingShellProcess.swift  a command that stays up, read a line at a time
   Support/JSONValue.swift     JSON of a shape only known at runtime (tool inputs)
   Support/RemoteImage.swift   pictures Markdown points at: download once, draw, fall back
@@ -241,7 +244,7 @@ Sources/Workspace/
     ChatInputField.swift      the growing text box the comment boxes are built on
     ChatCompletionList.swift  the @ list, and reading the token under the caret
     MentionTextBox.swift      a comment box where @ names a person on the pull request
-    MarkdownPreview.swift     the Markdown renderer: blocks, tables, code chips
+    MarkdownPreview.swift     the Markdown renderer: blocks, lists, tables, code chips, the outline — see Docs/Markdown.md
     DiagramWebView.swift      the web view both diagram renderers are driven in
     MermaidDiagramView.swift  a ```mermaid fence, drawn in the Markdown column
     DrawioPreview.swift       a .drawio file, drawn in the whole pane
