@@ -22,6 +22,25 @@ let package = Package(
         // tree-sitter highlighter); this replaces it wholesale, and is used with
         // its own defaults — its highlighting, its gutter, its find panel.
         .package(url: "https://github.com/CodeEditApp/CodeEditSourceEditor.git", exact: "0.15.2"),
+        // The text view that editor is built on. It would arrive transitively
+        // through CodeEditSourceEditor regardless; it is named here because our
+        // own sources `import CodeEditTextView` and one of them reaches past the
+        // editor's public surface into this package's layout internals.
+        // `WidenDocumentForLongLines` in `Editor/CodeEditorView.swift` walks
+        // `layoutManager.lineStorage`, reads each line's `lineFragments` and each
+        // fragment's `width`, and adds `layoutManager.edgeInsets` back, so that an
+        // unwrapped long line can be scrolled to its end — none of which the
+        // package offers an API for. A transitive dependency is one nothing in
+        // this manifest promises, and the version that satisfies it can move
+        // whenever the editor's own requirement is re-resolved.
+        //
+        // Pinned exactly, to the version already in Package.resolved.
+        // CodeEditSourceEditor 0.15.2 asks for `from: "0.12.1"`, so this narrows
+        // that range rather than contradicting it. The pin is deliberate: raising
+        // it is an audit of that coordinator, not a routine update, because
+        // internal layout can be rearranged in a patch release and the compiler
+        // is the only thing that would notice — and only if the names change.
+        .package(url: "https://github.com/CodeEditApp/CodeEditTextView.git", exact: "0.12.1"),
         // The terminal engine. Upstream ghostty ships no reusable framework, so
         // this package supplies libghostty as a prebuilt universal
         // (arm64 + x86_64) xcframework that SwiftPM downloads and
@@ -36,7 +55,8 @@ let package = Package(
                 // still yields ghostty_app_t, ghostty_surface_new and friends.
                 .product(name: "GhosttyKit", package: "libghostty-spm"),
                 .product(name: "CodeEditLanguages", package: "CodeEditLanguages"),
-                .product(name: "CodeEditSourceEditor", package: "CodeEditSourceEditor")
+                .product(name: "CodeEditSourceEditor", package: "CodeEditSourceEditor"),
+                .product(name: "CodeEditTextView", package: "CodeEditTextView")
             ],
             path: "Sources/Workspace",
             // The diagram renderers' HTML hosts with their bundled scripts, and
