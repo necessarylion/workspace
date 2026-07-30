@@ -55,10 +55,12 @@ private struct CodeChipRenderer: TextRenderer {
 /// renderer — and being the same string at the same font and width, it lays out
 /// line for line the same, which puts every chip exactly where its span is.
 private struct CodeChipBackdrop: ViewModifier {
-    let text: Text
+    /// Nothing when the line has no code span in it, which is most lines: then
+    /// there is no second copy to lay out, and nothing to draw behind.
+    let text: Text?
 
     func body(content: Content) -> some View {
-        if #available(macOS 15.0, *) {
+        if #available(macOS 15.0, *), let text {
             content.background(alignment: .topLeading) {
                 text
                     .textSelection(.disabled)
@@ -118,31 +120,167 @@ private struct GenerationCache<Key: Hashable, Value> {
     }
 }
 
-/// Full-page Markdown view for `.md` files: `MarkdownText` in a scroll view.
+/// Full-page Markdown view for `.md` files: `MarkdownText` in a scroll view,
+/// with the two things a whole document wants that a comment does not — an
+/// outline to jump around a long one by, and checkboxes that write back.
 struct MarkdownPreview: View {
     let text: String
     /// The file the text was read from, when it was read from one. A README
     /// writes its pictures as paths beside itself — `![](assets/preview.jpeg)` —
     /// and this is what those are paths from.
     var baseURL: URL?
+    /// The repository the file belongs to, so a `#123` in it is that
+    /// repository's pull request.
+    var links: MarkdownLinks = .none
+    /// Ticking a box, given the 1-based line and the state it should end in.
+    var onToggleTask: MarkdownTaskToggle?
 
     var body: some View {
-        ScrollView {
-            MarkdownText(text: text, relativeTo: baseURL)
-                .frame(maxWidth: 720, alignment: .leading)
-                .padding(28)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+        ScrollViewReader { scroll in
+            ScrollView {
+                MarkdownText(text: text, relativeTo: baseURL, anchorsHeadings: true)
+                    .environment(\.markdownLinks, links)
+                    .environment(\.markdownTaskToggle, onToggleTask)
+                    .frame(maxWidth: 720, alignment: .leading)
+                    .padding(28)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .overlay(alignment: .topTrailing) {
+                MarkdownOutlineButton(headings: headings) { index in
+                    withAnimation(ViewerMotion.isReduced ? nil : .easeInOut(duration: 0.2)) {
+                        scroll.scrollTo(MarkdownText.headingID(index), anchor: .top)
+                    }
+                }
+                .padding(12)
+            }
         }
         .textSelection(.enabled)
     }
+
+    /// Read off the very blocks the body draws, so the outline costs a cache
+    /// lookup rather than a second parse of the document.
+    private var headings: [(index: Int, level: Int, title: String)] {
+        MarkdownText.outline(
+            of: MarkdownText.cachedBlocks(in: text, relativeTo: baseURL, links: links)
+        )
+    }
 }
 
-/// A light block-level Markdown renderer: headings, bullets, numbered lists,
-/// task lists, quotes and fenced code blocks, with inline styling handled by
-/// `AttributedString`. Does not scroll — embed it wherever text goes
-/// (PR descriptions, comments, the file preview).
+/// The outline, behind a button in the corner of the page.
+///
+/// A popover rather than a sidebar: a `.md` file is read in the same pane as
+/// every other file, and a permanent column of headings would take width from
+/// the words on a document that mostly does not need one. It is not offered at
+/// all for a document with nothing to jump between.
+private struct MarkdownOutlineButton: View {
+    let headings: [(index: Int, level: Int, title: String)]
+    let onSelect: (Int) -> Void
+
+    @State private var isShowing = false
+
+    var body: some View {
+        if headings.count >= 3 {
+            Button { isShowing.toggle() } label: {
+                Image(systemName: "list.bullet.indent")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(6)
+                    .background(.background.opacity(0.85), in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .help("Outline")
+            .popover(isPresented: $isShowing, arrowEdge: .bottom) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(headings, id: \.index) { heading in
+                            Button {
+                                isShowing = false
+                                onSelect(heading.index)
+                            } label: {
+                                Text(heading.title)
+                                    .font(heading.level <= 1 ? .callout.weight(.semibold) : .callout)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                    // A level is a step in, so the shape of the
+                                    // document is readable in the list itself.
+                                    .padding(.leading, CGFloat(max(0, heading.level - 1)) * 12)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .pointerCursor()
+                        }
+                    }
+                    .padding(10)
+                }
+                .frame(width: 260, height: min(CGFloat(headings.count) * 22 + 20, 420))
+            }
+        }
+    }
+}
+
+/// One list, bulleted or numbered, with every item holding blocks of its own.
+struct MarkdownList {
+    var isOrdered: Bool
+    /// What `1.` was written as — an `OrderedList` may start at any number.
+    var start: Int
+    var items: [Item]
+
+    struct Item {
+        /// Nothing for an ordinary item, `false` for `[ ]`, `true` for `[x]`.
+        var isDone: Bool?
+        /// The 1-based line the item was written on, which is where a tick is
+        /// written back to. Nothing for an item that came out of HTML, where
+        /// there is no source line to speak of.
+        var line: Int?
+        var blocks: [MarkdownText.Block]
+    }
+}
+
+/// How a table column was asked to line up — the `|:---:|` row the old parser
+/// dropped on the floor.
+enum MarkdownColumn {
+    case leading, center, trailing
+
+    var textAlignment: TextAlignment {
+        switch self {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
+        }
+    }
+
+    var frameAlignment: Alignment {
+        switch self {
+        case .leading: .topLeading
+        case .center: .top
+        case .trailing: .topTrailing
+        }
+    }
+}
+
+/// A block-level Markdown renderer: headings, lists, task lists, quotes, tables
+/// and fenced code blocks, with inline styling handled by `AttributedString`.
+/// Does not scroll — embed it wherever text goes (PR descriptions, comments,
+/// the file preview).
+///
+/// The document is read by `MarkdownParser`; everything here draws what it says.
 struct MarkdownText: View {
     private let source: Source
+    /// Where a `#123` and an `@name` in this document point. It travels in the
+    /// environment because a pull request draws Markdown in a dozen places —
+    /// the description, every comment, every reply nested under one — and they
+    /// all belong to the same repository. Setting it once at the page is the
+    /// whole of it.
+    @Environment(\.markdownLinks) private var links
+    /// How deep in a list this text sits, so a sub-bullet is drawn as one.
+    /// Whether the headings in this text answer to a name the outline can scroll
+    /// to. Only the whole-document preview asks for it: a pull request draws a
+    /// dozen of these on one page, and naming a block in every one of them would
+    /// put the same name on a dozen different views.
+    private let anchorsHeadings: Bool
 
     /// Text the view parses itself, or blocks a container block already holds —
     /// a `<details>` section and a quote both draw their contents with a nested
@@ -156,21 +294,29 @@ struct MarkdownText: View {
     /// `baseURL` is the file the Markdown came from, and only a file on disk has
     /// one: it is what a picture written as a relative path is a path from. A PR
     /// description or a comment has no folder, so it passes nothing.
-    init(text: String, relativeTo baseURL: URL? = nil) { source = .markdown(text, base: baseURL) }
+    init(text: String, relativeTo baseURL: URL? = nil, anchorsHeadings: Bool = false) {
+        source = .markdown(text, base: baseURL)
+        self.anchorsHeadings = anchorsHeadings
+    }
 
-    fileprivate init(blocks: [Block]) { source = .parsed(blocks) }
+    fileprivate init(blocks: [Block]) {
+        source = .parsed(blocks)
+        anchorsHeadings = false
+    }
 
     /// Not private: `MarkdownPDF` writes the same document out to a file and
     /// walks this very list, so the page and the PDF cannot drift apart.
     ///
-    /// `indirect` because a quote and a `<details>` section hold blocks of their
-    /// own.
+    /// `indirect` because a quote, a `<details>` section and a list item all
+    /// hold blocks of their own.
     indirect enum Block {
         case heading(level: Int, text: String)
         case paragraph(String)
-        case bullet(indent: Int, text: String)
-        case numbered(indent: Int, number: String, text: String)
-        case task(done: Bool, text: String)
+        /// One list, with its items nested inside it rather than flattened into
+        /// rows carrying an `indent:`. A sub-list, a second paragraph under a
+        /// bullet and a fence inside an item are all just blocks of the item —
+        /// which is what cmark says they are.
+        case list(MarkdownList)
         case quote(Alert?, [Block])
         case disclosure(summary: String, isOpen: Bool, blocks: [Block])
         case code(language: String, text: String)
@@ -179,9 +325,8 @@ struct MarkdownText: View {
         /// Markdown's own `![](…)` cannot say it, so it is usually nothing and
         /// the picture is drawn at its own size.
         case image(url: String, alt: String, width: CGFloat?)
-        case table(headers: [String], rows: [[String]])
+        case table(headers: [String], rows: [[String]], alignments: [MarkdownColumn])
         case rule
-        case spacer
     }
 
     /// A GitHub alert — a quote whose first line is `[!WARNING]`. Both hosts
@@ -225,13 +370,28 @@ struct MarkdownText: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+            ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 view(for: block)
+                    // A name only where something needs to find it. Naming
+                    // every block was a real cost: an explicit `.id` is
+                    // structural identity, so a page of comments carried
+                    // hundreds of them — the same handful of names over and
+                    // over — and SwiftUI tore views down and built them again
+                    // as the indices moved under it.
+                    .modifier(HeadingAnchor(id: anchorName(for: block, at: index)))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .textSelection(.enabled)
     }
+
+    private func anchorName(for block: Block, at index: Int) -> String? {
+        guard anchorsHeadings, case .heading = block else { return nil }
+        return Self.headingID(index)
+    }
+
+    /// What a heading answers to, so the outline can scroll to it.
+    static func headingID(_ index: Int) -> String { "markdown-heading-\(index)" }
 
     @ViewBuilder
     private func view(for block: Block) -> some View {
@@ -242,31 +402,12 @@ struct MarkdownText: View {
                 .padding(.top, level <= 2 ? 8 : 4)
         case .paragraph(let text):
             Self.inline(text)
-        case .bullet(let indent, let text):
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(indent > 0 ? "◦" : "•").foregroundStyle(.secondary)
-                Self.inline(text)
-            }
-            .padding(.leading, CGFloat(indent) * 16)
-        case .numbered(let indent, let number, let text):
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("\(number).")
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                Self.inline(text)
-            }
-            .padding(.leading, CGFloat(indent) * 16)
-        case .task(let done, let text):
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: done ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(done ? Color.green : Color.secondary)
-                    .imageScale(.small)
-                // No strikethrough on a ticked item: the box already says it is
-                // done, and struck-through text is the harder to read the more
-                // there is of it.
-                Self.inline(text)
-                    .foregroundStyle(done ? .secondary : .primary)
-            }
+        case .list(let list):
+            // The depth and the toggle are read by the list itself, not here:
+            // reading an environment value is a dependency on it, and every
+            // paragraph of every comment would otherwise be rebuilt whenever
+            // either of them changed.
+            MarkdownListView(list: list)
         case .quote(let alert, let blocks):
             HStack(alignment: .top, spacing: 10) {
                 Rectangle()
@@ -288,18 +429,7 @@ struct MarkdownText: View {
         case .disclosure(let summary, let isOpen, let blocks):
             MarkdownDisclosure(summary: summary, isOpen: isOpen, blocks: blocks)
         case .code(let language, let code):
-            ScrollView(.horizontal) {
-                // Coloured by the editor's own tree-sitter setup when the fence
-                // names a language we have a grammar for, plain when it does not.
-                codeText(code, language: language)
-                    .font(.system(.callout, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-            }
-            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
-            // The fill alone is faint against a dark viewer; the outline is
-            // what actually marks where the block starts and stops.
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))
+            MarkdownCodeBlock(code: code, text: codeText(code, language: language))
         case .mermaid(let source):
             MermaidDiagram(source: source)
                 .padding(.vertical, 4)
@@ -317,7 +447,7 @@ struct MarkdownText: View {
                 Self.inline(alt.isEmpty ? address : alt)
                     .foregroundStyle(.secondary)
             }
-        case .table(let headers, let rows):
+        case .table(let headers, let rows, let alignments):
             // No horizontal scroll view around this: one would offer the table
             // unbounded width, so a cell would never wrap and a wide table would
             // scroll instead of fitting. Bounded by the pane, the columns take
@@ -331,27 +461,31 @@ struct MarkdownText: View {
                 ForEach(headers.indices, id: \.self) { column in
                     Self.inline(headers[column])
                         .font(.callout.weight(.semibold))
+                        .multilineTextAlignment(Self.column(alignments, column).textAlignment)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .frame(maxHeight: .infinity, alignment: .topLeading)
+                        .frame(maxWidth: .infinity, alignment: Self.column(alignments, column).frameAlignment)
+                        .frame(maxHeight: .infinity, alignment: Self.column(alignments, column).frameAlignment)
                         .background(.quaternary.opacity(0.4))
                 }
                 ForEach(rows.indices, id: \.self) { index in
                     ForEach(headers.indices, id: \.self) { column in
                         Self.inline(column < rows[index].count ? rows[index][column] : "")
+                            // The `|:---:|` row the document wrote, which is
+                            // what a column of numbers is right-aligned by.
+                            .multilineTextAlignment(Self.column(alignments, column).textAlignment)
                             // Take as many lines as the wrapped text needs
                             // rather than being squeezed onto one.
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(maxWidth: .infinity, alignment: Self.column(alignments, column).frameAlignment)
                             // Once cells wrap they no longer agree on a
                             // height, and a fill that stops at the text
                             // leaves the stripe ragged. Stretch every cell
                             // to the tallest one in its row.
-                            .frame(maxHeight: .infinity, alignment: .topLeading)
+                            .frame(maxHeight: .infinity, alignment: Self.column(alignments, column).frameAlignment)
                             .background(
                                 index.isMultiple(of: 2)
                                     ? AnyShapeStyle(.clear)
@@ -369,9 +503,13 @@ struct MarkdownText: View {
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))
         case .rule:
             Divider()
-        case .spacer:
-            Spacer().frame(height: 2)
         }
+    }
+
+    /// A table written with fewer alignments than it has columns still has to
+    /// answer for every one of them.
+    private static func column(_ alignments: [MarkdownColumn], _ index: Int) -> MarkdownColumn {
+        index < alignments.count ? alignments[index] : .leading
     }
 
     private func codeText(_ code: String, language: String) -> Text {
@@ -390,14 +528,22 @@ struct MarkdownText: View {
         }
     }
 
-    /// One line of styled text, with the chip backdrop layered behind it.
+    /// One line of styled text, with the chip backdrop layered behind it — but
+    /// only when there is a chip to draw.
+    ///
+    /// That condition is the whole point. The backdrop is a *second copy of the
+    /// text*, laid out and drawn behind the first, and it used to go behind
+    /// every line in the document: a page of pull request comments paid twice
+    /// for all of its text so that the handful of lines with a `code` span in
+    /// them could have a rounded fill. Most prose has no span at all, and that
+    /// half of the work was never visible.
     @MainActor
     fileprivate static func inline(_ source: String, baseSize: CGFloat = MarkdownText.bodySize) -> some View {
-        let text = cachedInlineText(source, baseSize: baseSize)
+        let line = cachedInlineText(source, baseSize: baseSize)
         // Both layers are the same `Text`, and `.font`/`.foregroundStyle` set by
         // the caller reach the backdrop through the environment, so the two
         // always agree on how the text is laid out.
-        return text.modifier(CodeChipBackdrop(text: text))
+        return line.text.modifier(CodeChipBackdrop(text: line.hasCodeSpan ? line.text : nil))
     }
 
     /// The styled line, remembered.
@@ -411,12 +557,18 @@ struct MarkdownText: View {
     /// size is part of the key because a code span is set relative to whatever
     /// block it sits in.
     @MainActor
-    private static func cachedInlineText(_ source: String, baseSize: CGFloat) -> Text {
+    private static func cachedInlineText(_ source: String, baseSize: CGFloat) -> Line {
         let key = InlineKey(text: source, size: baseSize)
         if let cached = inlineCache.value(for: key) { return cached }
-        let text = inlineText(source, baseSize: baseSize)
-        inlineCache.insert(text, for: key)
-        return text
+        let line = inlineText(source, baseSize: baseSize)
+        inlineCache.insert(line, for: key)
+        return line
+    }
+
+    /// A styled line, and whether anything in it needs the chip backdrop.
+    fileprivate struct Line {
+        var text: Text
+        var hasCodeSpan: Bool
     }
 
     private struct InlineKey: Hashable {
@@ -425,8 +577,14 @@ struct MarkdownText: View {
     }
 
     /// Every line of every block, so it holds more than the block cache does.
+    ///
+    /// Sized for a *page*, not for a view: a pull request is drawn in a
+    /// `LazyVStack`, so a comment scrolled out of sight is thrown away and built
+    /// again on the way back — and every line of it re-read at 46µs a paragraph
+    /// if it has fallen out of here by then. A long review runs to a few
+    /// thousand lines, and holding them costs a few megabytes.
     @MainActor
-    private static var inlineCache = GenerationCache<InlineKey, Text>(limit: 600)
+    private static var inlineCache = GenerationCache<InlineKey, Line>(limit: 2500)
 
     /// `baseSize` is the point size of the block the text sits in, so a code
     /// span can be set one point below whatever surrounds it — including inside
@@ -434,7 +592,7 @@ struct MarkdownText: View {
     /// Returns a `Text` rather than an `AttributedString` because the chip
     /// attribute can only be attached per `Text`. Concatenating with `+` still
     /// leaves one `Text`, so the whole thing wraps as a single paragraph.
-    private static func inlineText(_ source: String, baseSize: CGFloat) -> Text {
+    private static func inlineText(_ source: String, baseSize: CGFloat) -> Line {
         let parsed = (try? AttributedString(
             markdown: source,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
@@ -443,12 +601,14 @@ struct MarkdownText: View {
         // SwiftUI renders `inline code` monospaced but paints nothing behind
         // it, so in a wall of prose it barely reads as code.
         var result = Text(verbatim: "")
+        var hasCodeSpan = false
         for run in parsed.runs {
             var piece = AttributedString(parsed[run.range])
             guard run.inlinePresentationIntent?.contains(.code) == true else {
                 result = result + Text(piece)
                 continue
             }
+            hasCodeSpan = true
             // The fill cannot be inset, so the breathing room at each end has
             // to be real text: a narrow no-break space, styled like the code so
             // the fill covers it and no line break can land between the padding
@@ -472,7 +632,7 @@ struct MarkdownText: View {
                 result = result + Text(piece)
             }
         }
-        return result
+        return Line(text: result, hasCodeSpan: hasCodeSpan)
     }
 
     static let chipColor = Color.secondary.opacity(0.22)
@@ -508,7 +668,7 @@ struct MarkdownText: View {
     @MainActor
     private var blocks: [Block] {
         switch source {
-        case .markdown(let text, let base): Self.cachedBlocks(in: text, relativeTo: base)
+        case .markdown(let text, let base): Self.cachedBlocks(in: text, relativeTo: base, links: links)
         case .parsed(let blocks): blocks
         }
     }
@@ -517,18 +677,20 @@ struct MarkdownText: View {
     ///
     /// A view body runs many times over for text that has not changed — a
     /// scroll, a hover, a window resize — and a page of PR comments is a stack
-    /// of these. Parsing the same Markdown on each of those passes is work
-    /// nobody sees, so the answer is kept, the way `MarkdownCodeHighlighter`
-    /// keeps its colours.
+    /// of these. Building a tree on each of those passes is work nobody sees,
+    /// so the answer is kept, the way `MarkdownCodeHighlighter` keeps its
+    /// colours. Not private: the outline asks for the same blocks the body
+    /// draws, and it must not cost a second parse to have them.
     @MainActor
-    private static func cachedBlocks(in text: String, relativeTo base: URL?) -> [Block] {
+    static func cachedBlocks(in text: String, relativeTo base: URL?, links: MarkdownLinks) -> [Block] {
         // The folder is part of the key, not just the text: the same
-        // `![](assets/logo.png)` is a different picture in another repository.
-        // Two fields rather than one joined string, so a hit costs a hash of
-        // what is already there instead of a fresh copy of the whole document.
-        let key = BlockKey(text: text, base: base?.path ?? "")
+        // `![](assets/logo.png)` is a different picture in another repository,
+        // and the same `#123` is another repository's pull request. Separate
+        // fields rather than one joined string, so a hit costs a hash of what
+        // is already there instead of a fresh copy of the whole document.
+        let key = BlockKey(text: text, base: base?.path ?? "", links: links)
         if let cached = cache.value(for: key) { return cached }
-        let parsed = blocks(in: text, relativeTo: base)
+        let parsed = blocks(in: text, relativeTo: base, links: links)
         cache.insert(parsed, for: key)
         return parsed
     }
@@ -536,17 +698,32 @@ struct MarkdownText: View {
     private struct BlockKey: Hashable {
         let text: String
         let base: String
+        let links: MarkdownLinks
     }
 
     @MainActor
-    private static var cache = GenerationCache<BlockKey, [Block]>(limit: 200)
+    private static var cache = GenerationCache<BlockKey, [Block]>(limit: 500)
 
-    static func blocks(in text: String, relativeTo base: URL? = nil) -> [Block] {
-        // The bookkeeping a bot hides in `<!-- … -->` goes first, so nothing
-        // downstream has to know it was ever there.
-        let parsed = parse(MarkdownHTMLText.strippingComments(text), depth: 0)
+    static func blocks(in text: String, relativeTo base: URL? = nil, links: MarkdownLinks = .none) -> [Block] {
+        let parsed = MarkdownParser.blocks(in: text, links: links)
         guard let base else { return parsed }
         return resolvingImages(parsed, relativeTo: base)
+    }
+
+    /// The headings of a document, for the outline: the level, the words with
+    /// their styling taken off, and the index of the block they came from —
+    /// which is what ``headingID(_:)`` names and the scroll view scrolls to.
+    @MainActor
+    static func outline(of blocks: [Block]) -> [(index: Int, level: Int, title: String)] {
+        blocks.enumerated().compactMap { index, block in
+            guard case .heading(let level, let text) = block else { return nil }
+            let plain = (try? AttributedString(
+                markdown: text,
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            )).map { String($0.characters) } ?? text
+            let title = plain.trimmingCharacters(in: .whitespaces)
+            return title.isEmpty ? nil : (index, level, title)
+        }
     }
 
     /// Turns `![](assets/preview.jpeg)` into the file it means.
@@ -565,7 +742,8 @@ struct MarkdownText: View {
             case .image(let address, let alt, let width):
                 guard let file = localFile(for: address, relativeTo: base) else { return block }
                 return .image(url: file.absoluteString, alt: alt, width: width)
-            // A picture inside a quote or a folded section is still a picture.
+            // A picture inside a quote, a folded section or a list item is
+            // still a picture.
             case .quote(let alert, let nested):
                 return .quote(alert, resolvingImages(nested, relativeTo: base))
             case .disclosure(let summary, let isOpen, let nested):
@@ -574,6 +752,13 @@ struct MarkdownText: View {
                     isOpen: isOpen,
                     blocks: resolvingImages(nested, relativeTo: base)
                 )
+            case .list(var list):
+                list.items = list.items.map { item in
+                    var resolved = item
+                    resolved.blocks = resolvingImages(item.blocks, relativeTo: base)
+                    return resolved
+                }
+                return .list(list)
             default:
                 return block
             }
@@ -633,323 +818,297 @@ struct MarkdownText: View {
             switch block {
             case .mermaid: true
             case .quote(_, let nested), .disclosure(_, _, let nested): containsDiagram(nested)
+            case .list(let list): list.items.contains { containsDiagram($0.blocks) }
             default: false
             }
         }
     }
+}
 
-    /// Peels off the `<details>` and `<blockquote>` sections, outermost first,
-    /// and hands what is between them to the line parser. A section's own
-    /// contents come back through here, which is what lets a review nested four
-    /// deep read as four foldable sections rather than as its tags.
+// MARK: - Environment
+
+/// How deep in a list the text being drawn sits. It travels in the environment
+/// rather than as a parameter because a sub-list is drawn by a nested
+/// `MarkdownText` that was handed blocks, not a depth — and the same is true of
+/// a list inside a quote or a `<details>` section.
+private struct MarkdownListDepthKey: EnvironmentKey {
+    static let defaultValue = 0
+}
+
+/// Where a `#123` and an `@name` in the Markdown being drawn point. Nothing by
+/// default: a release note has no repository behind it, and a `#123` that
+/// cannot be resolved is better left as the words it was written as.
+private struct MarkdownLinksKey: EnvironmentKey {
+    static let defaultValue = MarkdownLinks.none
+}
+
+/// What ticking a checkbox does, and what it writes to.
+///
+/// `perform` takes the 1-based source line the item was written on and the state
+/// it should end up in. `target` is what those lines belong to — a file's path,
+/// a comment's id — and it is the whole of this type's equality.
+///
+/// That equality is the point of the type existing. A closure is never equal to
+/// another closure, so an action rebuilt on each pass reads as a change to
+/// everything under it: a page of pull request comments would rebuild all of its
+/// text on any redraw at all, which is exactly how it came to stutter under a
+/// scroll. Two actions writing to the same place are the same action, whatever
+/// closure was made this time round.
+struct MarkdownTaskToggle: Equatable {
+    let target: String
+    /// The text this action was built against.
     ///
-    /// `depth` is only a backstop against text that nests without end; real
-    /// output from a bot bottoms out around five.
-    private static func parse(_ text: String, depth: Int) -> [Block] {
-        guard depth < 12, let container = MarkdownHTMLText.container(in: text) else {
-            return tidied(plainBlocks(in: text, depth: depth))
-        }
-        var result = plainBlocks(in: String(container.before), depth: depth)
+    /// It is here because `target` alone is *too* stable. An action that reads
+    /// its source when it runs would need nothing else — but a comment's does
+    /// not: the words it flips are a `String` captured when the closure was
+    /// made. Equal on `target` alone, the first action would be kept for as
+    /// long as the comment kept its id, so a second tick would be computed
+    /// against the body from before the first one and posted back over it.
+    /// Comparing the content is what retires the stale closure, and it costs
+    /// nothing in the ordinary case: the same string, so `==` answers on the
+    /// pointer.
+    let content: String
+    let perform: (Int, Bool) -> Void
 
-        switch container.tag {
-        case .details:
-            let split = MarkdownHTMLText.summary(in: container.inner)
-            let summary = MarkdownHTMLText.markdown(from: split?.summary ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            result.append(.disclosure(
-                // A section with no `<summary>` still needs something to click.
-                summary: summary.isEmpty ? "Details" : summary,
-                isOpen: container.isOpen,
-                blocks: parse(split?.body ?? String(container.inner), depth: depth + 1)
-            ))
-        case .blockquote:
-            result.append(.quote(nil, parse(String(container.inner), depth: depth + 1)))
-        }
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.target == rhs.target && lhs.content == rhs.content
+    }
+}
 
-        result += parse(String(container.after), depth: depth)
-        return tidied(result)
+/// Nothing by default: a release note and a `<details>` section from a bot have
+/// checkboxes nobody can write back to, and a box that cannot be ticked should
+/// not look as though it can.
+struct MarkdownTaskToggleKey: EnvironmentKey {
+    // `nil` is as shared-mutable as this gets, but the type it is nil *of*
+    // holds a closure, and a closure is not `Sendable`. The environment is read
+    // on the main actor and nowhere else.
+    nonisolated(unsafe) static let defaultValue: MarkdownTaskToggle? = nil
+}
+
+extension EnvironmentValues {
+    var markdownListDepth: Int {
+        get { self[MarkdownListDepthKey.self] }
+        set { self[MarkdownListDepthKey.self] = newValue }
     }
 
-    /// A run of blank lines is one paragraph break, and the blank lines a
-    /// section opens and closes with are nothing at all — the stack's own
-    /// spacing is what holds the blocks apart.
-    ///
-    /// This matters here in a way it does not in a hand-written document: HTML
-    /// needs a blank line either side of a tag for the Markdown inside it to be
-    /// read as Markdown, so a bot writing `<details>` sections leaves two or
-    /// three, and each one used to push the next section further down.
-    private static func tidied(_ blocks: [Block]) -> [Block] {
-        var result: [Block] = []
-        for block in blocks {
-            guard case .spacer = block else {
-                result.append(block)
-                continue
-            }
-            if let last = result.last, case .spacer = last { continue }
-            if result.isEmpty { continue }
-            result.append(block)
-        }
-        if let last = result.last, case .spacer = last { result.removeLast() }
-        return result
+    var markdownLinks: MarkdownLinks {
+        get { self[MarkdownLinksKey.self] }
+        set { self[MarkdownLinksKey.self] = newValue }
     }
 
-    private static func plainBlocks(in text: String, depth: Int) -> [Block] {
-        var result: [Block] = []
-        var codeBuffer: [String] = []
-        var inCode = false
-        /// The word after the opening ``` — "swift", "mermaid", or nothing.
-        var codeLanguage = ""
-        var tableBuffer: [[String]] = []
-        var quoteBuffer: [String] = []
+    var markdownTaskToggle: MarkdownTaskToggle? {
+        get { self[MarkdownTaskToggleKey.self] }
+        set { self[MarkdownTaskToggleKey.self] = newValue }
+    }
+}
 
-        /// A quote is parsed as a document of its own rather than line by line:
-        /// it can hold anything, a `<details>` section included, and a bot's
-        /// alert is several paragraphs behind one bar.
-        func flushQuote() {
-            guard !quoteBuffer.isEmpty else { return }
-            var lines = quoteBuffer
-            quoteBuffer.removeAll()
-            var alert: Alert?
-            if let first = lines.firstIndex(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
-               let marked = Alert(marker: lines[first].trimmingCharacters(in: .whitespaces)) {
-                alert = marked
-                lines.remove(at: first)
-            }
-            result.append(.quote(alert, parse(lines.joined(separator: "\n"), depth: depth + 1)))
+/// Names a block so the outline can scroll to it, and leaves it alone otherwise.
+private struct HeadingAnchor: ViewModifier {
+    let id: String?
+
+    func body(content: Content) -> some View {
+        if let id {
+            content.id(id)
+        } else {
+            content
         }
+    }
+}
 
-        /// A fence is a diagram when it says so and has something in it;
-        /// everything else stays a code block.
-        func flushCode() {
-            let body = codeBuffer.joined(separator: "\n")
-            let language = codeLanguage
-            codeBuffer.removeAll()
-            codeLanguage = ""
-            let hasContent = !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            if language.lowercased() == "mermaid", hasContent {
-                result.append(.mermaid(body))
-            } else {
-                result.append(.code(language: language, text: body))
-            }
-        }
+// MARK: - Lists
 
-        func flushTable() {
-            guard !tableBuffer.isEmpty else { return }
-            defer { tableBuffer.removeAll() }
-            // A lone |…| line is not a table, just a paragraph with pipes.
-            guard tableBuffer.count >= 2 else {
-                result.append(.paragraph(tableBuffer[0].joined(separator: " | ")))
-                return
-            }
-            let headers = tableBuffer[0]
-            var rows = Array(tableBuffer.dropFirst())
-            // Drop the |---|---| separator row if present.
-            if let first = rows.first, first.allSatisfy({ cell in
-                !cell.isEmpty && cell.allSatisfy { "-: ".contains($0) }
-            }) {
-                rows.removeFirst()
-            }
-            // Pad short rows so every GridRow has the same number of cells.
-            rows = rows.map { row in
-                row + Array(repeating: "", count: max(0, headers.count - row.count))
-            }
-            result.append(.table(headers: headers, rows: rows))
-        }
+/// One list, drawn as its items — each of which is a document of its own.
+///
+/// The nesting is real: a sub-list, a second paragraph and a fenced block under
+/// a bullet are blocks of the item, so they are drawn by a nested `MarkdownText`
+/// inside the item's own column. That is what lines a wrapped line up under the
+/// text rather than under the bullet, and what indents a sub-list by exactly the
+/// width of its parent's marker.
+private struct MarkdownListView: View {
+    let list: MarkdownList
+    /// Read here rather than in `MarkdownText`, so that every paragraph in the
+    /// document does not take a dependency on two values only a list uses.
+    @Environment(\.markdownListDepth) private var depth
+    @Environment(\.markdownTaskToggle) private var onToggle
 
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            // Whatever HTML the line still carries becomes the Markdown that
-            // says the same thing, so everything below reads one syntax.
-            var line = inCode ? String(rawLine) : MarkdownHTMLText.markdown(from: String(rawLine))
-            var trimmed = line.trimmingCharacters(in: .whitespaces)
-
-            // The quote comes off before the pictures are pulled out: its lines
-            // are re-parsed as a document, and one that went through here first
-            // would have its pictures hoisted out of the quote and left after it.
-            if !inCode, trimmed.hasPrefix(">") {
-                flushTable()
-                var rest = Substring(trimmed).dropFirst()
-                if rest.hasPrefix(" ") { rest = rest.dropFirst() }
-                quoteBuffer.append(String(rest))
-                continue
-            }
-            flushQuote()
-
-            // Pictures come out of the line before anything else looks at it, so
-            // an image sitting on a bullet or at the end of a sentence still
-            // becomes a picture and the words around it still read as words.
-            // `AttributedString` would otherwise swallow the whole `![…](…)`
-            // and draw nothing at all.
-            var images: [Picture] = []
-            if !inCode, line.contains("![") {
-                let split = splitImages(from: line)
-                line = split.text
-                trimmed = line.trimmingCharacters(in: .whitespaces)
-                images = split.images
-            }
-            defer {
-                for image in images {
-                    result.append(.image(url: image.url, alt: image.alt, width: image.width))
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(list.items.enumerated()), id: \.offset) { index, item in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    marker(for: item, at: index)
+                    content(of: item)
+                        // No strikethrough on a ticked item: the box already
+                        // says it is done, and struck-through text is the
+                        // harder to read the more there is of it.
+                        .foregroundStyle(item.isDone == true ? .secondary : .primary)
                 }
-            }
-            // A line that was nothing but pictures leaves no text behind, and an
-            // empty line here would only add a gap above them.
-            let isImageOnly = !images.isEmpty && trimmed.isEmpty
-
-            if !inCode, trimmed.hasPrefix("|"), trimmed.dropFirst().contains("|") {
-                tableBuffer.append(tableCells(trimmed))
-                continue
-            }
-            flushTable()
-
-            if trimmed.hasPrefix("```") {
-                if inCode {
-                    flushCode()
-                } else {
-                    codeLanguage = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                }
-                inCode.toggle()
-                continue
-            }
-
-            if inCode {
-                codeBuffer.append(line)
-                continue
-            }
-
-            // Two spaces (or one tab) of leading indentation = one list level.
-            let leading = line.prefix { $0 == " " || $0 == "\t" }
-            let indent = leading.reduce(0) { $0 + ($1 == "\t" ? 2 : 1) } / 2
-
-            if isImageOnly {
-                // The pictures are all this line had; `defer` appends them.
-            } else if trimmed.isEmpty {
-                result.append(.spacer)
-            } else if trimmed == "---" || trimmed == "***" {
-                result.append(.rule)
-            } else if trimmed.hasPrefix("#") {
-                let level = trimmed.prefix(while: { $0 == "#" }).count
-                let title = trimmed.dropFirst(level).trimmingCharacters(in: .whitespaces)
-                result.append(.heading(level: min(level, 6), text: title))
-            } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
-                let rest = String(trimmed.dropFirst(2))
-                // Trimmed: a bot writes its checkbox id in a comment between the
-                // box and the label, and taking the comment out leaves the gap.
-                if rest.hasPrefix("[ ] ") {
-                    result.append(.task(done: false, text: rest.dropFirst(4).trimmingCharacters(in: .whitespaces)))
-                } else if rest.hasPrefix("[x] ") || rest.hasPrefix("[X] ") {
-                    result.append(.task(done: true, text: rest.dropFirst(4).trimmingCharacters(in: .whitespaces)))
-                } else {
-                    result.append(.bullet(indent: indent, text: rest))
-                }
-            } else if let ordered = orderedItem(trimmed) {
-                result.append(.numbered(indent: indent, number: ordered.number, text: ordered.text))
-            } else {
-                result.append(.paragraph(trimmed))
+                .environment(\.markdownListDepth, depth + 1)
             }
         }
+    }
 
-        flushQuote()
-        flushTable()
-        // An unterminated fence — the file is still being typed, most likely.
-        if inCode, !codeBuffer.isEmpty {
-            flushCode()
+    /// Nearly every item is one paragraph, and that one is drawn as the line it
+    /// is. The nested `MarkdownText` is what carries a sub-list, a second
+    /// paragraph or a fence — and it is a whole stack, a `ForEach` and a round
+    /// of environment reads, so a long checklist is worth not paying it for.
+    @ViewBuilder
+    private func content(of item: MarkdownList.Item) -> some View {
+        if item.blocks.count == 1, case .paragraph(let text) = item.blocks[0] {
+            MarkdownText.inline(text)
+        } else {
+            MarkdownText(blocks: item.blocks)
         }
-        return result
     }
 
-    /// One picture pulled out of a line.
-    private struct Picture {
-        var url: String
-        var alt: String
-        var width: CGFloat?
-    }
-
-    /// Pulls every `![alt](url)` out of one line, handing back what is left of
-    /// the line and the pictures in the order they appeared.
-    ///
-    /// Bitbucket writes an attribute list after the image —
-    /// `![](…png){: data-layout='center' }` — which is not Markdown any parser
-    /// here knows; it is swallowed along with the image rather than left behind
-    /// as stray braces in the middle of a sentence. `MarkdownHTMLText` writes
-    /// the same list to carry the one attribute that *is* read: the width an
-    /// `<img width="140">` asked for.
-    private static func splitImages(from line: String) -> (text: String, images: [Picture]) {
-        var text = ""
-        var images: [Picture] = []
-        var index = line.startIndex
-
-        while index < line.endIndex {
-            guard line[index] == "!",
-                  let bracket = line.index(index, offsetBy: 1, limitedBy: line.endIndex),
-                  bracket < line.endIndex, line[bracket] == "[",
-                  let altEnd = line[bracket...].firstIndex(of: "]"),
-                  let open = line.index(altEnd, offsetBy: 1, limitedBy: line.endIndex),
-                  open < line.endIndex, line[open] == "(",
-                  // A closing paren inside the address would end it early, but
-                  // an address with one in it is rare enough not to trade the
-                  // simplicity for.
-                  let close = line[open...].firstIndex(of: ")")
-            else {
-                text.append(line[index])
-                index = line.index(after: index)
-                continue
-            }
-
-            let alt = String(line[line.index(after: bracket)..<altEnd])
-            let address = String(line[line.index(after: open)..<close])
-                .trimmingCharacters(in: .whitespaces)
-            index = line.index(after: close)
-
-            // The `{: … }` hung off the end, when there is one. The leading
-            // colon is what marks it as an attribute list rather than a brace
-            // the author happened to type next.
-            var width: CGFloat?
-            var attributes = index
-            while attributes < line.endIndex, line[attributes] == " " {
-                attributes = line.index(after: attributes)
-            }
-            if attributes < line.endIndex, line[attributes] == "{",
-               let colon = line.index(attributes, offsetBy: 1, limitedBy: line.endIndex),
-               colon < line.endIndex, line[colon] == ":",
-               let end = line[colon...].firstIndex(of: "}") {
-                width = imageWidth(in: line[line.index(after: colon)..<end])
-                index = line.index(after: end)
-            }
-
-            images.append(
-                Picture(url: address, alt: alt.trimmingCharacters(in: .whitespaces), width: width)
+    @ViewBuilder
+    private func marker(for item: MarkdownList.Item, at index: Int) -> some View {
+        if let isDone = item.isDone {
+            MarkdownCheckbox(
+                isDone: isDone,
+                // A box with no source line behind it — one that came out of a
+                // bot's HTML — is drawn but not offered.
+                onToggle: item.line.flatMap { line in
+                    onToggle.map { toggle in { toggle.perform(line, !isDone) } }
+                }
             )
+        } else if list.isOrdered {
+            Text("\(list.start + index).")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        } else {
+            Text(Self.bullet(at: depth))
+                .foregroundStyle(.secondary)
         }
-
-        return (text, images)
     }
 
-    /// `width=140` out of an image's attribute list. Everything else in there —
-    /// Bitbucket's `data-layout` — is somebody else's.
-    private static func imageWidth(in attributes: Substring) -> CGFloat? {
-        guard let key = attributes.range(of: "width=") else { return nil }
-        let digits = attributes[key.upperBound...].prefix { $0.isNumber }
-        guard let number = Int(digits), number > 0 else { return nil }
-        return CGFloat(number)
+    /// A different mark at each level, the way a printed list distinguishes
+    /// them — the indent alone is easy to lose in a long item.
+    private static func bullet(at depth: Int) -> String {
+        switch depth {
+        case 0: "•"
+        case 1: "◦"
+        default: "▪"
+        }
+    }
+}
+
+/// The box itself. A button when there is somewhere to write the answer, and
+/// otherwise the picture of one.
+private struct MarkdownCheckbox: View {
+    let isDone: Bool
+    let onToggle: (() -> Void)?
+
+    var body: some View {
+        Group {
+            if let onToggle {
+                Button(action: onToggle) { box }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                    .help(isDone ? "Mark as not done" : "Mark as done")
+            } else {
+                box
+            }
+        }
+        // The square turns about its own middle, which sits a little above the
+        // baseline the row is aligned on.
+        .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 3 }
+        // A click on the box is a click on the box, not the start of a
+        // selection dragged across the list.
+        .textSelection(.disabled)
     }
 
-    /// "| a | b |" → ["a", "b"].
-    private static func tableCells(_ line: String) -> [String] {
-        var inner = Substring(line)
-        if inner.hasPrefix("|") { inner = inner.dropFirst() }
-        if inner.hasSuffix("|") { inner = inner.dropLast() }
-        return inner
-            .split(separator: "|", omittingEmptySubsequences: false)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+    private var box: some View {
+        Image(systemName: isDone ? "checkmark.square.fill" : "square")
+            .foregroundStyle(isDone ? Color.green : Color.secondary)
+            .imageScale(.small)
+            .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Code
+
+/// A fenced block, with the one thing people do to a fenced block on it.
+///
+/// Everything in the preview is selectable, but a code block is the one thing
+/// that is copied *whole* — and selecting exactly it, with no line of the prose
+/// either side, is fiddly in a wall of text.
+private struct MarkdownCodeBlock: View {
+    let code: String
+    let text: Text
+
+    var body: some View {
+        ScrollView(.horizontal) {
+            // Coloured by the editor's own tree-sitter setup when the fence
+            // names a language we have a grammar for, plain when it does not.
+            text
+                .font(.system(.callout, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                // Room for the button, so the last words of a long first line
+                // do not run under it.
+                .padding(.trailing, 28)
+        }
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
+        // The fill alone is faint against a dark viewer; the outline is
+        // what actually marks where the block starts and stops.
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))
+        // The hover lives in the overlay, not here. Scrolling drags the whole
+        // document under a pointer that never moved, so every block the pointer
+        // crosses reports a hover — and with the state on this view, each of
+        // those rebuilt the fence and its coloured text. In there it rebuilds
+        // one button.
+        .overlay { MarkdownCopyButton(code: code) }
+    }
+}
+
+/// The copy button, and the hover that reveals it.
+///
+/// Everything in the preview is selectable, but a code block is the one thing
+/// that is copied *whole* — and selecting exactly it, with no line of the prose
+/// either side, is fiddly in a wall of text.
+private struct MarkdownCopyButton: View {
+    let code: String
+
+    @State private var isHovered = false
+    @State private var hasCopied = false
+
+    var body: some View {
+        // Shown on hover only: a page of fenced examples otherwise wears a row
+        // of buttons nobody asked for. It stays up while it says "Copied", so
+        // the word is readable after the pointer has moved on.
+        button
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .contentShape(Rectangle())
+            // Nothing here takes a click except the button, so a drag that
+            // starts on the code still selects it.
+            .allowsHitTesting(isHovered || hasCopied)
+            .onHover { isHovered = $0 }
     }
 
-    /// "3. text" or "3) text" → ("3", "text"); nil when not an ordered item.
-    private static func orderedItem(_ line: String) -> (number: String, text: String)? {
-        let digits = line.prefix(while: \.isNumber)
-        guard !digits.isEmpty, digits.count <= 4 else { return nil }
-        let rest = line.dropFirst(digits.count)
-        guard rest.hasPrefix(". ") || rest.hasPrefix(") ") else { return nil }
-        return (String(digits), rest.dropFirst(2).trimmingCharacters(in: .whitespaces))
+    @ViewBuilder
+    private var button: some View {
+        if isHovered || hasCopied {
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(code, forType: .string)
+                hasCopied = true
+                Task {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    hasCopied = false
+                }
+            } label: {
+                Image(systemName: hasCopied ? "checkmark" : "doc.on.doc")
+                    .font(.caption)
+                    .foregroundStyle(hasCopied ? Color.green : Color.secondary)
+                    .padding(5)
+                    .background(.background.opacity(0.8), in: RoundedRectangle(cornerRadius: 5))
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .help(hasCopied ? "Copied" : "Copy this block")
+            .padding(5)
+            .transition(.opacity)
+        }
     }
 }
 

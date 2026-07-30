@@ -24,6 +24,12 @@ struct DiffView: View {
     /// per-file view because the lazy stack throws away the state of anything
     /// it has scrolled past, which would silently unfold them again.
     @State private var collapsedFiles: Set<DiffFile.ID> = []
+    /// Deleted files already folded away by ``foldDeletions()``, which is not
+    /// the same question as which files are folded *now*: a diff reloads under
+    /// the reader — a file watcher, a new push — and re-seeding on every parse
+    /// would fold a deletion they had just opened straight back up. A file is
+    /// answered once, the first parse it appears in.
+    @State private var foldedDeletions: Set<DiffFile.ID> = []
     /// The line whose "write a comment" box is open, if any.
     @State private var composing: DiffLineAnchor?
     /// The comment whose reply box is open, shared by every thread on screen so
@@ -111,7 +117,7 @@ struct DiffView: View {
         // Scoped to whether the index is there, so it is the only thing this
         // row ever animates.
         .animation(ViewerMotion.contentChange, value: showsFileList)
-        .onChange(of: diff.revision, initial: true) { rebuild() }
+        .onChange(of: diff.revision, initial: true) { rebuild(collapsed: foldDeletions()) }
         .onChange(of: collapsedFiles) { rebuild() }
         .onChange(of: composing) { rebuild() }
         .onChange(of: currentFile) {
@@ -202,7 +208,35 @@ struct DiffView: View {
         }
     }
 
-    private func rebuild() {
+    /// Folds away every file this diff deletes, and returns the folded set.
+    ///
+    /// A deletion is the one file nobody reads: the whole of the old file,
+    /// every line removed, with nothing on the other side to compare it
+    /// against — and a branch that drops a directory buries the files that were
+    /// actually changed under thousands of them. The header stays, so the count
+    /// is still there and one click still opens it.
+    ///
+    /// Left alone for a diff of a single file, which is a file somebody asked
+    /// for by name: there is nothing to scroll past, and folding it would show
+    /// them an empty pane.
+    ///
+    /// The set is returned rather than read back out of ``collapsedFiles``
+    /// because the caller rebuilds in the same pass, and a `@State` written
+    /// here is only readable on the next.
+    private func foldDeletions() -> Set<DiffFile.ID> {
+        guard diff.files.count > 1 else { return collapsedFiles }
+        var collapsed = collapsedFiles
+        for file in diff.files where file.change == .deleted {
+            guard foldedDeletions.insert(file.id).inserted else { continue }
+            collapsed.insert(file.id)
+        }
+        if collapsed != collapsedFiles { collapsedFiles = collapsed }
+        return collapsed
+    }
+
+    /// `collapsed` stands in for ``collapsedFiles``, for the one caller that
+    /// folds a file in the same pass it rebuilds in — see ``foldDeletions()``.
+    private func rebuild(collapsed: Set<DiffFile.ID>? = nil) {
         if diff.isFileByFile {
             // The list has to agree with what is drawn, or a diff that fell
             // back to its first file would show no selection at all.
@@ -215,7 +249,7 @@ struct DiffView: View {
             elements: DiffElement.flatten(
                 diff,
                 only: currentFile,
-                collapsed: collapsedFiles,
+                collapsed: collapsed ?? collapsedFiles,
                 anchored: anchoredLines,
                 composing: composing
             )

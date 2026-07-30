@@ -84,21 +84,38 @@ The app is one window with three panes, and the mental model that drives the cod
   language server join. `TreeSitterHighlighter` survives for the diff and for
   markdown snippets, which live in no editor. Don't reach for an `NSTextView`
   API here: the package's `TextView` is not one.
-- **Markdown** (`Views/MarkdownPreview.swift`) — a hand-rolled block renderer used
-  for `.md` files, PR descriptions and comments. A fenced block is coloured by
-  `Models/MarkdownCodeHighlighter.swift`, which runs the editor's
-  `TreeSitterHighlighter` over the snippet and takes its colours from the
-  current palette — the fence's language word replaces the file name the editor
-  detects from, and the result is cached per (language, palette, text). A
-  ` ```mermaid ` fence goes to `Views/MermaidDiagramView.swift`.
-  Both hosts render a comment as Markdown *with HTML in it*, and a bot leans on
-  that hard, so `Support/MarkdownHTMLText.swift` handles the tags a comment
-  actually uses: `<!-- … -->` is dropped, `<details>`/`<summary>` and
-  `<blockquote>` become blocks the parser recurses into, and every inline tag is
-  rewritten as the Markdown that says the same thing before the line is
-  classified. It is not an HTML parser — an unknown tag is dropped and its text
-  kept. `MarkdownText.Block` is `indirect` because of those containers, so a new
-  case has to be answered in `MarkdownHTML` too.
+- **Markdown** — the parse and the renderer are separate on purpose, and only
+  the renderer is ours. `Support/MarkdownParser.swift` walks
+  [swift-markdown](https://github.com/swiftlang/swift-markdown)'s tree (cmark-gfm,
+  which is what both hosts render a comment with) into `MarkdownText.Block`, and
+  `Views/MarkdownPreview.swift` draws those blocks for `.md` files, PR
+  descriptions and comments alike. Read `Docs/Markdown.md` before changing any of
+  it: it records why the parser was replaced and why a library that renders too
+  was the wrong trade.
+  - The blocks carry **Markdown strings**, which the views read back with
+    `AttributedString(markdown:)` — so everything the parser writes into one goes
+    through `Support/MarkdownInline.swift`, which escapes plain text and is also
+    where the four things cmark does not answer live: a bare URL, `:tada:`,
+    `#123` and `@name`. That is one scan over `Text` nodes, not four passes.
+  - HTML arrives **raw and flat**: cmark splits `<details>` into three siblings —
+    the open tag, the inner Markdown parsed properly, the close tag — so
+    `Support/MarkdownHTMLText.swift` reads one raw block into events and
+    `ContainerStack` in the parser keeps the stack. It is not an HTML parser: an
+    unknown tag is dropped and its text kept, `<!-- … -->` goes nowhere, and
+    only the plain shape of a `<table>` is read.
+  - Comments are dropped **from the tree, not from the text**, because every
+    node carries a 1-based source line and that is what a tickable checkbox
+    writes back to (`MarkdownTask.toggling`). Cutting lines out beforehand would
+    move every line number in the document.
+  - A fenced block is coloured by `Models/MarkdownCodeHighlighter.swift`, which
+    runs the editor's `TreeSitterHighlighter` over the snippet and takes its
+    colours from the current palette — the fence's language word replaces the
+    file name the editor detects from, and the result is cached per (language,
+    palette, text). A ` ```mermaid ` fence goes to `Views/MermaidDiagramView.swift`.
+  - `MarkdownText.Block` is `indirect` because a quote, a `<details>` section and
+    a list item all hold blocks, so a new case has to be answered in
+    `Support/MarkdownHTML.swift` too — that is the PDF, and it walks the same
+    blocks on purpose so the page and the file cannot drift.
 - **Diagrams** (`Views/DiagramWebView.swift`) — mermaid fences and `.drawio`
   files are both drawn by the real JavaScript library in a `WKWebView`, and both
   go through this one representable: it loads a page from `Resources/` as a

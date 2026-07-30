@@ -5,175 +5,249 @@ import Foundation
 /// GitHub and Bitbucket both render a comment as Markdown *with HTML in it*, and
 /// a bot leans on that hard: CodeRabbit writes its whole review as nested
 /// `<details>` sections, hides its bookkeeping in `<!-- … -->`, and reaches for
-/// `<br>` inside table cells. None of that is Markdown, so the block parser used
-/// to lay it out as literal angle brackets.
+/// `<br>` inside table cells. None of that is Markdown, so cmark hands it over
+/// untouched — an `HTMLBlock` with the literal string in it, or an `InlineHTML`
+/// in the middle of a paragraph — and this is what reads it.
 ///
 /// Nothing here is a real HTML parser — it is the handful of tags a comment
 /// actually uses. Anything else is dropped rather than shown, which is what a
 /// reader expects from a tag their viewer does not know.
+///
+/// The shape of the job changed when `MarkdownParser` took over the document:
+/// cmark splits `<details>` into **three siblings** — the open tag, the inner
+/// Markdown parsed properly as Markdown, the close tag — so this no longer owns
+/// a whole section and recurses into it. It reads one raw block at a time and
+/// says what happened in it (``Event``); the parser keeps the stack.
 enum MarkdownHTMLText {
-    // MARK: - Comments
+    // MARK: - Block-level events
 
-    /// The text with every `<!-- … -->` taken out, comments spanning lines
-    /// included. A line that was nothing but a comment goes with it: leaving the
-    /// empty line behind would open a gap where the reader sees no reason for one.
+    /// A tag that holds *blocks* rather than words. These are the two the
+    /// parser has to keep a stack for, because their contents are separate
+    /// siblings in the tree.
+    enum Container: Equatable {
+        case details(isOpen: Bool)
+        case blockquote
+
+        /// True when `other` closes the same kind of thing this opened.
+        func matches(_ other: Container) -> Bool {
+            switch (self, other) {
+            case (.details, .details), (.blockquote, .blockquote): true
+            default: false
+            }
+        }
+    }
+
+    /// What one `HTMLBlock` turned out to say, in the order it said it.
+    enum Event {
+        case open(Container)
+        case close(Container)
+        /// A `<summary>`, already rewritten as Markdown. It belongs to whatever
+        /// `<details>` is open around it.
+        case summary(String)
+        /// A `<table>` read whole. Cells hold Markdown.
+        case table(headers: [String], rows: [[String]])
+        /// Everything that was not one of the above, rewritten as the Markdown
+        /// that says the same thing — for the parser to read as a document of
+        /// its own. This is what turns a README's
+        /// `<p align="center"><img …></p>` into a picture.
+        case markdown(String)
+    }
+
+    /// Reads one raw HTML block into the events above.
     ///
-    /// Fenced code is left alone — a comment there is the point of the example.
-    static func strippingComments(_ text: String) -> String {
-        guard text.contains("<!--") else { return text }
-        var result: [String] = []
-        var inFence = false
-        var inComment = false
+    /// A comment goes nowhere: `<!-- … -->` is dropped here rather than cut out
+    /// of the source beforehand, which is what keeps every source range in the
+    /// document pointing at the line it was written on — and a tickable
+    /// checkbox is a source range.
+    static func events(in rawHTML: String) -> [Event] {
+        var events: [Event] = []
+        var loose = ""
+        var index = rawHTML.startIndex
 
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = String(rawLine)
-            if !inComment, line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                inFence.toggle()
-                result.append(line)
+        /// Whatever plain HTML has piled up since the last structural tag.
+        func flush() {
+            defer { loose = "" }
+            let text = markdown(from: loose)
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            events.append(.markdown(text))
+        }
+
+        while index < rawHTML.endIndex {
+            // A comment, which the reader was never meant to see.
+            if rawHTML[index] == "<", rawHTML[index...].hasPrefix("<!--") {
+                let after = rawHTML.index(index, offsetBy: 4)
+                guard let end = rawHTML.range(of: "-->", range: after..<rawHTML.endIndex) else {
+                    index = rawHTML.endIndex
+                    continue
+                }
+                index = end.upperBound
                 continue
             }
-            if inFence {
-                result.append(line)
+            guard rawHTML[index] == "<", let found = tag(at: index, in: rawHTML[...]) else {
+                loose.append(rawHTML[index])
+                index = rawHTML.index(after: index)
                 continue
             }
 
-            var kept = ""
-            var index = line.startIndex
-            while index < line.endIndex {
-                if inComment {
-                    guard let end = line.range(of: "-->", range: index..<line.endIndex) else {
-                        index = line.endIndex
-                        continue
-                    }
-                    inComment = false
-                    index = end.upperBound
-                } else if let start = line.range(of: "<!--", range: index..<line.endIndex) {
-                    kept += line[index..<start.lowerBound]
-                    inComment = true
-                    index = start.upperBound
-                } else {
-                    kept += line[index..<line.endIndex]
-                    index = line.endIndex
+            switch found.name {
+            case "details":
+                flush()
+                events.append(
+                    found.isClosing
+                        ? .close(.details(isOpen: false))
+                        : .open(.details(isOpen: attributeIsSet("open", in: found.attributes)))
+                )
+                index = found.range.upperBound
+            case "blockquote":
+                flush()
+                events.append(found.isClosing ? .close(.blockquote) : .open(.blockquote))
+                index = found.range.upperBound
+            case "summary" where !found.isClosing:
+                flush()
+                let (text, end) = contents(of: "summary", after: found, in: rawHTML)
+                events.append(.summary(markdown(from: text).trimmingCharacters(in: .whitespacesAndNewlines)))
+                index = end
+            case "table" where !found.isClosing:
+                flush()
+                let (inner, end) = contents(of: "table", after: found, in: rawHTML)
+                if let table = table(in: inner) {
+                    events.append(.table(headers: table.headers, rows: table.rows))
+                }
+                index = end
+            default:
+                // Not structural: leave it in the buffer for `markdown(from:)`,
+                // which knows the inline spelling of the ones worth keeping.
+                loose += rawHTML[found.range]
+                index = found.range.upperBound
+            }
+        }
+
+        flush()
+        return events
+    }
+
+    /// The text between an opening tag and the one that closes it, counting
+    /// tags of the same name so a nested one does not end it early, plus the
+    /// index just past the close. A tag that is never closed takes the rest,
+    /// which is the reading a browser gives it too.
+    private static func contents(
+        of name: String,
+        after opening: HTMLTag,
+        in text: String
+    ) -> (inner: String, end: String.Index) {
+        var index = opening.range.upperBound
+        var depth = 1
+        while index < text.endIndex {
+            guard text[index] == "<", let found = tag(at: index, in: text[...]) else {
+                index = text.index(after: index)
+                continue
+            }
+            if found.name == name {
+                depth += found.isClosing ? -1 : 1
+                if depth == 0 {
+                    return (String(text[opening.range.upperBound..<found.range.lowerBound]), found.range.upperBound)
                 }
             }
-
-            // Only skip the line when the comment is what emptied it; a line that
-            // was blank to begin with is the author's paragraph break.
-            if kept.trimmingCharacters(in: .whitespaces).isEmpty, !line.isEmpty {
-                continue
-            }
-            result.append(kept)
+            index = found.range.upperBound
         }
-        return result.joined(separator: "\n")
+        return (String(text[opening.range.upperBound...]), text.endIndex)
     }
 
-    // MARK: - Containers
+    // MARK: - Tables
 
-    /// A `<details>` or `<blockquote>` and the text either side of it. These two
-    /// are the tags that hold *blocks*, so they cannot be flattened into a line
-    /// the way an inline tag can — the parser has to recurse into them.
-    struct Container {
-        enum Tag { case details, blockquote }
-        var tag: Tag
-        /// `<details open>`, which GitHub shows already unfolded.
-        var isOpen: Bool
-        var before: Substring
-        var inner: Substring
-        var after: Substring
-    }
-
-    /// The first container in `text` that is not nested inside another one.
+    /// A `<table>` read into the same headers and rows a `|…|` table gives.
     ///
-    /// Only tags of the same name are counted while looking for the close, so a
-    /// `<blockquote>` inside a `<details>` — the shape every CodeRabbit review
-    /// has — does not end the section early; the recursion picks it up from the
-    /// inner text. A container that is never closed takes the rest of the text,
-    /// which is the reading a browser gives it too.
-    static func container(in text: String) -> Container? {
-        guard text.contains("<") else { return nil }
-        let fenced = fences(in: text)
-        var index = text.startIndex
-        var open: HTMLTag?
-        var innerStart = text.startIndex
-        var depth = 0
+    /// The header is whichever row is written with `<th>`; a table with none is
+    /// read with its first row as the header, because a table drawn with no
+    /// header band at all is not a shape the preview has.
+    private static func table(in html: String) -> (headers: [String], rows: [[String]])? {
+        var rows: [[String]] = []
+        var headerRow: Int?
+        var index = html.startIndex
 
-        while index < text.endIndex {
-            if let fence = fenced.first(where: { $0.contains(index) }) {
-                index = fence.upperBound
+        while index < html.endIndex {
+            guard html[index] == "<", let found = tag(at: index, in: html[...]) else {
+                index = html.index(after: index)
                 continue
             }
-            guard text[index] == "<", let tag = tag(at: index, in: text[...]) else {
-                index = text.index(after: index)
-                continue
-            }
-            defer { index = tag.range.upperBound }
-
-            guard let found = open else {
-                guard !tag.isClosing, tag.name == "details" || tag.name == "blockquote" else { continue }
-                open = tag
-                innerStart = tag.range.upperBound
-                depth = 1
-                continue
-            }
-            guard tag.name == found.name else { continue }
-            if tag.isClosing {
-                depth -= 1
-                guard depth == 0 else { continue }
-                return Container(
-                    tag: found.name == "details" ? .details : .blockquote,
-                    isOpen: found.attributes.contains("open"),
-                    before: text[text.startIndex..<found.range.lowerBound],
-                    inner: text[innerStart..<tag.range.lowerBound],
-                    after: text[tag.range.upperBound...]
+            switch found.name {
+            case "tr" where !found.isClosing:
+                rows.append([])
+                index = found.range.upperBound
+            case "th", "td":
+                guard !found.isClosing else {
+                    index = found.range.upperBound
+                    continue
+                }
+                if rows.isEmpty { rows.append([]) }
+                if found.name == "th", headerRow == nil { headerRow = rows.count - 1 }
+                let (inner, end) = contents(of: found.name, after: found, in: html)
+                rows[rows.count - 1].append(
+                    markdown(from: inner).trimmingCharacters(in: .whitespacesAndNewlines)
                 )
+                index = end
+            default:
+                index = found.range.upperBound
             }
-            depth += 1
         }
 
-        guard let found = open else { return nil }
-        return Container(
-            tag: found.name == "details" ? .details : .blockquote,
-            isOpen: found.attributes.contains("open"),
-            before: text[text.startIndex..<found.range.lowerBound],
-            inner: text[innerStart...],
-            after: text[text.endIndex...]
+        // An empty `<tr></tr>` carries nothing and would draw as a blank
+        // stripe — but dropping one renumbers every row after it, so where the
+        // header sits is corrected in the same breath. Read out of the old
+        // numbering afterwards it is off by the empties above it, and a table
+        // whose only rows are an empty one and a header takes the array out of
+        // range altogether.
+        let named = headerRow ?? 0
+        guard named < rows.count else { return nil }
+        let position = named - rows[..<named].filter(\.isEmpty).count
+        rows.removeAll { $0.isEmpty }
+        guard position < rows.count else { return nil }
+        let headers = rows.remove(at: position)
+        let width = max(headers.count, rows.map(\.count).max() ?? 0)
+        return (
+            headers: headers + Array(repeating: "", count: width - headers.count),
+            rows: rows.map { $0 + Array(repeating: "", count: width - $0.count) }
         )
-    }
-
-    /// Lifts a `<summary>` out of a `<details>`, handing back its text and the
-    /// rest of the section. The two are rarely on lines of their own —
-    /// `<summary>…</summary><blockquote>` on one line is the usual shape — so
-    /// what is left either side is stitched back together.
-    static func summary(in text: Substring) -> (summary: String, body: String)? {
-        var index = text.startIndex
-        var opening: HTMLTag?
-        while index < text.endIndex {
-            guard text[index] == "<", let tag = tag(at: index, in: text) else {
-                index = text.index(after: index)
-                continue
-            }
-            index = tag.range.upperBound
-            // A section of its own starts before this one ever said what it
-            // was: the summary further down belongs to that one, not to us.
-            if opening == nil, !tag.isClosing, tag.name == "details" { return nil }
-            guard tag.name == "summary" else { continue }
-            if let start = opening, tag.isClosing {
-                return (
-                    summary: String(text[start.range.upperBound..<tag.range.lowerBound]),
-                    body: String(text[text.startIndex..<start.range.lowerBound]) + String(text[tag.range.upperBound...])
-                )
-            }
-            if !tag.isClosing { opening = tag }
-        }
-        return nil
     }
 
     // MARK: - Inline
 
-    /// One line of HTML rewritten as the Markdown that says the same thing, so
-    /// the inline parser downstream needs to know nothing about tags. A tag with
-    /// no Markdown spelling — `<div>`, `<span>`, a stray `<p>` — is dropped and
-    /// its text kept.
+    /// What one `InlineHTML` node — a tag in the middle of a sentence — turns
+    /// into.
+    enum Inline {
+        /// The Markdown that says the same thing, `**` for `<b>` and so on.
+        case markdown(String)
+        /// An `<img>`, which is a block of its own in the preview rather than
+        /// something a line of text can hold.
+        case image(source: String, alt: String, width: CGFloat?)
+        /// A tag with no meaning here: dropped, its text kept.
+        case nothing
+    }
+
+    /// One inline tag, read. `links` carries the addresses of the `<a>` tags
+    /// still open, so the closing tag writes the address of the one it belongs
+    /// to; the caller keeps it across a paragraph's nodes.
+    static func inline(_ rawHTML: String, links: inout [String]) -> Inline {
+        // Bookkeeping a bot hides mid-sentence.
+        if rawHTML.hasPrefix("<!--") { return .nothing }
+        guard let found = tag(at: rawHTML.startIndex, in: rawHTML[...]) else { return .nothing }
+        if found.name == "img", !found.isClosing {
+            guard let address = attribute("src", in: found.attributes) else { return .nothing }
+            return .image(
+                source: address,
+                alt: attribute("alt", in: found.attributes) ?? "",
+                width: pixels(attribute("width", in: found.attributes)).map(CGFloat.init)
+            )
+        }
+        let text = markdown(for: found, links: &links)
+        return text.isEmpty ? .nothing : .markdown(text)
+    }
+
+    /// A run of HTML rewritten as the Markdown that says the same thing, so the
+    /// parser downstream needs to know nothing about tags. A tag with no
+    /// Markdown spelling — `<div>`, `<span>`, a stray `<p>` — is dropped and its
+    /// text kept, though the ones that mean "a new block starts here" leave the
+    /// blank line that says so.
     ///
     /// Backtick spans are stepped over untouched: `Array<String>` in a sentence
     /// is code, not an opening tag.
@@ -212,11 +286,16 @@ enum MarkdownHTMLText {
         // `kbd` has no Markdown of its own, and a key is read the way code is.
         case "code", "kbd", "tt", "samp": return "`"
         case "br": return "\n"
-        case "hr": return "---"
-        case "li": return tag.isClosing ? "" : "- "
+        case "hr": return "\n\n---\n\n"
+        // A block tag's whole meaning here is "the next thing starts on its
+        // own", and a blank line is how Markdown says that. This is what makes
+        // a README's `<p align="center"><img …></p>` come out as a picture
+        // rather than as a word in whatever paragraph ran before it.
+        case "p", "div", "ul", "ol", "table", "tr", "section", "blockquote": return "\n\n"
+        case "li": return tag.isClosing ? "" : "\n- "
         case "h1", "h2", "h3", "h4", "h5", "h6":
-            guard !tag.isClosing, let level = Int(tag.name.dropFirst()) else { return "" }
-            return String(repeating: "#", count: level) + " "
+            guard !tag.isClosing, let level = Int(tag.name.dropFirst()) else { return "\n\n" }
+            return "\n\n" + String(repeating: "#", count: level) + " "
         case "img":
             guard !tag.isClosing, let address = attribute("src", in: tag.attributes) else { return "" }
             let image = "![\(attribute("alt", in: tag.attributes) ?? "")](\(address))"
@@ -269,6 +348,14 @@ enum MarkdownHTMLText {
             return String(value[..<end])
         }
         return String(value.prefix { !$0.isWhitespace })
+    }
+
+    /// An attribute that is its own value — `<details open>`, which a host also
+    /// writes as `open=""` and `open="open"`.
+    private static func attributeIsSet(_ name: String, in attributes: String) -> Bool {
+        attributes
+            .split(whereSeparator: { $0.isWhitespace })
+            .contains { $0.lowercased() == name || $0.lowercased().hasPrefix(name + "=") }
     }
 
     // MARK: - Entities
@@ -366,30 +453,5 @@ enum MarkdownHTMLText {
             index = text.index(after: index)
         }
         return nil
-    }
-
-    /// The stretches of `text` inside ``` fences, which no tag is read out of.
-    private static func fences(in text: String) -> [Range<String.Index>] {
-        guard text.contains("```") else { return [] }
-        var result: [Range<String.Index>] = []
-        var start: String.Index?
-        var index = text.startIndex
-
-        while index < text.endIndex {
-            let lineEnd = text[index...].firstIndex(of: "\n") ?? text.endIndex
-            let next = lineEnd == text.endIndex ? text.endIndex : text.index(after: lineEnd)
-            if text[index..<lineEnd].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                if let open = start {
-                    result.append(open..<next)
-                    start = nil
-                } else {
-                    start = index
-                }
-            }
-            index = next
-        }
-        // Still open at the end — the fence the author never closed.
-        if let open = start { result.append(open..<text.endIndex) }
-        return result
     }
 }

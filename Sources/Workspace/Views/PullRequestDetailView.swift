@@ -95,6 +95,10 @@ struct PullRequestDetailView: View {
         // transaction is the one that ended the pull request, so a build tick,
         // a keystroke or a comment landing still redraws with nothing animated.
         .animation(ViewerMotion.contentChange, value: isOpen)
+        // Set once for the whole page: the description, every comment and every
+        // reply nested under one are all this repository's Markdown, so a
+        // `#123` in any of them is this repository's pull request.
+        .environment(\.markdownLinks, MarkdownLinks(remote: project.remote))
         // A half-written description belongs to the pull request it was opened
         // on, and this one view is reused as the viewer moves between them.
         .onChange(of: item.id) {
@@ -682,6 +686,19 @@ struct PullRequestDetailView: View {
                         .transition(ViewerMotion.contentArrival)
                     } else if !pr.body.isEmpty {
                         MarkdownText(text: pr.body)
+                            .environment(
+                                \.markdownTaskToggle,
+                                MarkdownTaskToggle(
+                                    target: "pr-\(pr.number)-description",
+                                    // The action below asks the host for the
+                                    // description when it runs, so nothing
+                                    // stale can be captured — but the body is
+                                    // still what it was built for, and saying
+                                    // so keeps every one of these honest.
+                                    content: pr.body,
+                                    perform: toggleDescriptionTask
+                                )
+                            )
                             .font(.callout)
                             .transition(ViewerMotion.contentArrival)
                     }
@@ -727,6 +744,19 @@ struct PullRequestDetailView: View {
     private func saveDescription(_ draft: String) async {
         let saved = await store.updateDescription(draft, on: item, project: project, pr: pr)
         if saved { descriptionDraft = nil }
+    }
+
+    /// Ticking a box in the description. There is no half of a description to
+    /// save, so the whole of it is written back — from what the host holds
+    /// rather than from what is drawn, for the same reason the edit box opens
+    /// on that: replacing a Bitbucket mention with the name beside it would
+    /// post the name as words and lose the mention.
+    private func toggleDescriptionTask(line: Int, isDone: Bool) {
+        Task {
+            let source = await store.editableDescription(project: project, pr: pr)
+            guard let updated = MarkdownTask.toggling(line: line, to: isDone, in: source) else { return }
+            _ = await store.updateDescription(updated, on: item, project: project, pr: pr)
+        }
     }
 
     private var diffTab: some View {
@@ -2355,6 +2385,26 @@ struct CommentBubble: View {
     /// Sends the rewritten text. The box is drawn only when this is given.
     var onEditSubmitted: ((String) async -> Void)?
 
+    /// Ticking a box in a comment: the flip is made on the Markdown the *host*
+    /// holds — which on Bitbucket is not quite what is on screen, see
+    /// ``PullRequestComment/rawBody`` — and the whole comment is posted back.
+    /// The line numbers agree because a mention put back in its account-id form
+    /// is a replacement within a line, not a line of its own.
+    ///
+    /// Nothing at all for a comment nobody here may edit, which is most of them:
+    /// a bot's review, and everyone else's words.
+    private var taskToggle: MarkdownTaskToggle? {
+        guard let onEditSubmitted else { return nil }
+        let body = comment.editableBody
+        // `content` is that same body, so that ticking a second box after the
+        // conversation has come back from the host builds its answer on what
+        // the host now holds rather than on what this closure captured.
+        return MarkdownTaskToggle(target: "comment-\(comment.id)", content: body) { line, isDone in
+            guard let updated = MarkdownTask.toggling(line: line, to: isDone, in: body) else { return }
+            Task { await onEditSubmitted(updated) }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
@@ -2416,6 +2466,10 @@ struct CommentBubble: View {
                     .foregroundStyle(.tertiary)
             } else {
                 MarkdownText(text: comment.body)
+                    // A checklist in a comment is only tickable by whoever
+                    // could edit the comment anyway — the tick *is* an edit,
+                    // and it goes back through the same path the box does.
+                    .environment(\.markdownTaskToggle, taskToggle)
                     .font(.callout)
             }
 

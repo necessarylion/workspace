@@ -92,10 +92,14 @@ final class RemoteImageLoader {
 ///
 /// It never grows past its own size — a small screenshot stays small rather than
 /// being blown up to the width of the pane — and it is capped in height so one
-/// tall image cannot push the rest of a comment off the screen. Clicking opens
-/// the original, which is also the way to see one the app cannot fetch: a
-/// screenshot pasted into a Bitbucket pull request is served from a private web
-/// address that only the reader's own browser session opens.
+/// tall image cannot push the rest of a comment off the screen. That cap is why
+/// clicking opens it at full size in a sheet: a wide screenshot of a diff is
+/// unreadable at 420pt and there was nothing to do about it.
+///
+/// Opening the original is still on the context menu, and it is still the only
+/// way to see one the app cannot fetch: a screenshot pasted into a Bitbucket
+/// pull request is served from a private web address that only the reader's own
+/// browser session opens.
 @MainActor
 struct MarkdownImage: View {
     let url: URL
@@ -108,6 +112,7 @@ struct MarkdownImage: View {
 
     @State private var image: NSImage?
     @State private var isLoading = true
+    @State private var isZoomed = false
 
     private static let maximumHeight: CGFloat = 420
 
@@ -149,13 +154,54 @@ struct MarkdownImage: View {
                     maxWidth: width ?? image.size.width,
                     maxHeight: width == nil ? min(image.size.height, Self.maximumHeight) : nil
                 )
-                .frame(maxWidth: .infinity, alignment: .leading)
+                // Everything below hangs off the picture rather than off the
+                // row it sits in, and the order is the whole of it: the
+                // `maxWidth: .infinity` that pushes it left comes *last*. Put
+                // it above these and the outline is drawn around the width of
+                // the pane instead of around the picture — a bot's little
+                // "Review Change Stack" badge in a box a thousand points wide —
+                // and every click in that empty space opens the picture too.
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))
+                .contentShape(RoundedRectangle(cornerRadius: 6))
                 .accessibilityLabel(alt.isEmpty ? "Image" : alt)
-                .onTapGesture { open() }
+                // `onTapGesture` is a pointer and nothing else: without these
+                // the picture is announced as a picture and there is no way to
+                // open it but a mouse.
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("Opens this picture at full size")
+                .accessibilityAction { isZoomed = true }
+                // A wide screenshot in a pull request is capped at 420pt tall
+                // and can only be squinted at, so a click opens it at its own
+                // size rather than handing it to the browser. The browser is
+                // still a menu away, and is still the only answer for one the
+                // app could not fetch — see the placeholder below.
+                .onTapGesture { isZoomed = true }
                 .pointerCursor()
-                .help(url.isFileURL ? "Open this file" : "Open in browser")
+                .help("Click to see this at full size")
+                .contextMenu {
+                    Button(url.isFileURL ? "Open in Preview" : "Open in Browser") { open() }
+                    Button("Copy Image") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.writeObjects([image])
+                    }
+                    if url.isFileURL {
+                        Button("Show in Finder") { reveal() }
+                    } else {
+                        Button("Copy Image Address") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(url.absoluteString, forType: .string)
+                        }
+                    }
+                }
+                .sheet(isPresented: $isZoomed) {
+                    ImageZoomSheet(image: image, title: alt.isEmpty ? url.lastPathComponent : alt) {
+                        open()
+                    }
+                }
+                // Left in the column, with the rest of the width left empty
+                // rather than filled — and nothing drawn or clickable in it.
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .transition(.opacity)
         } else if isLoading {
             placeholder {
@@ -239,5 +285,74 @@ struct MarkdownImage: View {
         if image != nil { return }
         image = await RemoteImageLoader.shared.image(for: url)
         isLoading = false
+    }
+}
+
+/// A picture at its own size, on top of everything, with the pane's worth of
+/// room to look at it in.
+///
+/// It is a sheet rather than a window of its own: the app is one window, and a
+/// screenshot in a pull request is read and dismissed rather than kept open
+/// beside the conversation. `.fit` is where it opens — the whole picture,
+/// whatever its shape — and `.actual` is the click that follows, which is what
+/// a screenshot of code is opened for in the first place; at that size the
+/// scroll view is what gets you around it.
+private struct ImageZoomSheet: View {
+    let image: NSImage
+    let title: String
+    /// Handing it to whatever owns the address, for the reader who wants it
+    /// outside the app after all.
+    let onOpenExternally: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var isActualSize = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text(title)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("\(Int(image.size.width)) × \(Int(image.size.height))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 12)
+                Button(isActualSize ? "Fit" : "Actual Size") { isActualSize.toggle() }
+                    .pointerCursor()
+                Button("Open") { onOpenExternally() }
+                    .pointerCursor()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                    .pointerCursor()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(.bar)
+            Divider()
+
+            // Both directions, because actual size is the point of the button
+            // and a screenshot of a wide diff is wider than any sheet.
+            ScrollView([.horizontal, .vertical]) {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(
+                        maxWidth: isActualSize ? image.size.width : nil,
+                        maxHeight: isActualSize ? image.size.height : nil
+                    )
+                    .frame(
+                        minWidth: isActualSize ? image.size.width : nil,
+                        minHeight: isActualSize ? image.size.height : nil
+                    )
+                    .padding(isActualSize ? 0 : 16)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        // Big enough to be worth opening, and short of the smallest screen the
+        // app runs on.
+        .frame(minWidth: 520, idealWidth: 900, minHeight: 380, idealHeight: 650)
+        // ⎋ closes it, the way every other sheet in the app closes.
+        .onExitCommand { dismiss() }
     }
 }

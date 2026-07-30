@@ -376,8 +376,36 @@ struct ViewerView: View {
             case .text:
                 if document.isMarkdown && store.markdownPreview {
                     // With the file's own address: a README's pictures are
-                    // paths beside it, and this is what they are beside.
-                    MarkdownPreview(text: document.text, baseURL: document.url)
+                    // paths beside it, and this is what they are beside. And
+                    // with the repository it belongs to, so a `#123` in it is
+                    // that repository's pull request.
+                    MarkdownPreview(
+                        text: document.text,
+                        baseURL: document.url,
+                        // The repository the file is *in*, not the one selected
+                        // in the sidebar: with more than one open, a `#123` in
+                        // a file from another checkout would otherwise point at
+                        // the selected repository's pull request.
+                        links: MarkdownLinks(
+                            remote: (store.project(containing: document.url) ?? store.selectedProject)?.remote
+                        ),
+                        onToggleTask: MarkdownTaskToggle(
+                            target: document.url.path,
+                            content: document.text
+                        ) { line, isDone in
+                            // The edit lands in the document, not on disk: a
+                            // tick is an edit like any other here, so the tab
+                            // marks it unsaved and ⌘S writes it. Auto-saving
+                            // from a preview would be the one write in the app
+                            // nobody asked for.
+                            guard let updated = MarkdownTask.toggling(
+                                line: line,
+                                to: isDone,
+                                in: document.text
+                            ) else { return }
+                            document.text = updated
+                        }
+                    )
                 } else if document.isDrawio && store.drawioPreview {
                     DrawioPreview(xml: document.text)
                 } else {
