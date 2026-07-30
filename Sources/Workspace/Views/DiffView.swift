@@ -391,7 +391,8 @@ struct DiffView: View {
                 // Flattened: chaining through an optional bundle onto an
                 // optional closure would otherwise nest one inside the other.
                 onResolve: comments?.resolve ?? nil,
-                onEdit: comments?.edit ?? nil
+                onEdit: comments?.edit ?? nil,
+                onDelete: comments?.delete ?? nil
             )
             .frame(width: width, alignment: .leading)
         case .composer:
@@ -451,6 +452,8 @@ struct DiffComments {
     var resolve: ((PullRequestComment, Bool) async -> Void)?
     /// Replaces what a comment says. Nil for the same reason.
     var edit: ((PullRequestComment, String) async -> Void)?
+    /// Takes a comment down. Nil for the same reason.
+    var delete: ((PullRequestComment) async -> Void)?
 }
 
 extension DiffRow {

@@ -150,6 +150,7 @@ enum PullRequestError: LocalizedError {
     case unsupportedHost
     case replyUnsupported
     case editUnsupported
+    case deleteUnsupported
 
     var errorDescription: String? {
         switch self {
@@ -163,6 +164,8 @@ enum PullRequestError: LocalizedError {
             "This host cannot thread a reply onto that comment."
         case .editUnsupported:
             "That comment cannot be edited from here."
+        case .deleteUnsupported:
+            "That comment cannot be deleted from here."
         }
     }
 }

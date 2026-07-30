@@ -1642,6 +1642,28 @@ final class WorkspaceStore {
         item.isPostingComment = false
     }
 
+    /// Takes a comment down. The conversation is read back afterwards rather
+    /// than the comment dropped from the list here: what happens to its replies
+    /// is the host's answer, not ours — see
+    /// ``PullRequestService/deleteComment(_:on:in:)``.
+    func deleteComment(
+        _ comment: PullRequestComment,
+        on item: ViewerItem,
+        project: Project,
+        pr: PullRequest
+    ) async {
+        item.isPostingComment = true
+        item.commentError = nil
+        do {
+            try await PullRequestService.deleteComment(comment, on: pr, in: project.url)
+            showStatus("Comment deleted on #\(pr.number)")
+            await loadComments(item, project: project, pr: pr)
+        } catch {
+            item.commentError = error.localizedDescription
+        }
+        item.isPostingComment = false
+    }
+
     /// Settles a comment thread, or opens it again. The conversation is read
     /// back afterwards rather than edited in place: resolution is the host's
     /// word, and a thread someone else has already touched should come back

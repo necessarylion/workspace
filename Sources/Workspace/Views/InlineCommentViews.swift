@@ -41,6 +41,7 @@ struct DiffCommentThreads: View {
     let onReply: (PullRequestComment, String) async -> Void
     var onResolve: ((PullRequestComment, Bool) async -> Void)?
     var onEdit: ((PullRequestComment, String) async -> Void)?
+    var onDelete: ((PullRequestComment) async -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -56,7 +57,8 @@ struct DiffCommentThreads: View {
                     isInline: true,
                     onReply: onReply,
                     onResolve: onResolve,
-                    onEdit: onEdit
+                    onEdit: onEdit,
+                    onDelete: onDelete
                 )
             }
         }

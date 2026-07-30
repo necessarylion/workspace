@@ -820,6 +820,14 @@ struct PullRequestDetailView: View {
                                 project: project,
                                 pr: pr
                             )
+                        },
+                        delete: { comment in
+                            await store.deleteComment(
+                                comment,
+                                on: item,
+                                project: project,
+                                pr: pr
+                            )
                         }
                     )
                 )
@@ -1397,6 +1405,14 @@ struct ConversationView<Header: View>: View {
                                     project: project,
                                     pr: pr
                                 )
+                            },
+                            onDelete: { comment in
+                                await store.deleteComment(
+                                    comment,
+                                    on: item,
+                                    project: project,
+                                    pr: pr
+                                )
                             }
                         )
                     }
@@ -1556,11 +1572,18 @@ struct CommentThread: View {
     var onResolve: ((PullRequestComment, Bool) async -> Void)?
     /// Replaces what a comment says. Nil where nothing here may be edited.
     var onEdit: ((PullRequestComment, String) async -> Void)?
+    /// Takes a comment down. Nil where nothing here may be deleted.
+    var onDelete: ((PullRequestComment) async -> Void)?
 
     /// Whether a settled thread has been opened up to be read. It is deliberately
     /// not remembered: a reload brings the conversation back the way the host
     /// tells it, which is with the answered parts out of the way.
     @State private var isExpanded = false
+
+    /// Whether this thread has been folded away by hand, root and all. Open to
+    /// begin with — a conversation is there to be read — and, like the state
+    /// above, deliberately forgotten when the pull request is loaded again.
+    @State private var isCollapsed = false
 
     /// Stop indenting past this depth so deep threads stay readable.
     private static let maxIndentedDepth = 4
@@ -1602,16 +1625,21 @@ struct CommentThread: View {
             isEditing: isEditing,
             isBusy: isPosting,
             mentions: mentions,
+            isCollapsed: isCollapsed,
             onReplyTapped: openReply,
             onResolveTapped: resolveAction,
             onEditTapped: editAction,
             onEditCancelled: { setEditing(nil) },
             onEditSubmitted: onEdit.map { edit in
                 { body in await edit(node.comment, body) }
-            }
+            },
+            onDeleteTapped: deleteAction,
+            onCollapseTapped: collapseAction
         )
 
-        if replyingTo == node.comment {
+        // Folded, the root stands for the whole thread: the box being typed in
+        // under it and every reply go away with it.
+        if !isCollapsed, replyingTo == node.comment {
             CommentComposer(
                 prompt: "Reply to \(node.comment.author)…  @ to name someone",
                 sendTitle: "Reply",
@@ -1624,7 +1652,7 @@ struct CommentThread: View {
             .transition(.opacity)
         }
 
-        if !node.replies.isEmpty {
+        if !isCollapsed, !node.replies.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(node.replies) { reply in
                     CommentThread(
@@ -1637,7 +1665,8 @@ struct CommentThread: View {
                         isInline: isInline,
                         onReply: onReply,
                         onResolve: onResolve,
-                        onEdit: onEdit
+                        onEdit: onEdit,
+                        onDelete: onDelete
                     )
                 }
             }
@@ -1673,6 +1702,33 @@ struct CommentThread: View {
     private var resolveAction: (() -> Void)? {
         guard depth == 0, node.comment.canResolve, let onResolve else { return nil }
         return { Task { await onResolve(node.comment, !node.isResolved) } }
+    }
+
+    /// What the Delete button does, or nil when this comment is not the
+    /// reader's to remove. The bubble asks before this ever runs.
+    private var deleteAction: (() async -> Void)? {
+        guard node.comment.canDelete, let onDelete else { return nil }
+        return { await onDelete(node.comment) }
+    }
+
+    /// What the chevron does, or nil where there is none.
+    ///
+    /// Only a thread's root folds: a reply is part of what the root stands for,
+    /// and it is already put away when the root is. A settled thread has no
+    /// chevron of its own either — ``ResolvedThreadRow`` is that same fold,
+    /// drawn by the host's answer rather than by hand.
+    private var collapseAction: (() -> Void)? {
+        guard depth == 0, !isSettled else { return nil }
+        return {
+            // The same transaction question openReply answers, and the same
+            // answer: inline, this sits in the flattened stack that holds the
+            // whole diff.
+            if isInline {
+                isCollapsed.toggle()
+            } else {
+                withAnimation(ViewerMotion.contentChange) { isCollapsed.toggle() }
+            }
+        }
     }
 
     private var isEditing: Bool { editing == node.comment }
@@ -2374,6 +2430,8 @@ struct CommentBubble: View {
     var isBusy = false
     /// Who an `@` names in that box.
     var mentions: MentionSource = .none
+    /// Whether everything below the header is folded away.
+    var isCollapsed = false
     var onReplyTapped: (() -> Void)?
     /// Settles the thread this comment heads, or opens it again. Nil where the
     /// host offers no handle for it, and then no button is drawn.
@@ -2384,6 +2442,15 @@ struct CommentBubble: View {
     var onEditCancelled: (() -> Void)?
     /// Sends the rewritten text. The box is drawn only when this is given.
     var onEditSubmitted: ((String) async -> Void)?
+    /// Takes the comment down, once the reader has said so twice. Nil where it
+    /// is not theirs to remove — see ``PullRequestComment/canDelete``.
+    var onDeleteTapped: (() async -> Void)?
+    /// Folds the comment away, or opens it up again. Nil where it does not
+    /// fold: only a thread's root does, and a reply goes with it.
+    var onCollapseTapped: (() -> Void)?
+
+    /// Whether the reader has been asked whether they mean it.
+    @State private var isConfirmingDelete = false
 
     /// Ticking a box in a comment: the flip is made on the Markdown the *host*
     /// holds — which on Bitbucket is not quite what is on screen, see
@@ -2407,126 +2474,202 @@ struct CommentBubble: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                AuthorAvatar(name: comment.author, url: comment.avatarURL, size: 20)
-                Text(comment.author)
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(comment.authorColor)
-                // The face already says a person wrote this, so the plain
-                // comment icon is dropped; a review keeps its icon, which is
-                // what carries approved versus changes requested.
-                if case .review(let state) = comment.kind {
-                    Image(systemName: comment.kind.symbol)
-                        .foregroundStyle(tint)
-                    Text(state.replacingOccurrences(of: "_", with: " ").lowercased())
-                        .font(.caption2)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(tint.opacity(0.16), in: Capsule())
-                        .foregroundStyle(tint)
-                }
-                if replyCount > 0 {
-                    Label("\(replyCount)", systemImage: "arrowshape.turn.up.left")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if let date = comment.createdAt {
-                    Text(date.formatted(.relative(presentation: .named)))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            header
 
-            if let path = comment.path {
-                Text(path)
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.head)
-            }
-
-            if isEditing, let onEditSubmitted {
-                // In place of the text rather than under it: what is in the box
-                // *is* the comment, and showing both reads as two of them. The
-                // header above still says whose it is and when it was written.
-                CommentComposer(
-                    prompt: "Edit this comment…  @ to name someone",
-                    sendTitle: "Save",
-                    sendSymbol: "checkmark",
-                    isPosting: isBusy,
-                    mentions: mentions,
-                    startingFrom: comment.editableBody,
-                    onCancel: { onEditCancelled?() },
-                    onSend: onEditSubmitted
-                )
-            } else if comment.body.isEmpty {
-                Text("(no message)")
-                    .font(.callout)
-                    .foregroundStyle(.tertiary)
-            } else {
-                MarkdownText(text: comment.body)
-                    // A checklist in a comment is only tickable by whoever
-                    // could edit the comment anyway — the tick *is* an edit,
-                    // and it goes back through the same path the box does.
-                    .environment(\.markdownTaskToggle, taskToggle)
-                    .font(.callout)
-            }
-
-            // While the box is open it carries its own Cancel and Save, and a
-            // row of other verbs under it is only in the way.
-            if !isEditing, hasActions {
-                HStack(spacing: 12) {
-                    if comment.canReply, let onReplyTapped {
-                        Button(action: onReplyTapped) {
-                            Label(
-                                isReplying ? "Cancel reply" : "Reply",
-                                systemImage: "arrowshape.turn.up.left"
-                            )
-                            .font(.caption)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .pointerCursor()
-                    }
-
-                    if comment.canEdit, let onEditTapped {
-                        Button(action: onEditTapped) {
-                            Label("Edit", systemImage: "pencil")
-                                .font(.caption)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .disabled(isBusy)
-                        .pointerCursor(!isBusy)
-                        .help("Change what this comment says")
-                    }
-
-                    if let onResolveTapped {
-                        Button(action: onResolveTapped) {
-                            Label(
-                                comment.isResolved ? "Unresolve" : "Resolve",
-                                systemImage: comment.isResolved
-                                    ? "arrow.uturn.backward.circle"
-                                    : "checkmark.circle"
-                            )
-                            .font(.caption)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(comment.isResolved ? Color.secondary : Color.green)
-                        .disabled(isBusy)
-                        .pointerCursor(!isBusy)
-                        .help(comment.isResolved
-                            ? "Mark this thread unresolved"
-                            : "Mark this thread resolved")
-                    }
-                }
-                .padding(.top, 1)
+            if !isCollapsed {
+                folding
             }
         }
         .padding(11)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.22), in: RoundedRectangle(cornerRadius: 9))
+        .confirmationDialog(
+            "Delete this comment?",
+            isPresented: $isConfirmingDelete
+        ) {
+            Button("Delete", role: .destructive) {
+                Task { await onDeleteTapped?() }
+            }
+            Button("Cancel", role: .cancel) { isConfirmingDelete = false }
+        } message: {
+            Text("It is removed from the pull request for everyone, and this cannot be undone.")
+        }
+    }
+
+    /// The line that stays whether the comment is folded or not: whose it is,
+    /// what kind, and when — plus, folded, the first line of what it says.
+    @ViewBuilder
+    private var header: some View {
+        if let onCollapseTapped {
+            Button(action: onCollapseTapped) {
+                headerRow.contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .help(isCollapsed ? "Show this comment" : "Hide this comment")
+        } else {
+            headerRow
+        }
+    }
+
+    private var headerRow: some View {
+        HStack(spacing: 6) {
+            // Only where the comment folds, and turned rather than swapped for
+            // another glyph, for the reason ``ResolvedThreadRow`` gives.
+            if onCollapseTapped != nil {
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+                    .animation(ViewerMotion.disclosure, value: isCollapsed)
+            }
+            AuthorAvatar(name: comment.author, url: comment.avatarURL, size: 20)
+            Text(comment.author)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(comment.authorColor)
+            // The face already says a person wrote this, so the plain
+            // comment icon is dropped; a review keeps its icon, which is
+            // what carries approved versus changes requested.
+            if case .review(let state) = comment.kind {
+                Image(systemName: comment.kind.symbol)
+                    .foregroundStyle(tint)
+                Text(state.replacingOccurrences(of: "_", with: " ").lowercased())
+                    .font(.caption2)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(tint.opacity(0.16), in: Capsule())
+                    .foregroundStyle(tint)
+            }
+            if replyCount > 0 {
+                Label("\(replyCount)", systemImage: "arrowshape.turn.up.left")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            // What a folded comment is read by, the way a resolved thread's row
+            // reads: enough to know whether to open it again.
+            if isCollapsed, !comment.preview.isEmpty {
+                Text(comment.preview)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+            if let date = comment.createdAt {
+                Text(date.formatted(.relative(presentation: .named)))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Everything the chevron puts away: the file it is anchored to, what it
+    /// says or the box rewriting that, and the row of verbs.
+    @ViewBuilder
+    private var folding: some View {
+        if let path = comment.path {
+            Text(path)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.head)
+        }
+
+        if isEditing, let onEditSubmitted {
+            // In place of the text rather than under it: what is in the box
+            // *is* the comment, and showing both reads as two of them. The
+            // header above still says whose it is and when it was written.
+            CommentComposer(
+                prompt: "Edit this comment…  @ to name someone",
+                sendTitle: "Save",
+                sendSymbol: "checkmark",
+                isPosting: isBusy,
+                mentions: mentions,
+                startingFrom: comment.editableBody,
+                onCancel: { onEditCancelled?() },
+                onSend: onEditSubmitted
+            )
+        } else if comment.body.isEmpty {
+            Text("(no message)")
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+        } else {
+            MarkdownText(text: comment.body)
+                // A checklist in a comment is only tickable by whoever
+                // could edit the comment anyway — the tick *is* an edit,
+                // and it goes back through the same path the box does.
+                .environment(\.markdownTaskToggle, taskToggle)
+                .font(.callout)
+        }
+
+        // While the box is open it carries its own Cancel and Save, and a
+        // row of other verbs under it is only in the way.
+        if !isEditing, hasActions {
+            HStack(spacing: 12) {
+                if comment.canReply, let onReplyTapped {
+                    Button(action: onReplyTapped) {
+                        Label(
+                            isReplying ? "Cancel reply" : "Reply",
+                            systemImage: "arrowshape.turn.up.left"
+                        )
+                        .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .pointerCursor()
+                }
+
+                if comment.canEdit, let onEditTapped {
+                    Button(action: onEditTapped) {
+                        Label("Edit", systemImage: "pencil")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .disabled(isBusy)
+                    .pointerCursor(!isBusy)
+                    .help("Change what this comment says")
+                }
+
+                if let onResolveTapped {
+                    Button(action: onResolveTapped) {
+                        Label(
+                            comment.isResolved ? "Unresolve" : "Resolve",
+                            systemImage: comment.isResolved
+                                ? "arrow.uturn.backward.circle"
+                                : "checkmark.circle"
+                        )
+                        .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(comment.isResolved ? Color.secondary : Color.green)
+                    .disabled(isBusy)
+                    .pointerCursor(!isBusy)
+                    .help(comment.isResolved
+                        ? "Mark this thread unresolved"
+                        : "Mark this thread resolved")
+                }
+
+                if onDeleteTapped != nil {
+                    Button {
+                        isConfirmingDelete = true
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    // The one verb here that cannot be taken back, and the
+                    // only one that says so before it is pressed. Resolve
+                    // is already green; this is the other end of that.
+                    .foregroundStyle(.red)
+                    .disabled(isBusy)
+                    .pointerCursor(!isBusy)
+                    .help("Delete this comment")
+                }
+            }
+            .padding(.top, 1)
+        }
     }
 
     /// Whether anything at all can be done to this comment from here.
@@ -2534,6 +2677,7 @@ struct CommentBubble: View {
         (comment.canReply && onReplyTapped != nil)
             || (comment.canEdit && onEditTapped != nil)
             || onResolveTapped != nil
+            || onDeleteTapped != nil
     }
 
     private var tint: Color {
