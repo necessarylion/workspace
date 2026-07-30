@@ -281,19 +281,23 @@ struct ChatPanelBarContent: View {
             ChatPanelMark(isWorking: panel.session.isWorking)
 
             // One line, repository first: `workspace | fix the scroll bug`.
-            // Stacked, the two competed for a 30pt bar and the conversation —
-            // the half that actually changes — got the smaller type.
+            // Stacked, the two competed for a 30pt bar.
             //
-            // **The repository holds its width and the conversation gives way**,
-            // which is the same argument `dockedMinimumWidth` is written from:
-            // the dock is shared by every repository, so the project is what a
-            // folded bar must still be saying when there is no room left. Both
-            // are capped at one line, so a long conversation title ends in an
+            // **The repository is the one that is read**, so it carries the
+            // weight and the conversation sits behind it. The name a
+            // conversation is given is whatever it happened to be about, and it
+            // changes under you; which repository a floating bar belongs to is
+            // the thing being looked for when several are docked side by side.
+            //
+            // The same argument decides the width, and it did before the type
+            // followed it: **the repository holds its width and the
+            // conversation gives way** — see `dockedMinimumWidth`. Both are
+            // capped at one line, so a long conversation title ends in an
             // ellipsis rather than pushing the buttons off the end of the bar.
             HStack(spacing: 5) {
                 Text(panel.projectName)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .layoutPriority(1)
@@ -302,7 +306,8 @@ struct ChatPanelBarContent: View {
                     .foregroundStyle(.tertiary)
                     .layoutPriority(1)
                 Text(panel.title)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }

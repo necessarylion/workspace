@@ -33,6 +33,19 @@ struct PullRequestBuild: Identifiable, Sendable, Hashable {
             }
         }
 
+        /// Whether this is a verdict rather than a stage on the way to one.
+        /// A run that has settled will not change again, so there is nothing
+        /// left to learn by asking the host about it a second time — see
+        /// `PullRequestDetailView.watchBuilds`. `unknown` is deliberately not
+        /// settled: it is a word this app failed to read, not a host saying
+        /// the run is over.
+        var isSettled: Bool {
+            switch self {
+            case .passed, .failed, .cancelled, .skipped: true
+            case .running, .pending, .unknown: false
+            }
+        }
+
         /// Every host spells these differently, and one host spells them
         /// differently in two places — Cloud reports a pipeline's outcome in
         /// `state.result.name` but a commit status's in `state`. Matching on

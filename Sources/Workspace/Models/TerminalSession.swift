@@ -104,21 +104,7 @@ final class TerminalSession: Identifiable {
         self.title = title
         self.view = GhosttySurfaceView()
         view.onTitleChange = { [weak self] title in
-            guard let self else { return }
-            let wasWorking = isWorking
-            self.title = title
-            isWorking = Self.readsAsBusy(title)
-            titleChanges += 1
-            // `claude` renames the tab as it starts work on a prompt, which is
-            // exactly when a conversation that had no transcript may have got
-            // one — so a rename is the cue to go looking again.
-            watchForClaudeName()
-            // The spinner going away is the turn ending: whatever was being
-            // waited for is done, and the person who set it going is very
-            // likely somewhere else by now.
-            if wasWorking, !isWorking {
-                raiseAttention("Finished — waiting for you")
-            }
+            self?.titleArrived(title)
         }
         view.onClose = { [weak self] in
             self?.isWorking = false
@@ -132,6 +118,64 @@ final class TerminalSession: Identifiable {
         }
         view.onDesktopNotification = { [weak self] title, body in
             self?.raiseAttention(body.isEmpty ? (title ?? "Waiting for you") : body)
+        }
+    }
+
+    /// The newest name the shell has given itself, published or not.
+    @ObservationIgnored private var latestTitle: String?
+    /// The wait that will publish it; see ``titleArrived``.
+    @ObservationIgnored private var titlePublish: Task<Void, Never>?
+    /// How long a burst of renames is allowed to run before the tab catches
+    /// up. Short enough to read as immediate, long enough that a spinner is
+    /// several frames rather than several redraws.
+    private static let titleInterval = Duration.milliseconds(200)
+
+    /// A terminal renames itself far faster than anyone can read.
+    ///
+    /// `claude` paints its spinner **into the tab title**, so a running turn is
+    /// a new name every frame — and every one of those used to be a write to an
+    /// observable property, which redraws the terminals list, the tab bar and
+    /// the viewer header. With several conversations going at once that was the
+    /// whole window redrawing continuously for a character nobody can follow,
+    /// and it got worse with every tab left running.
+    ///
+    /// So the two halves are separated. What a name *means* is read straight
+    /// away — `isWorking` is what puts a banner up when a turn ends, and it
+    /// only changes at the two ends of one, so writing it on the change alone
+    /// costs nothing. The text itself is published on a slow tick, and the last
+    /// name of a burst is always published, so a tab never settles showing a
+    /// frame of the spinner.
+    private func titleArrived(_ title: String) {
+        // A program re-announcing the name it already has is not a rename.
+        guard title != latestTitle else { return }
+        latestTitle = title
+
+        let wasWorking = isWorking
+        let working = Self.readsAsBusy(title)
+        if working != wasWorking { isWorking = working }
+        titleChanges += 1
+        // `claude` renames the tab as it starts work on a prompt, which is
+        // exactly when a conversation that had no transcript may have got one —
+        // so a rename is the cue to go looking again.
+        watchForClaudeName()
+        // The spinner going away is the turn ending: whatever was being waited
+        // for is done, and the person who set it going is very likely somewhere
+        // else by now.
+        if wasWorking, !working {
+            raiseAttention("Finished — waiting for you")
+        }
+
+        guard titlePublish == nil else { return }
+        titlePublish = Task { [weak self] in
+            // `try?` here would swallow the cancellation and publish anyway,
+            // which is `terminate()` cancelling this and getting one last name
+            // written over the tab it is closing.
+            do { try await Task.sleep(for: Self.titleInterval) } catch { return }
+            guard let self else { return }
+            // Cleared before the write, so a rename arriving in the same turn
+            // starts the next wait rather than being dropped.
+            titlePublish = nil
+            if let latestTitle, latestTitle != self.title { self.title = latestTitle }
         }
     }
 
@@ -311,6 +355,8 @@ final class TerminalSession: Identifiable {
         isWorking = false
         nameWatch?.cancel()
         nameWatch = nil
+        titlePublish?.cancel()
+        titlePublish = nil
         claudeStartupWatch?.cancel()
         claudeStartupWatch = nil
         view.close()

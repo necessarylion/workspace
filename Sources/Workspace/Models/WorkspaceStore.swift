@@ -426,12 +426,54 @@ final class WorkspaceStore {
 
     /// Reads every repository again. `quietly` is the sweep on a clock: the same
     /// reads, with no spinner put up for them — see `Project.refresh`.
+    ///
+    /// **A few at a time.** One read is a handful of processes — `git status`,
+    /// `git log`, `gh pr list` — and starting one task per repository meant a
+    /// sidebar of a dozen fired forty-odd of them at once, every five minutes.
+    /// They land on the cooperative pool, which has a thread per core, so the
+    /// sweep was a hitch across the whole window rather than work happening
+    /// behind it. The numbers are no less fresh for arriving a second later.
     func refreshAll(quietly: Bool = false) {
         lastAutoRefresh = Date()
-        for project in projects {
-            Task { await project.refresh(quietly: quietly) }
+        let due = projects
+        // Cancelled *and waited for*. Cancellation here only stops the sweep
+        // adding more repositories: `Project.refresh` checks nothing, so the
+        // ones already in flight run their `git` and `gh` to the end whatever
+        // this says. Starting the replacement on top of them would put twice
+        // the width on the pool and read those repositories twice, which is
+        // the doubling this whole task was added to stop.
+        let previous = refreshSweep
+        previous?.cancel()
+        refreshSweep = Task {
+            await previous?.value
+            // A third sweep may have arrived while this one waited, and it is
+            // the newer answer.
+            guard !Task.isCancelled else { return }
+            await withTaskGroup(of: Void.self) { group in
+                var next = due.makeIterator()
+                var running = 0
+                while running < Self.refreshWidth, let project = next.next() {
+                    group.addTask { await project.refresh(quietly: quietly) }
+                    running += 1
+                }
+                // One in, one out: the group never holds more than the width.
+                while await group.next() != nil {
+                    guard !Task.isCancelled, let project = next.next() else { continue }
+                    group.addTask { await project.refresh(quietly: quietly) }
+                }
+            }
         }
     }
+
+    /// How many repositories are read at once. Three keeps the sweep off the
+    /// pool's last threads on a four-core machine while still being several
+    /// times faster than reading them one after another.
+    private static let refreshWidth = 3
+
+    /// The sweep in flight, so a second one replaces it rather than doubling
+    /// up — a hand refresh landing on top of the five-minute tick used to run
+    /// every repository twice. Replacing means waiting for it; see `refreshAll`.
+    @ObservationIgnored private var refreshSweep: Task<Void, Never>?
 
     // MARK: - Refreshing on a clock
 
@@ -468,15 +510,31 @@ final class WorkspaceStore {
         startReloadingOnReturningToFront()
 
         autoRefreshTask = Task { [weak self] in
-            // The loop runs a minute at a time and decides by the clock, so a
-            // sweep the user asked for by hand pushes the next one out too.
+            // The loop decides by the clock rather than by its own rhythm, so a
+            // sweep the user asked for by hand pushes the next one out too — it
+            // sleeps for whatever is left of the interval rather than waking
+            // every minute to work out that there is nothing to do yet.
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(60))
-                guard !Task.isCancelled, let self else { return }
-                let due = Date().timeIntervalSince(lastAutoRefresh) >= Self.autoRefreshInterval
-                guard due || missedAutoRefresh else { continue }
+                guard let self else { return }
+                let waited = Date().timeIntervalSince(lastAutoRefresh)
+                // A second short is due: without the slack, a sleep that lands
+                // a hair early goes round again for a fraction of a second.
+                let remaining = Self.autoRefreshInterval - waited - 1
+                if remaining > 0, !missedAutoRefresh {
+                    try? await Task.sleep(for: .seconds(remaining))
+                    guard !Task.isCancelled else { return }
+                    // The clock is asked again rather than trusted: a hand
+                    // refresh during the sleep moved the deadline, and the Mac
+                    // waking from sleep moved it the other way.
+                    continue
+                }
                 guard NSApp.isActive else {
+                    // Behind something else: nothing goes out, and the one tick
+                    // it owes is paid when the app comes back — checked a
+                    // minute at a time, which is cheap next to a sweep.
                     missedAutoRefresh = true
+                    try? await Task.sleep(for: .seconds(60))
+                    guard !Task.isCancelled else { return }
                     continue
                 }
                 missedAutoRefresh = false

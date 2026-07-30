@@ -63,7 +63,7 @@ final class LanguageServerRegistry {
         guard let entry = catalog.entry(forFile: url) ?? catalog.entry(for: language) else { return nil }
         let key = Self.key(root: root, language: entry.language)
         if let existing = services[key] { return existing }
-        let service = LanguageService(definition: Self.definition(for: entry), root: root)
+        let service = makeService(Self.definition(for: entry), root: root)
         services[key] = service
         return service
     }
@@ -140,7 +140,7 @@ final class LanguageServerRegistry {
 
             let key = Self.key(root: root, language: entry.language)
             let service = services[key]
-                ?? LanguageService(definition: Self.definition(for: entry), root: root)
+                ?? makeService(Self.definition(for: entry), root: root)
             services[key] = service
             // Deliberately not awaited in turn: sourcekit-lsp can spend the
             // best part of a minute on its handshake, and the servers behind it
@@ -163,7 +163,7 @@ final class LanguageServerRegistry {
         }) else { return nil }
         let key = Self.key(root: root, language: entry.language)
         if let existing = services[key] { return existing }
-        let service = LanguageService(definition: Self.definition(for: entry), root: root)
+        let service = makeService(Self.definition(for: entry), root: root)
         services[key] = service
         return service
     }
@@ -215,6 +215,67 @@ final class LanguageServerRegistry {
             service.shutdown()
             services[key] = nil
         }
+    }
+
+    // MARK: - Letting idle servers go
+
+    /// How long a server may hold no documents before it is stopped.
+    ///
+    /// Nothing used to stop one short of removing its repository from the
+    /// sidebar, and a server is not a cheap thing to leave sitting there: the
+    /// node ones are a few hundred megabytes each, sourcekit-lsp rather more,
+    /// and a repository prewarms up to ``prewarmLimit`` of them the first time
+    /// its dashboard is looked at. A working day across eight repositories left
+    /// every server of all eight resident, which is the machine slowing down
+    /// rather than the app — but it is the app that is blamed for it.
+    ///
+    /// Long enough that reading two files in a language with a break between
+    /// them does not pay the handshake twice, and reading one file in a
+    /// repository visited by accident does not hold a server all afternoon.
+    private static let idleLimit: TimeInterval = 15 * 60
+
+    /// The one wait in flight. There is no sweep on a clock: a server can only
+    /// become idle by having its last document closed, so the wait is put on
+    /// when that happens and taken off when it is served.
+    @ObservationIgnored private var idleSweep: Task<Void, Never>?
+
+    /// Every service is made here, so every one of them reports going idle.
+    private func makeService(_ definition: LanguageServerDefinition, root: URL) -> LanguageService {
+        let service = LanguageService(definition: definition, root: root)
+        service.onIdle = { [weak self] in self?.scheduleIdleSweep() }
+        return service
+    }
+
+    private func scheduleIdleSweep(in delay: TimeInterval = LanguageServerRegistry.idleLimit) {
+        guard idleSweep == nil else { return }
+        idleSweep = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self else { return }
+            shutdownIdleServices()
+        }
+    }
+
+    /// Stops everything that has been idle long enough, and puts the wait back
+    /// on for whatever is idle but not yet due.
+    private func shutdownIdleServices() {
+        idleSweep = nil
+        let now = Date()
+        var soonest: TimeInterval?
+
+        for (key, service) in services {
+            guard let idleSince = service.idleSince else { continue }
+            let idle = now.timeIntervalSince(idleSince)
+            if idle >= Self.idleLimit {
+                service.shutdown()
+                services[key] = nil
+            } else {
+                soonest = min(soonest ?? .greatestFiniteMagnitude, Self.idleLimit - idle)
+            }
+        }
+
+        // A server that went idle while this wait was running has its own left
+        // to serve; scheduling for the nearest keeps one wait for all of them.
+        if let soonest { scheduleIdleSweep(in: soonest) }
     }
 
     private static func key(root: URL, language: String) -> String {
