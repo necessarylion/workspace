@@ -42,7 +42,7 @@ than code of ours:
 | Rules only match `---` and `***` | `___`, `----` and `- - -` all give `ThematicBreak` |
 | Indented code blocks are prose | `CodeBlock language: none` |
 | Reference-style links stay literal | resolved to a `Link` with its destination; the `[ref]: …` line disappears |
-| Table alignment is dropped | `columnAlignments: |l|c|r|` |
+| Table alignment is dropped | `columnAlignments: \|l\|c\|r\|` |
 | A fence inside a list item is hoisted out | nested, as written |
 | Checklists are not clickable | every node carries a **source range** (line:column) |
 | No outline for long documents | `Heading` nodes, each with a range |

@@ -382,8 +382,17 @@ struct ViewerView: View {
                     MarkdownPreview(
                         text: document.text,
                         baseURL: document.url,
-                        links: MarkdownLinks(remote: store.selectedProject?.remote),
-                        onToggleTask: MarkdownTaskToggle(target: document.url.path) { line, isDone in
+                        // The repository the file is *in*, not the one selected
+                        // in the sidebar: with more than one open, a `#123` in
+                        // a file from another checkout would otherwise point at
+                        // the selected repository's pull request.
+                        links: MarkdownLinks(
+                            remote: (store.project(containing: document.url) ?? store.selectedProject)?.remote
+                        ),
+                        onToggleTask: MarkdownTaskToggle(
+                            target: document.url.path,
+                            content: document.text
+                        ) { line, isDone in
                             // The edit lands in the document, not on disk: a
                             // tick is an edit like any other here, so the tab
                             // marks it unsaved and ⌘S writes it. Auto-saving

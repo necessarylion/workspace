@@ -165,6 +165,12 @@ struct MarkdownImage: View {
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))
                 .contentShape(RoundedRectangle(cornerRadius: 6))
                 .accessibilityLabel(alt.isEmpty ? "Image" : alt)
+                // `onTapGesture` is a pointer and nothing else: without these
+                // the picture is announced as a picture and there is no way to
+                // open it but a mouse.
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("Opens this picture at full size")
+                .accessibilityAction { isZoomed = true }
                 // A wide screenshot in a pull request is capped at 420pt tall
                 // and can only be squinted at, so a click opens it at its own
                 // size rather than handing it to the browser. The browser is

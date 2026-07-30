@@ -179,7 +179,15 @@ private struct Builder {
                     // which is what lets a tick be written back to the right
                     // `[ ]`, and the reason comments are dropped from the tree
                     // rather than cut out of the text beforehand.
-                    line: item.range?.lowerBound.line,
+                    //
+                    // Nothing at all below the top level, and that is not a
+                    // nicety: `depth` counts the loose HTML re-read as a
+                    // document of its own, and cmark numbers *that* document
+                    // from its own first line. A box in there would name a line
+                    // in the snippet and a tick would be written over whatever
+                    // happens to sit on that line of the real one. Undrawable
+                    // is the right answer; corrupting the document is not.
+                    line: depth == 0 ? item.range?.lowerBound.line : nil,
                     blocks: blocks(of: item)
                 )
             )

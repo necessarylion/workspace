@@ -102,7 +102,7 @@ The app is one window with three panes, and the mental model that drives the cod
     `Support/MarkdownHTMLText.swift` reads one raw block into events and
     `ContainerStack` in the parser keeps the stack. It is not an HTML parser: an
     unknown tag is dropped and its text kept, `<!-- … -->` goes nowhere, and
-    `<table>` is read only in its plain shape.
+    only the plain shape of a `<table>` is read.
   - Comments are dropped **from the tree, not from the text**, because every
     node carries a 1-based source line and that is what a tickable checkbox
     writes back to (`MarkdownTask.toggling`). Cutting lines out beforehand would

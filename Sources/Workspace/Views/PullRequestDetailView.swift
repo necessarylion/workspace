@@ -688,7 +688,16 @@ struct PullRequestDetailView: View {
                         MarkdownText(text: pr.body)
                             .environment(
                                 \.markdownTaskToggle,
-                                MarkdownTaskToggle(target: "pr-\(pr.number)-description", perform: toggleDescriptionTask)
+                                MarkdownTaskToggle(
+                                    target: "pr-\(pr.number)-description",
+                                    // The action below asks the host for the
+                                    // description when it runs, so nothing
+                                    // stale can be captured — but the body is
+                                    // still what it was built for, and saying
+                                    // so keeps every one of these honest.
+                                    content: pr.body,
+                                    perform: toggleDescriptionTask
+                                )
                             )
                             .font(.callout)
                             .transition(ViewerMotion.contentArrival)
@@ -2386,12 +2395,12 @@ struct CommentBubble: View {
     /// a bot's review, and everyone else's words.
     private var taskToggle: MarkdownTaskToggle? {
         guard let onEditSubmitted else { return nil }
-        return MarkdownTaskToggle(target: "comment-\(comment.id)") { line, isDone in
-            guard let updated = MarkdownTask.toggling(
-                line: line,
-                to: isDone,
-                in: comment.editableBody
-            ) else { return }
+        let body = comment.editableBody
+        // `content` is that same body, so that ticking a second box after the
+        // conversation has come back from the host builds its answer on what
+        // the host now holds rather than on what this closure captured.
+        return MarkdownTaskToggle(target: "comment-\(comment.id)", content: body) { line, isDone in
+            guard let updated = MarkdownTask.toggling(line: line, to: isDone, in: body) else { return }
             Task { await onEditSubmitted(updated) }
         }
     }

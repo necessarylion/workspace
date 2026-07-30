@@ -856,9 +856,23 @@ private struct MarkdownLinksKey: EnvironmentKey {
 /// closure was made this time round.
 struct MarkdownTaskToggle: Equatable {
     let target: String
+    /// The text this action was built against.
+    ///
+    /// It is here because `target` alone is *too* stable. An action that reads
+    /// its source when it runs would need nothing else — but a comment's does
+    /// not: the words it flips are a `String` captured when the closure was
+    /// made. Equal on `target` alone, the first action would be kept for as
+    /// long as the comment kept its id, so a second tick would be computed
+    /// against the body from before the first one and posted back over it.
+    /// Comparing the content is what retires the stale closure, and it costs
+    /// nothing in the ordinary case: the same string, so `==` answers on the
+    /// pointer.
+    let content: String
     let perform: (Int, Bool) -> Void
 
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.target == rhs.target }
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.target == rhs.target && lhs.content == rhs.content
+    }
 }
 
 /// Nothing by default: a release note and a `<details>` section from a bot have

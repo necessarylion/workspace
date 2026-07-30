@@ -36,7 +36,7 @@ enum MarkdownInline {
                let end = addressEnd(in: text, from: index) {
                 let address = String(text[index..<end])
                 result += address.hasPrefix("w")
-                    ? "[\(escaping(address))](https://\(address))"
+                    ? "[\(escaping(address))](\(destination("https://\(address)")))"
                     : "<\(address)>"
                 index = end
                 continue

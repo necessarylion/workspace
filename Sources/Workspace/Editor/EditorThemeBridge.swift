@@ -26,9 +26,11 @@ extension SyntaxTheme {
     /// unrecognised list — `text.title`, `text.literal`, `text.uri`,
     /// `text.reference`, `punctuation.special`, `punctuation.delimiter`,
     /// `string.escape` — so every range is dropped and a `.md` file in the editor
-    /// paints in one flat colour. It is not broken, it is this list; the preview
-    /// (⌘-toggled, and the way a `.md` file is meant to be read here) colours the
-    /// same file properly because it goes through ``TreeSitterHighlighter``.
+    /// paints in one flat colour. It is not broken, it is this list; and the
+    /// preview (⌘-toggled, and the way a `.md` file is meant to be read here)
+    /// does not go through any of this — `MarkdownParser` reads the document and
+    /// `MarkdownText` draws it, with ``TreeSitterHighlighter`` reaching only as
+    /// far as the snippet inside a fence.
     ///
     /// Fixing it would mean rewriting the vendored markdown queries onto the
     /// names the package knows, which loses the bold heading and the italic

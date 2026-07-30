@@ -191,9 +191,18 @@ enum MarkdownHTMLText {
             }
         }
 
+        // An empty `<tr></tr>` carries nothing and would draw as a blank
+        // stripe — but dropping one renumbers every row after it, so where the
+        // header sits is corrected in the same breath. Read out of the old
+        // numbering afterwards it is off by the empties above it, and a table
+        // whose only rows are an empty one and a header takes the array out of
+        // range altogether.
+        let named = headerRow ?? 0
+        guard named < rows.count else { return nil }
+        let position = named - rows[..<named].filter(\.isEmpty).count
         rows.removeAll { $0.isEmpty }
-        guard !rows.isEmpty else { return nil }
-        let headers = rows.remove(at: headerRow ?? 0)
+        guard position < rows.count else { return nil }
+        let headers = rows.remove(at: position)
         let width = max(headers.count, rows.map(\.count).max() ?? 0)
         return (
             headers: headers + Array(repeating: "", count: width - headers.count),
