@@ -39,9 +39,32 @@ final class LanguageService {
     /// coordinator to decide whether it may send ranges or must send the file.
     private(set) var syncKind: LSP.SyncKind = .full
 
+    /// Since when this server has been holding no documents at all, or nil
+    /// while it is holding one.
+    ///
+    /// A language server is an expensive thing to leave running — a few hundred
+    /// megabytes each for the node ones, more for sourcekit-lsp — and nothing
+    /// used to stop one until the repository it belongs to was removed from the
+    /// sidebar. A day of looking at eight repositories left every server of all
+    /// eight resident. ``LanguageServerRegistry`` reads this and stops the ones
+    /// that have been idle long enough; opening a file in that language starts
+    /// a fresh one, which is what already happens the first time.
+    private(set) var idleSince: Date? {
+        didSet { if idleSince != nil { onIdle?() } }
+    }
+
+    /// Told when this server stops holding documents, so the registry can put
+    /// a wait on it rather than sweeping every server on a clock.
+    @ObservationIgnored var onIdle: (() -> Void)?
+
     @ObservationIgnored private let connection: LSPConnection
     @ObservationIgnored private var versions: [String: Int] = [:]
-    @ObservationIgnored private var openCount: [String: Int] = [:]
+    @ObservationIgnored private var openCount: [String: Int] = [:] {
+        didSet {
+            guard openCount.isEmpty != oldValue.isEmpty else { return }
+            idleSince = openCount.isEmpty ? Date() : nil
+        }
+    }
     @ObservationIgnored private var diagnosticObservers: [ObjectIdentifier: (String, [LSP.Diagnostic]) -> Void] = [:]
     @ObservationIgnored private var startTask: Task<Bool, Never>?
     @ObservationIgnored private var settings: LSP.Value?
@@ -121,6 +144,9 @@ final class LanguageService {
                     )
                 }
                 status = .running
+                // A prewarmed server holds nothing yet, so its idle clock
+                // starts here. `open` clears it the moment a file arrives.
+                if openCount.isEmpty, idleSince == nil { idleSince = Date() }
                 return true
             } catch {
                 status = .failed(error.localizedDescription)
@@ -134,8 +160,18 @@ final class LanguageService {
     }
 
     func shutdown() {
+        // Before the resets below, so emptying the documents does not report a
+        // server that is going away as one that has just gone idle.
+        onIdle = nil
         Task { await connection.stop() }
         status = .notStarted
+        // The handshake is what `startIfNeeded` remembers; without this a
+        // service stopped for being idle could never be started again.
+        startTask = nil
+        openCount = [:]
+        versions = [:]
+        diagnostics = [:]
+        idleSince = nil
     }
 
     // MARK: - Document sync

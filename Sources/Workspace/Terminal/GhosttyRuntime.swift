@@ -45,8 +45,17 @@ final class GhosttyRuntime {
         runtime.userdata = nil
         runtime.supports_selection_clipboard = false
 
+        // Ghostty wakes us whenever it has work, which under a program painting
+        // at frame rate is many times per frame. One tick answers all of them,
+        // so only the first wakeup of a batch pays for a hop.
         runtime.wakeup_cb = { _ in
-            Task { @MainActor in GhosttyRuntime.shared.tick() }
+            guard GhosttyRuntime.pendingTick.claim() else { return }
+            Task { @MainActor in
+                // Cleared first: a wakeup arriving during the tick is about
+                // work this tick has not seen, and has to schedule its own.
+                GhosttyRuntime.pendingTick.clear()
+                GhosttyRuntime.shared.tick()
+            }
         }
 
         runtime.action_cb = { _, target, action in
@@ -214,8 +223,18 @@ final class GhosttyRuntime {
         let surfaceBits = Int(bitPattern: surface)
 
         switch action.tag {
+        // Gathered rather than hopped one at a time; see ``pendingRenders``.
         case GHOSTTY_ACTION_RENDER:
-            onView(surfaceBits) { view in view.needsDisplay = true }
+            guard pendingRenders.add(surfaceBits) else { return true }
+            Task { @MainActor in
+                for bits in pendingRenders.drain() {
+                    guard let surface = UnsafeMutableRawPointer(bitPattern: bits),
+                          let userdata = ghostty_surface_userdata(surface) else { continue }
+                    Unmanaged<GhosttySurfaceView>.fromOpaque(userdata)
+                        .takeUnretainedValue()
+                        .needsDisplay = true
+                }
+            }
             return true
 
         case GHOSTTY_ACTION_SET_TITLE:
@@ -273,6 +292,21 @@ final class GhosttyRuntime {
         }
     }
 
+    // MARK: - Coalescing
+
+    /// The surfaces waiting to be marked for redraw.
+    ///
+    /// Ghostty asks to render whenever a surface is dirty, and a shell running
+    /// a spinner — every `claude` mid-turn — is dirty every frame, whether or
+    /// not anyone has that tab on screen. A hop per request meant the cost of
+    /// a window grew with each terminal left running in it, which is the shape
+    /// of an app that gets slower the longer it is open. The requests are
+    /// gathered on ghostty's own thread instead, and one hop marks everything
+    /// that arrived while it was waiting its turn.
+    private nonisolated static let pendingRenders = RenderQueue()
+    /// The same for `wakeup_cb`, which has nothing to gather.
+    private nonisolated static let pendingTick = Latch()
+
     /// Finds the view that owns a surface and runs `body` on the main actor.
     private nonisolated static func onView(
         _ surfaceBits: Int,
@@ -283,5 +317,61 @@ final class GhosttyRuntime {
                   let userdata = ghostty_surface_userdata(surface) else { return }
             body(Unmanaged<GhosttySurfaceView>.fromOpaque(userdata).takeUnretainedValue())
         }
+    }
+}
+
+/// A one-shot flag shared across threads: the first caller to ``claim`` owes
+/// the main-actor hop, and everyone arriving behind it is already covered by
+/// the hop that one is about to make.
+private final class Latch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isSet = false
+
+    /// True when this caller is the one that has to schedule the work.
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isSet else { return false }
+        isSet = true
+        return true
+    }
+
+    /// Called at the *start* of the scheduled work, so anything arriving while
+    /// it runs schedules a fresh pass rather than being swallowed by this one.
+    func clear() {
+        lock.lock()
+        isSet = false
+        lock.unlock()
+    }
+}
+
+/// The surfaces that have asked to be redrawn since the last drain, and one
+/// latch saying whether a drain is already on its way.
+private final class RenderQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: Set<Int> = []
+    private var isScheduled = false
+
+    /// Records a surface, and returns true only for the request that has to
+    /// schedule the drain.
+    func add(_ surfaceBits: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        pending.insert(surfaceBits)
+        guard !isScheduled else { return false }
+        isScheduled = true
+        return true
+    }
+
+    /// Everything that arrived since the last drain. Taking the batch and
+    /// releasing the latch is one step, so a request landing mid-drain is
+    /// either in this batch or schedules the next one — never neither.
+    func drain() -> Set<Int> {
+        lock.lock()
+        defer { lock.unlock() }
+        isScheduled = false
+        let batch = pending
+        pending.removeAll(keepingCapacity: true)
+        return batch
     }
 }

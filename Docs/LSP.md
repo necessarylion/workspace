@@ -21,7 +21,8 @@ conversation with the server, and the join between the two.
   language. Owns the handshake, the open-document set and the version counters.
 - **`LSP/LanguageServerRegistry.swift`** — language → binary, one server per
   (root, language), started lazily the first time a matching file is opened and
-  prewarmed from the dashboard.
+  prewarmed from the dashboard. It is also what stops one again: see
+  **Servers do not stay forever** below.
 - **`LSP/LanguageServerConfiguration.swift`**, **`LanguageServerOptions.swift`**,
   **`ManagedLanguageServers.swift`** — which servers exist, their flags, and the
   ones the app can fetch for you.
@@ -137,6 +138,17 @@ been fine; they were not why.
 
 ## Also worth knowing
 
+- **Servers do not stay forever.** A server holding no documents for fifteen
+  minutes is shut down and forgotten by the registry — the node ones are a few
+  hundred megabytes each, sourcekit-lsp rather more, and a dashboard prewarms up
+  to `prewarmLimit` of them before a single file has been opened. Nothing used
+  to stop one short of removing its repository from the sidebar, so a day across
+  eight repositories left every server of all eight resident. `LanguageService`
+  records `idleSince` when its open-document count reaches zero and tells the
+  registry; there is no sweep on a clock, because a server can only become idle
+  at the moment its last document closes. Opening a file in that language starts
+  a fresh one, which is what already happens the first time — `shutdown()`
+  clears the remembered handshake so it can.
 - **Large files are excluded on purpose.** See `OpenDocument.largeFileNote`.
   `didOpen` sends the whole text, and the answer to a 3.5 MB minified bundle is a
   diagnostic per line of something nobody is editing. No coordinator is even

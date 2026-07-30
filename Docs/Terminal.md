@@ -45,6 +45,24 @@ sixteen ANSI slots a terminal needs.
 
 ## Gotchas learned the hard way
 
+- **Ghostty's callbacks arrive at frame rate, and a hop each is too many.** A
+  shell painting a spinner — every `claude` mid-turn — asks to render every
+  frame whether or not anyone is looking at that tab, and wakes the app several
+  times per frame besides. One `Task { @MainActor … }` per request meant the
+  cost of a window grew with each terminal left running in it. Both are gathered
+  on ghostty's own thread instead (`RenderQueue`, `Latch` at the foot of
+  `GhosttyRuntime.swift`), and one hop serves everything that arrived while it
+  was waiting its turn. The latch is cleared at the *start* of the scheduled
+  work, so a request landing mid-drain schedules the next pass rather than being
+  swallowed by this one.
+- **A tab title is not published on every rename, for the same reason.** `claude`
+  paints its spinner into the OSC title, and each name used to be a write to an
+  observable property — which redraws the terminals list, the tab bar and the
+  viewer header. `TerminalSession.titleArrived` splits what a name *means* from
+  the text of it: `isWorking` (what raises the "finished" banner) is read at
+  once and only written when it changes, while the text lands on a 200 ms tick.
+  The last name of a burst is always published, so a tab never settles showing
+  half a spinner.
 - `ghostty_surface_text` is a **paste** (`completeClipboardPaste` in core).
   Under bracketed paste, a pasted `\n` never executes a command — that is why
   `TerminalSession.send` turns a trailing newline into `pressEnter()`, a

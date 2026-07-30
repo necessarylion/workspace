@@ -260,6 +260,15 @@ struct ViewerView: View {
             ? (item.selectedTerminal?.displayTitle ?? item.title)
             : item.title
 
+        // A shell is named twice over: what the program inside it calls itself,
+        // and the repository it is rooted in. Everywhere else the first of those
+        // is the thing being read, so it gets the weight — but a terminal's own
+        // name is whatever `claude` or a prompt last renamed the tab to, which
+        // is a spinner frame as often as it is a word, while the repository is
+        // what tells three open shells apart at a glance. So for a terminal the
+        // two keep their places and trade their emphasis.
+        let namesRepositoryFirst = item.isTerminal
+
         return HStack(spacing: 7) {
             // A commit is one person's work, so the face says more than the
             // glyph every other kind of item gets.
@@ -273,14 +282,16 @@ struct ViewerView: View {
                     .font(.caption)
             }
             Text(title)
-                .font(.callout.weight(.medium))
+                .font(namesRepositoryFirst ? .caption : .callout.weight(.medium))
+                .foregroundStyle(namesRepositoryFirst ? .tertiary : .primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
             if let subtitle = item.subtitle {
                 Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .font(namesRepositoryFirst ? .callout.weight(.medium) : .caption)
+                    .foregroundStyle(namesRepositoryFirst ? .primary : .tertiary)
                     .lineLimit(1)
+                    .truncationMode(.middle)
             }
             if item.isDirty {
                 Circle().fill(.orange).frame(width: 6, height: 6)

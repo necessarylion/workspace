@@ -163,9 +163,21 @@ struct PullRequestDetailView: View {
             await store.loadBuilds(item, project: project, pr: pr)
         }
 
+        // How many reads this loop has made of the runs it is watching now, and
+        // which those are. A new run appearing — a push, a re-run — starts the
+        // count again, so it is always watched closely at first.
+        var rounds = 0
+        var watching: Set<String> = []
+
         while !Task.isCancelled {
+            let unsettled = Set(item.builds.filter { !$0.state.isSettled }.map(\.id))
+            if unsettled != watching {
+                watching = unsettled
+                rounds = 0
+            }
+
             do {
-                try await Task.sleep(for: .seconds(10))
+                try await Task.sleep(for: Self.buildInterval(round: rounds, unsettled: unsettled.count))
             } catch {
                 return
             }
@@ -174,6 +186,32 @@ struct PullRequestDetailView: View {
             // tick tries again.
             guard NSApplication.shared.isActive, !item.isLoadingBuilds else { continue }
             await store.refreshBuilds(item, project: project, pr: pr)
+            rounds += 1
+        }
+    }
+
+    /// How long to wait before reading the runs again.
+    ///
+    /// A run still going is the thing the person is sitting here for, so the
+    /// first minute is read every ten seconds and it eases off from there: a
+    /// build that takes half an hour does not need a hundred and eighty reads
+    /// of it, and each one is a `gh` or `bkt` process.
+    ///
+    /// Once every run has its verdict there is no news left but a push, and
+    /// this loop used to keep asking every ten seconds anyway, for as long as
+    /// the pull request stayed on screen — a pull request left open for a
+    /// working day was thousands of calls to the host for an answer that
+    /// stopped changing in the first three minutes. So a settled pull request
+    /// drops to the slow tick, which is there to notice a run that appears
+    /// rather than one that changes. The count restarts the moment one does.
+    private static func buildInterval(round: Int, unsettled: Int) -> Duration {
+        // Nothing running: only a push can change this, and that is the kind of
+        // thing the sidebar's five-minute sweep is paced for.
+        guard unsettled > 0 else { return .seconds(round < 6 ? 30 : 300) }
+        switch round {
+        case ..<6: return .seconds(10)
+        case ..<12: return .seconds(30)
+        default: return .seconds(60)
         }
     }
 
