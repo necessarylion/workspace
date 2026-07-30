@@ -115,6 +115,7 @@ missing ones, so you never have to work out which command it wanted.
 | Feature | What it does |
 | --- | --- |
 | Real editing | Tree-sitter colours, folding, multiple cursors, find and replace (⌘F), auto-indent. |
+| Wrap or don't | ⌥Z folds a long line into the pane, or lets it run off the edge and scroll sideways. |
 | Change markers | What has changed since HEAD, down the edge of the gutter — green where lines were added, yellow where they were changed, and a red wedge where they were deleted. |
 | Language servers | Diagnostics, completions (⌃Space) and ⌘-click to definition for 20+ languages. |
 | Go to file (⌘P) | `item controller` finds `app/controllers/item_controller.rb`. Punctuation optional. |
@@ -170,6 +171,7 @@ everything macOS binds) are not on offer there.
 | ⇧⌘O | Add a repository folder you already have |
 | ⌘P | Go to file |
 | ⌘F | Find in the file |
+| ⌥Z | Wrap long lines, and the same key back to scrolling sideways |
 | ⌘S | Save the file — or the PR description — you are editing |
 | ⇧⌘E | Save the Markdown preview as a PDF |
 | ⌘[ / ⌘] | Back / forward |
