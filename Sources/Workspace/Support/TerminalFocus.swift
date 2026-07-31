@@ -59,7 +59,14 @@ enum TerminalFocus {
 
     /// Whether the keys are going into a terminal right now.
     static func isHeldByTerminal(in window: NSWindow) -> Bool {
-        surface(enclosing: window.firstResponder as? NSView) != nil
+        focused(in: window) != nil
+    }
+
+    /// The terminal the keys are going into right now, if they are going into
+    /// one. What a key meant for a *conversation* — rather than for the window —
+    /// is recognised by: the panel it belongs to is the one holding this surface.
+    static func focused(in window: NSWindow) -> GhosttySurfaceView? {
+        surface(enclosing: window.firstResponder as? NSView)
     }
 
     /// The terminal a point in the window lands in, if it lands in one.
