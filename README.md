@@ -144,6 +144,7 @@ missing ones, so you never have to work out which command it wanted.
 | --- | --- |
 | A real terminal | The Ghostty engine, rooted at the repo. As many shells as you like. |
 | Ask Claude (⇧⌘L) | The real Claude Code CLI in a floating panel — every flag, slash command and plugin works. Drag it, size it from any edge or corner, or fold it down to a bar on the dock along the bottom of the editor. One click on the bar brings it straight back, with no wait: a folded conversation keeps its terminal. |
+| Park it (⇧⌘→) | While you are typing in a conversation, one key puts it back in the bottom-right corner of the editor, at the size you gave it. Anywhere else — the editor, a comment box — ⇧⌘→ still selects to the end of the line. |
 | Many at once | As many conversations as you like, each named after what it is about, all on screen together. Fold the ones you are not reading down to the dock; when there are more bars than the editor is wide, the dock scrolls sideways, and dragging a bar moves it along the row. |
 | Resume anything | Past conversations listed from disk — including ones you started in your own shell. |
 | It tells you | A Notification Centre banner when a shell wants you back; click it to land on that tab. |
@@ -185,6 +186,7 @@ everything macOS binds) are not on offer there.
 | ⌃⇥ | Switch repository |
 | ⌘R | Refresh all repositories |
 | ⇧⌘L | Ask Claude about the selected repo, in a panel over the window |
+| ⇧⌘→ | Park the conversation you are typing in, bottom-right of the editor |
 | ⌃⌘T / ⌘T / ⇧⌘T | Repo terminal · new tab · home terminal |
 | ⌃` | Show the repo's terminal, and the same key to leave it |
 | ⌃⌘P | Create PR with Claude Code |

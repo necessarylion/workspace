@@ -121,6 +121,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case openTerminal
     case newTerminalTab
     case newHomeTerminal
+    case parkChat
 
     case submit
 
@@ -145,6 +146,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .openTerminal: "Open Terminal"
         case .newTerminalTab: "New Terminal Tab"
         case .newHomeTerminal: "New Terminal in Home"
+        case .parkChat: "Park Conversation"
         case .submit: "Post / Commit"
         }
     }
@@ -169,6 +171,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .openTerminal: "Show the selected repository's terminal"
         case .newTerminalTab: "Another shell beside the current one"
         case .newHomeTerminal: "A shell that belongs to no repository"
+        case .parkChat: "Put the conversation you are typing in down in the bottom-right corner of the viewer"
         case .submit: "Post the comment you typed, or commit the staged files"
         }
     }
@@ -183,7 +186,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
             .editor
         case .goToFile, .goBack, .goForward:
             .go
-        case .askClaude, .toggleTerminal, .openTerminal, .newTerminalTab, .newHomeTerminal:
+        case .askClaude, .toggleTerminal, .openTerminal, .newTerminalTab, .newHomeTerminal, .parkChat:
             .terminal
         case .submit:
             .writing
@@ -212,6 +215,16 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .openTerminal: KeyChord("t", [.control, .command])
         case .newTerminalTab: KeyChord("t", [.command])
         case .newHomeTerminal: KeyChord("t", [.command, .shift])
+        // ⇧ is on it because ⌘→ alone is already spoken for: it is "end of
+        // line" in every text view on the Mac, and on a keyboard where the
+        // arrows double as ⌥→/⌘→ the system takes it first — an app that binds
+        // it is one whose key sometimes fires and sometimes does not. ⇧⌘→ is
+        // "select to end of line", which belongs to a *text view* rather than to
+        // the system, and that is why it is reachable here: this is not a menu
+        // item, so the monitor only takes it while a conversation has the
+        // keyboard (see ``ChatPanelOverlay``) and the editor, a comment box and
+        // a commit message all keep the selection.
+        case .parkChat: KeyChord.rightArrow([.command, .shift])
         case .submit: KeyChord.return([.command])
         }
     }
@@ -260,9 +273,15 @@ struct KeyChord: Hashable, Codable, Sendable {
     /// The placeholder written to disk for an action bound to nothing.
     static let unbound = KeyChord("", [])
 
-    /// The two keys the defaults use that type no character of their own.
+    /// The keys the defaults use that type no character of their own. An arrow
+    /// is one of AppKit's private-use codes rather than a character, which is
+    /// exactly what `charactersIgnoringModifiers` reports for it — so a recorded
+    /// arrow and this one are the same string.
     static func tab(_ modifiers: KeyModifiers) -> KeyChord { KeyChord("\t", modifiers) }
     static func `return`(_ modifiers: KeyModifiers) -> KeyChord { KeyChord("\r", modifiers) }
+    static func rightArrow(_ modifiers: KeyModifiers) -> KeyChord {
+        KeyChord(character(NSRightArrowFunctionKey), modifiers)
+    }
 
     /// SwiftUI's side of it. Nil when the stored key is not a single character,
     /// which only a hand-edited preference could produce.

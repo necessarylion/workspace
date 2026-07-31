@@ -70,6 +70,10 @@ struct ChatPanelOverlay: View {
                         .map { ($0, store.chatPanelFrame(of: $0).onScreenRect) }
                 ) { store.raiseChatPanel($0) }
             )
+            // The keys the panels answer for, caught the way their clicks are
+            // and in the same file. See ``park(_:in:)`` for why this is a
+            // monitor and not a menu item.
+            .onWindowKeyEvent { event, window in park(event, in: window) }
             // The window's size, which is what a *floating* panel is placed and
             // clamped against — one is dragged by hand, and a window-like thing
             // you may not drop where you like is not one. A folded panel is held
@@ -81,6 +85,39 @@ struct ChatPanelOverlay: View {
             .onAppear { store.chatPanelsDidLayout(in: geometry.size) }
             .onChange(of: geometry.size) { _, size in store.chatPanelsDidLayout(in: size) }
         }
+    }
+
+    /// ⇧⌘→ by default: the conversation being typed in goes down to the
+    /// bottom-right corner of the centre pane. Returns true when it is taken.
+    ///
+    /// **Only while a conversation holds the keyboard**, which is the whole of
+    /// what makes an arrow safe to bind at all. ⇧⌘→ is "select to end of line"
+    /// in every text view on the Mac, and a menu key equivalent is dispatched
+    /// before the thing with focus ever sees the event — so as a menu item this
+    /// would take the key away from the editor, from a comment box and from a
+    /// commit message. A monitor can ask *who is typing* first, and hands the
+    /// event straight back when the answer is not a panel. (⌘→ without ⇧ was
+    /// the first default and is not bindable by anyone: the system answers it
+    /// before the app is asked.)
+    ///
+    /// A folded conversation cannot be the one holding the keyboard — folding
+    /// gives it up (see ``WorkspaceStore/collapseChatPanel(_:)``) — so nothing
+    /// here has to say what parking one would mean.
+    private func park(_ event: NSEvent, in window: NSWindow) -> Bool {
+        // The repository switcher takes the arrows for itself while its row is
+        // up, and it is another window monitor: which of the two sees a key
+        // first is AppKit's business, so this says out loud that the row wins
+        // rather than leaving it to the order they were installed in.
+        guard window.attachedSheet == nil, !store.isSwitchingProjects,
+              let chord = KeyboardShortcuts.shared.chord(for: .parkChat),
+              chord.matches(event),
+              let surface = TerminalFocus.focused(in: window),
+              // The centre pane's shell is a terminal with focus too, and it is
+              // not a panel: nothing of this is its business.
+              let panel = store.visibleChats.first(where: { $0.session.view === surface })
+        else { return false }
+        store.parkChatPanel(panel)
+        return true
     }
 }
 

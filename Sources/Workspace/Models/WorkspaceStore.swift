@@ -2652,6 +2652,29 @@ final class WorkspaceStore {
         panel.remember()
     }
 
+    /// Puts a conversation down in the bottom-right corner of the **centre
+    /// pane** — the corner a chat opens in, and the one part of the window
+    /// nothing is ever read in.
+    ///
+    /// The panel keeps its size: this is the panel being moved out of the way of
+    /// the code, not resized, and a reader who made theirs tall meant it. The
+    /// corner is the viewer's rather than the window's for the reason the dock's
+    /// is (see ``chatDockRegion``): the window's belongs to the navigator.
+    ///
+    /// Only ever asked for by hand — the key is caught while the conversation
+    /// has the keyboard — so a panel dragged somewhere on purpose stays there
+    /// until the reader says otherwise.
+    func parkChatPanel(_ panel: ChatPanel) {
+        let parked = panel.frame.parked(in: chatDockRegion, within: chatPanelBounds)
+        guard parked != panel.frame else { return }
+        withAnimation(Self.chatPanelMotion) {
+            panel.frame = parked
+        }
+        // The same corner next time, and next launch: parking one is as much a
+        // statement about where this repository's chat belongs as dragging it.
+        panel.remember()
+    }
+
     /// The overlay has been laid out: the window's size, and with it any panel
     /// the window just got too small for. A folded panel is clamped the same
     /// way, since what is being kept in bounds is where it will come *back* to;
@@ -3412,6 +3435,23 @@ struct ChatPanelFrame: Equatable, Codable {
         result.y = dockLine(in: region)
         result.isCollapsed = true
         return result
+    }
+
+    /// The same frame, moved down into the bottom-right corner of `region` —
+    /// the centre pane — with the app's usual gap left around it.
+    ///
+    /// The size is untouched. What is being asked for is the panel *out of the
+    /// way*, and a conversation that also changed shape on the way there would
+    /// have to be sized again every time.
+    ///
+    /// Clamped to the window like every other placement, which is what answers a
+    /// panel taller than the pane it is being put in: it lands on the corner it
+    /// can reach rather than half off the top of the window.
+    func parked(in region: CGRect, within bounds: CGSize) -> ChatPanelFrame {
+        var result = self
+        result.x = region.maxX - width - Self.margin
+        result.y = region.maxY - height - Self.margin
+        return result.clamped(to: bounds)
     }
 
     /// The frame a pull on one edge or corner leaves, with every edge that is
